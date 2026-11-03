@@ -1002,6 +1002,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn four_byte_char_cut_by_the_fetch_window_recovers_as_text() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+
+        let key = "value_rs_test:four_byte_fetch_cut";
+        // Diferença crucial para o teste anterior (`four_byte_cutoff_...`):
+        // lá o emoji começava em `max_bytes - 1` e cabia inteiro dentro de
+        // `fetch_len = max_bytes + UTF8_SLACK`, então `from_utf8` tinha
+        // sucesso direto (`Ok`) e quem fazia o trabalho era
+        // `char_boundary_prefix` recuando no limite de exibição — cobertura
+        // real, mas não a do branch de recuperação.
+        //
+        // Aqui o emoji começa exatamente em `max_bytes` (byte 10): a janela
+        // de BUSCA (`fetch_len = 10 + 3 = 13`) só alcança os 3 primeiros dos
+        // 4 bytes do emoji (bytes 10, 11, 12), faltando o byte 13. Isso faz
+        // `from_utf8(&prefix)` falhar com `valid_up_to() == 10`, batendo
+        // exatamente em `max_bytes.min(prefix.len()) == 10` — o caso em que
+        // o branch `Err(err) if err.valid_up_to() >= max_bytes.min(...)`
+        // (value.rs, dentro de `read_string`) precisa reconhecer que o
+        // valor É válido em UTF-8 até onde importa, e não classificá-lo como
+        // binário só porque a busca (não a exibição) cortou um caractere.
+        let value = format!("{}{}{}", "a".repeat(10), "😀", "a".repeat(20));
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg(&value)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let limit = ValueLimit {
+            max_bytes: 10,
+            ..ValueLimit::default()
+        };
+        let view = read_value(&pool, &host, None, host.db, key, limit).await;
+
+        del(&mut conn, &[key]).await;
+
+        let view = view.unwrap();
+
+        assert!(view.truncated);
+        match view.value {
+            Value::Str(bytes) => {
+                assert!(
+                    bytes.base64.is_none(),
+                    "corte na janela de busca não pode virar base64 — o valor é válido em UTF-8"
+                );
+                let text = bytes.text.expect(
+                    "corte do GETRANGE no meio do emoji não pode classificar o valor como binário",
+                );
+                assert!(
+                    text.len() <= limit.max_bytes,
+                    "texto devolvido deveria caber em max_bytes, veio {} bytes",
+                    text.len()
+                );
+                assert!(
+                    !text.contains('\u{FFFD}'),
+                    "texto não pode conter caractere de substituição (U+FFFD)"
+                );
+                assert_eq!(
+                    text,
+                    "a".repeat(10),
+                    "deveria mostrar só os 10 \"a\"s antes do emoji, sem fragmento dele"
+                );
+                assert!(bytes.truncated);
+            }
+            other => panic!("esperava Value::Str, veio {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn non_utf8_value_comes_back_as_base64() {
         let pool = Pool::new();
         let host = test_host();
