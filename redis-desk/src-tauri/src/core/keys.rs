@@ -48,8 +48,11 @@ impl KeyKind {
         )
     }
 
-    /// Mapeia o nome de tipo devolvido por `TYPE` para `KeyKind`.
-    fn from_type_name(name: &str) -> KeyKind {
+    /// Mapeia o nome de tipo devolvido por `TYPE` para `KeyKind`. `pub(crate)`
+    /// porque `core::value` (Task 4) também precisa desse mapeamento ao ler o
+    /// conteúdo de uma chave, e duplicá-lo lá divergiria da tabela aqui com o
+    /// tempo.
+    pub(crate) fn from_type_name(name: &str) -> KeyKind {
         match name {
             "string" => KeyKind::String,
             "hash" => KeyKind::Hash,

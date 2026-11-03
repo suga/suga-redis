@@ -2,3 +2,4 @@
 pub mod config;
 pub mod conn;
 pub mod keys;
+pub mod value;
