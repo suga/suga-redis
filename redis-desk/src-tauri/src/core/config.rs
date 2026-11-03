@@ -134,6 +134,11 @@ impl HostStore {
     }
 
     /// Remove um host e sua senha do chaveiro (se houver).
+    ///
+    /// A senha é apagada do chaveiro ANTES de o host sair de `self.hosts`:
+    /// se o chaveiro recusar a exclusão (ex.: o usuário nega o acesso num
+    /// prompt do SO), o host permanece tanto em memória quanto em
+    /// `hosts.json`, evitando divergência entre os dois.
     pub fn remove(&mut self, id: &str) -> Result<()> {
         let index = self
             .hosts
@@ -141,8 +146,8 @@ impl HostStore {
             .position(|h| h.id == id)
             .ok_or_else(|| ConfigError::HostNotFound(id.to_string()))?;
 
-        self.hosts.remove(index);
         self.delete_password(id)?;
+        self.hosts.remove(index);
         self.persist()
     }
 
@@ -284,6 +289,41 @@ mod tests {
 
         assert_eq!(store.list().len(), 0);
         assert_eq!(store.password(&id).unwrap(), None);
+    }
+
+    #[test]
+    fn remove_keeps_host_and_password_when_keyring_delete_fails() {
+        use_mock_keyring();
+        let dir = TempDir::new().unwrap();
+        let mut store = HostStore::open(dir.path()).unwrap();
+
+        let id = store.add(test_host(), Some("segredo")).unwrap();
+
+        // Força a próxima chamada ao chaveiro (o `delete_credential` dentro
+        // de `remove`) a falhar com um erro que não é `NoEntry` — simula,
+        // por exemplo, o usuário negando acesso num prompt do SO.
+        {
+            let entries = store.keyring_entries.borrow();
+            let entry = entries.get(&id).expect("add já deixou a entrada cacheada");
+            let mock: &keyring::mock::MockCredential = entry
+                .get_credential()
+                .downcast_ref()
+                .expect("backend mock está ativo nos testes");
+            mock.set_error(keyring::Error::Invalid(
+                "forced".to_string(),
+                "simulated keychain denial".to_string(),
+            ));
+        }
+
+        let result = store.remove(&id);
+        assert!(result.is_err());
+
+        // Como a exclusão no chaveiro falhou, o host e a senha devem
+        // continuar intactos — em memória e no arquivo.
+        let hosts = store.list();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(hosts[0].id, id);
+        assert_eq!(store.password(&id).unwrap(), Some("segredo".to_string()));
     }
 
     #[test]

@@ -22,9 +22,17 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-keyring = "3"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
+
+# `keyring` sem um backend de plataforma cai no mock (não persistente) por
+# padrão — inclusive em builds de release. Cada SO precisa do seu backend
+# nativo para a senha realmente ir para o chaveiro do sistema.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native-sync-persistent"] }
 
 [dev-dependencies]
 tempfile = "3"
