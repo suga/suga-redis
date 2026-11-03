@@ -87,21 +87,18 @@ pub async fn scan_all(
     pw: Option<&str>,
     db: u8,
 ) -> Result<Vec<KeyMeta>, ConnError> {
-    pool.with_retry(host, pw, move |mut conn| async move {
-        scan_once(&mut conn, db).await
+    pool.with_retry(host, db, pw, |mut conn| async move {
+        scan_once(&mut conn).await
     })
     .await
 }
 
-/// Faz uma tentativa completa de varredura sobre uma conexão já aberta:
-/// seleciona o banco, percorre o cursor do `SCAN` até voltar a `0` e depois
-/// busca os metadados de cada chave encontrada em lotes.
-async fn scan_once(conn: &mut MultiplexedConnection, db: u8) -> redis::RedisResult<Vec<KeyMeta>> {
-    redis::cmd("SELECT")
-        .arg(db)
-        .query_async::<()>(conn)
-        .await?;
-
+/// Faz uma tentativa completa de varredura sobre uma conexão já aberta no
+/// banco certo (a seleção de banco é responsabilidade de `Pool::get` —
+/// acontece uma vez, embutida na URL de conexão, não aqui): percorre o
+/// cursor do `SCAN` até voltar a `0` e depois busca os metadados de cada
+/// chave encontrada em lotes.
+async fn scan_once(conn: &mut MultiplexedConnection) -> redis::RedisResult<Vec<KeyMeta>> {
     let mut names: Vec<String> = Vec::new();
     let mut cursor: u64 = 0;
     loop {
@@ -394,7 +391,7 @@ mod tests {
     async fn scan_all_finds_every_type_with_ttl_and_size() {
         let pool = Pool::new();
         let host = test_host();
-        let mut conn = pool.get(&host, None).await.unwrap();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
 
         let prefix = "keys_rs_test:scan_all";
         let string_key = format!("{prefix}:string");
@@ -448,7 +445,11 @@ mod tests {
         // Limpa as chaves criadas antes de verificar o resultado, para não
         // deixar o db0 de teste sujo se a asserção falhar.
         for key in [&string_key, &hash_key, &list_key, &zset_key, &set_key] {
-            let _: () = redis::cmd("DEL").arg(key).query_async(&mut conn).await.unwrap();
+            let _: () = redis::cmd("DEL")
+                .arg(key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
         }
 
         let metas = result.unwrap();

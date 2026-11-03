@@ -1,7 +1,7 @@
-//! Pool de conexões Redis por host e as duas chamadas de metadados (ping e
-//! tamanho dos bancos) usadas pelo resto da aplicação. Toda conexão e toda
-//! resposta tem um timeout de 5 segundos: sem isso, uma VPN caindo no meio
-//! travaria a interface indefinidamente.
+//! Pool de conexões Redis por (host, banco) e as duas chamadas de metadados
+//! (ping e tamanho dos bancos) usadas pelo resto da aplicação. Toda conexão
+//! e toda resposta tem um timeout de 5 segundos: sem isso, uma VPN caindo
+//! no meio travaria a interface indefinidamente.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -36,10 +36,19 @@ pub enum ConnError {
 /// Resultado padrão das operações deste módulo.
 pub type Result<T> = std::result::Result<T, ConnError>;
 
-/// Pool de conexões multiplexadas, uma por host registrado. `get` abre a
+/// Pool de conexões multiplexadas, uma por (host, banco). `get` abre a
 /// conexão na primeira chamada e reaproveita a mesma depois disso.
+///
+/// A chave do cache é `(host.id, db)`, não só `host.id`: uma
+/// `MultiplexedConnection` é um único socket físico compartilhado por quem
+/// quer que a use, e qual banco está selecionado é estado desse socket
+/// (`SELECT`). Se duas chamadas lógicas quisessem bancos diferentes do
+/// mesmo host sobre a mesma conexão cacheada, um `SELECT` de uma
+/// interferiria na outra no meio de qualquer operação — a app varre bancos
+/// de 0 a 15 e várias tasks recebem `db` como parâmetro explícito, então
+/// isso não é hipotético.
 pub struct Pool {
-    connections: Mutex<HashMap<String, MultiplexedConnection>>,
+    connections: Mutex<HashMap<(String, u8), MultiplexedConnection>>,
     connection_timeout: Duration,
     response_timeout: Duration,
 }
@@ -68,30 +77,51 @@ impl Pool {
         }
     }
 
-    /// Devolve a conexão multiplexada do host, abrindo-a (e cacheando) se
-    /// ainda não existir uma.
-    pub async fn get(&self, host: &Host, password: Option<&str>) -> Result<MultiplexedConnection> {
-        if let Some(conn) = self.connections.lock().unwrap().get(&host.id) {
+    /// Devolve a conexão multiplexada do (host, banco), abrindo-a (e
+    /// cacheando) se ainda não existir uma. O `SELECT` desse banco acontece
+    /// uma vez, embutido na URL de conexão (ver `build_url`), no momento em
+    /// que a conexão é criada — não a cada operação.
+    pub async fn get(
+        &self,
+        host: &Host,
+        db: u8,
+        password: Option<&str>,
+    ) -> Result<MultiplexedConnection> {
+        let key = (host.id.clone(), db);
+        if let Some(conn) = self.connections.lock().unwrap().get(&key) {
             return Ok(conn.clone());
         }
 
-        let conn = self.connect(host, password).await?;
+        let conn = self.connect(host, db, password).await?;
 
         // Outra chamada concorrente pode ter aberto a conexão primeiro
         // enquanto esperávamos `connect`; nesse caso ficamos com a que já
-        // está no mapa, para que nunca haja duas conexões vivas por host.
+        // está no mapa, para que nunca haja duas conexões vivas por
+        // (host, banco).
         let mut connections = self.connections.lock().unwrap();
-        Ok(connections.entry(host.id.clone()).or_insert(conn).clone())
+        Ok(connections.entry(key).or_insert(conn).clone())
     }
 
-    /// Descarta a conexão cacheada do host (se houver), forçando uma nova
-    /// conexão na próxima chamada a `get`.
+    /// Descarta todas as conexões cacheadas do host (se houver, em
+    /// qualquer banco), forçando conexões novas na próxima chamada a
+    /// `get`. Evicta por host inteiro, não só o `(host, db)` que falhou,
+    /// porque a classificação de erro de conexão (`ConnError::Unreachable`)
+    /// normalmente indica que o socket caiu — e um socket é compartilhado
+    /// por todos os bancos abertos daquele host.
     pub fn drop_host(&self, id: &str) {
-        self.connections.lock().unwrap().remove(id);
+        self.connections
+            .lock()
+            .unwrap()
+            .retain(|(host_id, _db), _conn| host_id != id);
     }
 
-    async fn connect(&self, host: &Host, password: Option<&str>) -> Result<MultiplexedConnection> {
-        let url = build_url(host, password);
+    async fn connect(
+        &self,
+        host: &Host,
+        db: u8,
+        password: Option<&str>,
+    ) -> Result<MultiplexedConnection> {
+        let url = build_url(host, db, password);
         let client = Client::open(url).map_err(|err| classify(host, err))?;
 
         let config = AsyncConnectionConfig::new()
@@ -123,6 +153,7 @@ impl Pool {
     pub(crate) async fn with_retry<T, F, Fut>(
         &self,
         host: &Host,
+        db: u8,
         password: Option<&str>,
         operation: F,
     ) -> Result<T>
@@ -130,14 +161,14 @@ impl Pool {
         F: Fn(MultiplexedConnection) -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, redis::RedisError>>,
     {
-        let conn = self.get(host, password).await?;
+        let conn = self.get(host, db, password).await?;
 
         match operation(conn).await {
             Ok(value) => Ok(value),
             Err(err) => match classify(host, err) {
                 ConnError::Unreachable { .. } => {
                     self.drop_host(&host.id);
-                    let conn = self.get(host, password).await?;
+                    let conn = self.get(host, db, password).await?;
                     operation(conn).await.map_err(|err| classify(host, err))
                 }
                 classified => Err(classified),
@@ -145,25 +176,29 @@ impl Pool {
         }
     }
 
-    /// Roda um único comando no host, reaproveitando a conexão cacheada; a
-    /// lógica de resiliência (descartar e tentar de novo uma vez) fica em
-    /// `with_retry`.
+    /// Roda um único comando no (host, banco), reaproveitando a conexão
+    /// cacheada; a lógica de resiliência (descartar e tentar de novo uma
+    /// vez) fica em `with_retry`.
     async fn run<T: redis::FromRedisValue>(
         &self,
         host: &Host,
+        db: u8,
         password: Option<&str>,
         cmd: &redis::Cmd,
     ) -> Result<T> {
-        self.with_retry(host, password, move |mut conn| async move {
+        self.with_retry(host, db, password, move |mut conn| async move {
             cmd.query_async::<T>(&mut conn).await
         })
         .await
     }
 
-    /// Mede o tempo de ida e volta de um `PING` no host.
+    /// Mede o tempo de ida e volta de um `PING` no host, no banco padrão
+    /// dele (`host.db`) — `PING` não depende de banco, mas toda operação
+    /// passa por uma conexão de algum banco específico.
     pub async fn ping(&self, host: &Host, pw: Option<&str>) -> Result<Duration> {
         let start = Instant::now();
-        self.run::<String>(host, pw, &redis::cmd("PING")).await?;
+        self.run::<String>(host, host.db, pw, &redis::cmd("PING"))
+            .await?;
         Ok(start.elapsed())
     }
 
@@ -174,14 +209,16 @@ impl Pool {
         let mut cmd = redis::cmd("INFO");
         cmd.arg("keyspace");
 
-        let info: String = self.run(host, pw, &cmd).await?;
+        let info: String = self.run(host, host.db, pw, &cmd).await?;
         parse_keyspace(&info)
     }
 }
 
 /// Monta a URL de conexão a partir do host: `rediss://` quando `tls`,
-/// senão `redis://`, com usuário/senha (se houver) e o banco selecionado.
-fn build_url(host: &Host, password: Option<&str>) -> String {
+/// senão `redis://`, com usuário/senha (se houver) e `db` como o banco
+/// selecionado (não necessariamente `host.db` — quem chama escolhe, ver
+/// `Pool::get`).
+fn build_url(host: &Host, db: u8, password: Option<&str>) -> String {
     let scheme = if host.tls { "rediss" } else { "redis" };
     let mut url = format!("{scheme}://");
 
@@ -200,7 +237,7 @@ fn build_url(host: &Host, password: Option<&str>) -> String {
     url.push(':');
     url.push_str(&host.port.to_string());
     url.push('/');
-    url.push_str(&host.db.to_string());
+    url.push_str(&db.to_string());
 
     url
 }
@@ -269,7 +306,9 @@ fn parse_keyspace(info: &str) -> Result<Vec<(u8, u64)>> {
             })?;
 
         let keys: u64 = keys.parse().map_err(|_| {
-            ConnError::Protocol(format!("contagem de chaves inválida em INFO keyspace: {line}"))
+            ConnError::Protocol(format!(
+                "contagem de chaves inválida em INFO keyspace: {line}"
+            ))
         })?;
 
         sizes.push((index, keys));
@@ -310,6 +349,16 @@ mod tests {
         assert!(elapsed < Duration::from_secs(5));
     }
 
+    /// Lê quantas chaves `db_sizes` reporta para o db0 agora mesmo (`0` se
+    /// o banco nem aparecer em `INFO keyspace`).
+    fn db0_count(sizes: &[(u8, u64)]) -> u64 {
+        sizes
+            .iter()
+            .find(|(index, _)| *index == 0)
+            .map(|(_, count)| *count)
+            .unwrap_or(0)
+    }
+
     #[tokio::test]
     async fn db_sizes_counts_keys_in_db0() {
         let pool = Pool::new();
@@ -320,7 +369,16 @@ mod tests {
             "conn_rs_test:db_sizes:c",
         ];
 
-        let mut conn = pool.get(&host, None).await.unwrap();
+        // Conta antes de escrever, em vez de assumir que db0 está vazio: o
+        // container de teste é compartilhado por toda a suíte, que roda em
+        // paralelo por padrão — outro teste pode ter alguma chave própria
+        // ali no mesmo instante. O que este teste garante é que db_sizes
+        // enxerga exatamente as 3 chaves que ele mesmo criou, não o total
+        // absoluto do banco.
+        let before = pool.db_sizes(&host, None).await.unwrap();
+        let before_count = db0_count(&before);
+
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
         for key in keys {
             let _: () = redis::cmd("SET")
                 .arg(key)
@@ -330,7 +388,7 @@ mod tests {
                 .unwrap();
         }
 
-        let sizes = pool.db_sizes(&host, None).await;
+        let after = pool.db_sizes(&host, None).await;
 
         // Limpa as chaves que criamos antes de verificar o resultado, para
         // que uma falha na asserção não deixe `db0` sujo para a próxima vez
@@ -343,7 +401,65 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(sizes.unwrap().contains(&(0u8, 3u64)));
+        let after_count = db0_count(&after.unwrap());
+        assert_eq!(
+            after_count - before_count,
+            3,
+            "esperava +3 chaves em db0 depois do SET, veio before={before_count} after={after_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connections_are_isolated_per_db() {
+        let pool = Pool::new();
+        let host = test_host("Redis de teste", TEST_PORT);
+
+        let mut conn_db0 = pool.get(&host, 0, None).await.unwrap();
+        let id0: i64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut conn_db0)
+            .await
+            .unwrap();
+
+        let mut conn_db1 = pool.get(&host, 1, None).await.unwrap();
+        let id1: i64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut conn_db1)
+            .await
+            .unwrap();
+
+        // Dois `get()` para o mesmo host, mas bancos diferentes, não podem
+        // cair na mesma conexão cacheada — senão um `SELECT` de um dos
+        // lados vazaria para o outro.
+        assert_ne!(
+            id0, id1,
+            "conexões de bancos diferentes do mesmo host devem ser sockets diferentes"
+        );
+
+        let key = "conn_rs_test:db_isolation:key";
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("valor-db1")
+            .query_async(&mut conn_db1)
+            .await
+            .unwrap();
+
+        let exists_in_db0: bool = redis::cmd("EXISTS")
+            .arg(key)
+            .query_async(&mut conn_db0)
+            .await
+            .unwrap();
+
+        let _: () = redis::cmd("DEL")
+            .arg(key)
+            .query_async(&mut conn_db1)
+            .await
+            .unwrap();
+
+        assert!(
+            !exists_in_db0,
+            "uma chave escrita via a conexão do db1 não pode aparecer na conexão do db0"
+        );
     }
 
     #[tokio::test]
@@ -367,14 +483,14 @@ mod tests {
         let pool = Pool::new();
         let host = test_host("Redis de teste", TEST_PORT);
 
-        let mut conn1 = pool.get(&host, None).await.unwrap();
+        let mut conn1 = pool.get(&host, host.db, None).await.unwrap();
         let id1: i64 = redis::cmd("CLIENT")
             .arg("ID")
             .query_async(&mut conn1)
             .await
             .unwrap();
 
-        let mut conn2 = pool.get(&host, None).await.unwrap();
+        let mut conn2 = pool.get(&host, host.db, None).await.unwrap();
         let id2: i64 = redis::cmd("CLIENT")
             .arg("ID")
             .query_async(&mut conn2)
@@ -426,7 +542,7 @@ mod tests {
         let pool = Pool::new();
         let host = test_host("Redis de teste", TEST_PORT);
 
-        let mut conn = pool.get(&host, None).await.unwrap();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
         let id1: i64 = redis::cmd("CLIENT")
             .arg("ID")
             .query_async(&mut conn)
@@ -454,7 +570,7 @@ mod tests {
         // descartá-la e abrir uma nova — não basta devolver o erro.
         pool.ping(&host, None).await.unwrap();
 
-        let mut conn2 = pool.get(&host, None).await.unwrap();
+        let mut conn2 = pool.get(&host, host.db, None).await.unwrap();
         let id2: i64 = redis::cmd("CLIENT")
             .arg("ID")
             .query_async(&mut conn2)
