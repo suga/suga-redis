@@ -104,34 +104,60 @@ impl Pool {
             .map_err(|err| classify(host, err))
     }
 
-    /// Roda um comando no host, reaproveitando a conexão cacheada. Se o
-    /// comando falhar por um erro de conexão (a conexão cacheada morreu —
-    /// ex.: a rede caiu depois que ela foi aberta, e ninguém chamou
-    /// `drop_host` para avisar o pool disso), descarta essa conexão e tenta
-    /// de novo exatamente uma vez com uma conexão nova. Erros lógicos do
-    /// Redis (ex.: um tipo errado de comando para a chave) não disparam
-    /// esse retry — eles não dizem nada sobre a saúde da conexão.
+    /// Roda uma operação assíncrona arbitrária sobre a conexão cacheada do
+    /// host, entregando-lhe uma cópia da conexão multiplexada (clonar é só
+    /// clonar o handle, não abrir socket novo). Se a operação falhar por um
+    /// erro de conexão (a conexão cacheada morreu — ex.: a rede caiu depois
+    /// que ela foi aberta, e ninguém chamou `drop_host` para avisar o pool
+    /// disso), descarta essa conexão e tenta de novo exatamente uma vez com
+    /// uma conexão nova. Erros lógicos do Redis (ex.: um tipo errado de
+    /// comando para a chave) não disparam esse retry — eles não dizem nada
+    /// sobre a saúde da conexão.
+    ///
+    /// Generaliza o que antes só `run` fazia para um `redis::Cmd` único: a
+    /// varredura de chaves (`scan_all`, em `core::keys`) precisa de várias
+    /// idas e vindas sobre a mesma tentativa de conexão — o cursor do
+    /// `SCAN` e lotes de metadados em pipeline — então a operação aqui é
+    /// uma closure arbitrária, não um comando isolado. `pub(crate)` porque
+    /// `core::keys` precisa chamá-la diretamente.
+    pub(crate) async fn with_retry<T, F, Fut>(
+        &self,
+        host: &Host,
+        password: Option<&str>,
+        operation: F,
+    ) -> Result<T>
+    where
+        F: Fn(MultiplexedConnection) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, redis::RedisError>>,
+    {
+        let conn = self.get(host, password).await?;
+
+        match operation(conn).await {
+            Ok(value) => Ok(value),
+            Err(err) => match classify(host, err) {
+                ConnError::Unreachable { .. } => {
+                    self.drop_host(&host.id);
+                    let conn = self.get(host, password).await?;
+                    operation(conn).await.map_err(|err| classify(host, err))
+                }
+                classified => Err(classified),
+            },
+        }
+    }
+
+    /// Roda um único comando no host, reaproveitando a conexão cacheada; a
+    /// lógica de resiliência (descartar e tentar de novo uma vez) fica em
+    /// `with_retry`.
     async fn run<T: redis::FromRedisValue>(
         &self,
         host: &Host,
         password: Option<&str>,
         cmd: &redis::Cmd,
     ) -> Result<T> {
-        let mut conn = self.get(host, password).await?;
-
-        match cmd.query_async::<T>(&mut conn).await {
-            Ok(value) => Ok(value),
-            Err(err) => match classify(host, err) {
-                ConnError::Unreachable { .. } => {
-                    self.drop_host(&host.id);
-                    let mut conn = self.get(host, password).await?;
-                    cmd.query_async::<T>(&mut conn)
-                        .await
-                        .map_err(|err| classify(host, err))
-                }
-                classified => Err(classified),
-            },
-        }
+        self.with_retry(host, password, move |mut conn| async move {
+            cmd.query_async::<T>(&mut conn).await
+        })
+        .await
     }
 
     /// Mede o tempo de ida e volta de um `PING` no host.
