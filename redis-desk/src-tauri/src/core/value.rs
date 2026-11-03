@@ -864,6 +864,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multi_byte_cutoff_is_truncated_at_a_clean_char_boundary() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+
+        let key = "value_rs_test:multibyte_cutoff";
+        // "café" ocupa 5 bytes em UTF-8 (c, a, f e um "é" de 2 bytes) — toda
+        // string com acentuação em português é feita desses caracteres de
+        // 2 bytes, então o corte do painel cair bem no meio de um deles não
+        // é um caso exótico, é rotina. "café" repetido 6 vezes dá 30 bytes;
+        // `max_bytes = 19` cai exatamente no primeiro byte do "é" da quarta
+        // repetição (bytes 18 e 19 do valor) — esse "é" começa em
+        // `max_bytes - 1`, o pior caso que `UTF8_SLACK` existe para cobrir.
+        //
+        // Sem folga nenhuma (`UTF8_SLACK = 0`), o `GETRANGE` pararia bem
+        // nesse primeiro byte do "é", `from_utf8` falharia no meio de um
+        // caractere que é válido no valor inteiro, e o branch de
+        // `read_string` cairia no `Err(_)` final — tratando como binário um
+        // valor que é só texto em português cortado no lugar errado. Esse é
+        // o teste que fica vermelho se alguém reduzir `UTF8_SLACK`.
+        let value = "café".repeat(6);
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg(&value)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let limit = ValueLimit {
+            max_bytes: 19,
+            ..ValueLimit::default()
+        };
+        let view = read_value(&pool, &host, None, host.db, key, limit).await;
+
+        del(&mut conn, &[key]).await;
+
+        let view = view.unwrap();
+
+        assert!(view.truncated);
+        match view.value {
+            Value::Str(bytes) => {
+                assert!(
+                    bytes.base64.is_none(),
+                    "não pode virar base64 por causa do corte"
+                );
+                let text = bytes.text.expect(
+                    "corte no meio de um caractere multibyte não pode classificar o valor como binário",
+                );
+                assert!(
+                    text.len() <= limit.max_bytes,
+                    "texto devolvido deveria caber em max_bytes, veio {} bytes",
+                    text.len()
+                );
+                assert!(
+                    !text.contains('\u{FFFD}'),
+                    "texto não pode conter caractere de substituição (U+FFFD)"
+                );
+                assert_eq!(
+                    text, "cafécafécafécaf",
+                    "deveria incluir as 3 repetições completas de \"café\" mais o \"caf\" \
+                     da quarta, sem o \"é\" cortado ao meio"
+                );
+                assert!(bytes.truncated);
+            }
+            other => panic!("esperava Value::Str, veio {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn non_utf8_value_comes_back_as_base64() {
         let pool = Pool::new();
         let host = test_host();
