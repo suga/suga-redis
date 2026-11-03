@@ -934,6 +934,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn four_byte_cutoff_requires_the_full_utf8_slack() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+
+        let key = "value_rs_test:four_byte_cutoff";
+        // "😀" ocupa 4 bytes em UTF-8 — o pior caso que `UTF8_SLACK` precisa
+        // cobrir (um emoji num JSON cacheado é um valor comum, não exótico,
+        // neste produto). 9 "a"s, depois o emoji, depois mais "a"s: o emoji
+        // começa bem no byte 9 (`max_bytes - 1`, com `max_bytes = 10`) e
+        // precisa dos 3 bytes seguintes (9, 10, 11... o emoji ocupa
+        // [9, 13)) para completar — exatamente os 3 bytes de
+        // `UTF8_SLACK`. Com `UTF8_SLACK = 2` (ou menos), o `GETRANGE` para
+        // no meio do emoji, `from_utf8` falha antes de alcançar
+        // `max_bytes`, e o valor seria classificado (errado) como binário.
+        let value = format!("{}{}{}", "a".repeat(9), "😀", "a".repeat(20));
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg(&value)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let limit = ValueLimit {
+            max_bytes: 10,
+            ..ValueLimit::default()
+        };
+        let view = read_value(&pool, &host, None, host.db, key, limit).await;
+
+        del(&mut conn, &[key]).await;
+
+        let view = view.unwrap();
+
+        assert!(view.truncated);
+        match view.value {
+            Value::Str(bytes) => {
+                assert!(
+                    bytes.base64.is_none(),
+                    "não pode virar base64 por causa do corte"
+                );
+                let text = bytes.text.expect(
+                    "corte no meio de um caractere de 4 bytes não pode classificar o valor como binário",
+                );
+                assert!(
+                    text.len() <= limit.max_bytes,
+                    "texto devolvido deveria caber em max_bytes, veio {} bytes",
+                    text.len()
+                );
+                assert!(
+                    !text.contains('\u{FFFD}'),
+                    "texto não pode conter caractere de substituição (U+FFFD)"
+                );
+                // O emoji não cabe inteiro em `max_bytes` (começa no último
+                // byte do orçamento) — o corte correto é excluí-lo por
+                // completo, não mostrar metade dele.
+                assert_eq!(
+                    text,
+                    "a".repeat(9),
+                    "o emoji que começa em max_bytes-1 não pode aparecer pela metade"
+                );
+                assert!(bytes.truncated);
+            }
+            other => panic!("esperava Value::Str, veio {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn non_utf8_value_comes_back_as_base64() {
         let pool = Pool::new();
         let host = test_host();
