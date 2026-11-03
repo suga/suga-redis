@@ -40,6 +40,8 @@ pub type Result<T> = std::result::Result<T, ConnError>;
 /// conexão na primeira chamada e reaproveita a mesma depois disso.
 pub struct Pool {
     connections: Mutex<HashMap<String, MultiplexedConnection>>,
+    connection_timeout: Duration,
+    response_timeout: Duration,
 }
 
 impl Default for Pool {
@@ -49,9 +51,20 @@ impl Default for Pool {
 }
 
 impl Pool {
+    /// Pool com o timeout padrão de 5 segundos para conectar e para
+    /// esperar resposta — o valor que deve ser usado em produção.
     pub fn new() -> Pool {
+        Pool::with_timeouts(TIMEOUT, TIMEOUT)
+    }
+
+    /// Pool com timeouts customizados. Existe para que os testes possam
+    /// injetar timeouts curtos e exercitar de verdade o caminho de "host
+    /// parou de responder", sem esperar 5 segundos de verdade.
+    pub fn with_timeouts(connection_timeout: Duration, response_timeout: Duration) -> Pool {
         Pool {
             connections: Mutex::new(HashMap::new()),
+            connection_timeout,
+            response_timeout,
         }
     }
 
@@ -62,7 +75,7 @@ impl Pool {
             return Ok(conn.clone());
         }
 
-        let conn = Self::connect(host, password).await?;
+        let conn = self.connect(host, password).await?;
 
         // Outra chamada concorrente pode ter aberto a conexão primeiro
         // enquanto esperávamos `connect`; nesse caso ficamos com a que já
@@ -77,13 +90,13 @@ impl Pool {
         self.connections.lock().unwrap().remove(id);
     }
 
-    async fn connect(host: &Host, password: Option<&str>) -> Result<MultiplexedConnection> {
+    async fn connect(&self, host: &Host, password: Option<&str>) -> Result<MultiplexedConnection> {
         let url = build_url(host, password);
         let client = Client::open(url).map_err(|err| classify(host, err))?;
 
         let config = AsyncConnectionConfig::new()
-            .set_connection_timeout(Some(TIMEOUT))
-            .set_response_timeout(Some(TIMEOUT));
+            .set_connection_timeout(Some(self.connection_timeout))
+            .set_response_timeout(Some(self.response_timeout));
 
         client
             .get_multiplexed_async_connection_with_config(&config)
@@ -91,16 +104,40 @@ impl Pool {
             .map_err(|err| classify(host, err))
     }
 
+    /// Roda um comando no host, reaproveitando a conexão cacheada. Se o
+    /// comando falhar por um erro de conexão (a conexão cacheada morreu —
+    /// ex.: a rede caiu depois que ela foi aberta, e ninguém chamou
+    /// `drop_host` para avisar o pool disso), descarta essa conexão e tenta
+    /// de novo exatamente uma vez com uma conexão nova. Erros lógicos do
+    /// Redis (ex.: um tipo errado de comando para a chave) não disparam
+    /// esse retry — eles não dizem nada sobre a saúde da conexão.
+    async fn run<T: redis::FromRedisValue>(
+        &self,
+        host: &Host,
+        password: Option<&str>,
+        cmd: &redis::Cmd,
+    ) -> Result<T> {
+        let mut conn = self.get(host, password).await?;
+
+        match cmd.query_async::<T>(&mut conn).await {
+            Ok(value) => Ok(value),
+            Err(err) => match classify(host, err) {
+                ConnError::Unreachable { .. } => {
+                    self.drop_host(&host.id);
+                    let mut conn = self.get(host, password).await?;
+                    cmd.query_async::<T>(&mut conn)
+                        .await
+                        .map_err(|err| classify(host, err))
+                }
+                classified => Err(classified),
+            },
+        }
+    }
+
     /// Mede o tempo de ida e volta de um `PING` no host.
     pub async fn ping(&self, host: &Host, pw: Option<&str>) -> Result<Duration> {
-        let mut conn = self.get(host, pw).await?;
-
         let start = Instant::now();
-        redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-            .map_err(|err| classify(host, err))?;
-
+        self.run::<String>(host, pw, &redis::cmd("PING")).await?;
         Ok(start.elapsed())
     }
 
@@ -108,14 +145,10 @@ impl Pool {
     /// chaves. Bancos vazios não aparecem em `INFO keyspace` e por isso não
     /// aparecem no resultado.
     pub async fn db_sizes(&self, host: &Host, pw: Option<&str>) -> Result<Vec<(u8, u64)>> {
-        let mut conn = self.get(host, pw).await?;
+        let mut cmd = redis::cmd("INFO");
+        cmd.arg("keyspace");
 
-        let info: String = redis::cmd("INFO")
-            .arg("keyspace")
-            .query_async(&mut conn)
-            .await
-            .map_err(|err| classify(host, err))?;
-
+        let info: String = self.run(host, pw, &cmd).await?;
         parse_keyspace(&info)
     }
 }
@@ -327,5 +360,81 @@ mod tests {
         // nenhuma conexão nova foi aberta (o que `CLIENT LIST` também
         // mostraria, com uma linha a mais por conexão nova).
         assert_eq!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn connecting_times_out_when_the_host_never_responds() {
+        // Liga numa porta efêmera e aceita a conexão, mas nunca escreve nada
+        // nela: simula uma VPN caindo no meio do caminho, onde os pacotes
+        // somem sem RST nem FIN. Sem o timeout de conexão, isso travaria
+        // `ping` (e a UI) para sempre.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            // Mantém a conexão aceita (e o socket) vivos, sem responder
+            // nada, até a task morrer com o fim do runtime do teste.
+            std::future::pending::<()>().await
+        });
+
+        let pool = Pool::with_timeouts(Duration::from_millis(200), Duration::from_millis(200));
+        let host = test_host("Host Mudo", port);
+
+        let started = Instant::now();
+        let err = pool.ping(&host, None).await.unwrap_err();
+        let elapsed = started.elapsed();
+
+        match &err {
+            ConnError::Unreachable { host: name, .. } => assert_eq!(name, "Host Mudo"),
+            other => panic!("esperava ConnError::Unreachable, veio {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "levou {elapsed:?} — o timeout de 200ms injetado não foi respeitado"
+        );
+    }
+
+    #[tokio::test]
+    async fn ping_evicts_a_dead_cached_connection_and_retries() {
+        let pool = Pool::new();
+        let host = test_host("Redis de teste", TEST_PORT);
+
+        let mut conn = pool.get(&host, None).await.unwrap();
+        let id1: i64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        // Mata a conexão cacheada a partir de uma segunda conexão (aberta
+        // diretamente, fora do pool), simulando uma queda de rede: a
+        // conexão em `pool` fica morta, mas ninguém chamou `drop_host`.
+        let killer_client =
+            redis::Client::open(format!("redis://127.0.0.1:{TEST_PORT}/0")).unwrap();
+        let mut killer = killer_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let _: () = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("ID")
+            .arg(id1)
+            .query_async(&mut killer)
+            .await
+            .unwrap();
+
+        // `ping` precisa perceber sozinho que a conexão cacheada morreu,
+        // descartá-la e abrir uma nova — não basta devolver o erro.
+        pool.ping(&host, None).await.unwrap();
+
+        let mut conn2 = pool.get(&host, None).await.unwrap();
+        let id2: i64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut conn2)
+            .await
+            .unwrap();
+
+        assert_ne!(id1, id2, "o pool deveria ter aberto uma conexão nova");
     }
 }
