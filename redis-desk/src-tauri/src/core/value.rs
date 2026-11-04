@@ -12,6 +12,7 @@ use super::keys::KeyKind;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use serde::{Deserialize, Serialize};
 
 /// `COUNT` pedido a cada chamada de `HSCAN`/`SSCAN` ao paginar coleções que
 /// não têm um comando de range por índice (ao contrário de `LRANGE`/`ZRANGE`,
@@ -51,7 +52,7 @@ impl Default for ValueLimit {
 /// UTF-8 válido, base64 quando não são — nunca uma conversão "lossy" que
 /// corromperia o conteúdo original. `truncated` indica que o que está aqui é
 /// só um pedaço do valor real (ver `max_bytes` em `ValueLimit`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Bytes {
     pub text: Option<String>,
     pub base64: Option<String>,
@@ -121,7 +122,7 @@ fn char_boundary_prefix(text: &str, max_bytes: usize) -> &str {
 
 /// Uma entrada de stream: id (`"<ms>-<seq>"`) e seus campos, na mesma forma
 /// binary-safe usada pelo resto do arquivo.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamEntry {
     pub id: String,
     pub fields: Vec<(String, Bytes)>,
@@ -130,11 +131,14 @@ pub struct StreamEntry {
 /// O conteúdo tipado de uma chave. `Set`, `Stream` e `ReadOnlyText` (usado
 /// para RedisJSON e qualquer tipo não reconhecido) são somente leitura neste
 /// produto — ver `KeyKind::editable`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum Value {
+    #[serde(rename = "string")]
     Str(Bytes),
     Hash(Vec<(String, Bytes)>),
     List(Vec<Bytes>),
+    #[serde(rename = "zset")]
     ZSet(Vec<(Bytes, f64)>),
     Set(Vec<Bytes>),
     Stream(Vec<StreamEntry>),
@@ -146,7 +150,7 @@ pub enum Value {
 /// valor é truncado para exibição) e `truncated`, que avisa quando o que
 /// está em `value` é só parte do conteúdo real (elementos a mais além da
 /// página pedida, ou um valor individual cortado por `max_bytes`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ValueView {
     pub key: String,
     pub kind: KeyKind,
@@ -558,17 +562,42 @@ async fn read_stream(
 /// caminho que grava dado neste produto — o editor da UI, o desfazer da
 /// Task 6 e as escritas controladas da LLM na Task 16 — passa por aqui, nunca
 /// por um comando Redis solto montado em outro lugar.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum WriteOp {
-    SetString { value: Bytes },
-    SetHashField { field: String, value: Bytes },
-    DeleteHashField { field: String },
-    SetListItem { index: i64, value: Bytes },
-    PushListItem { value: Bytes, front: bool },
-    RemoveListItem { index: i64 },
-    SetZSetMember { member: Bytes, score: f64 },
-    RemoveZSetMember { member: Bytes },
-    SetTtl { ttl_ms: Option<i64> },
+    SetString {
+        value: Bytes,
+    },
+    SetHashField {
+        field: String,
+        value: Bytes,
+    },
+    DeleteHashField {
+        field: String,
+    },
+    SetListItem {
+        index: i64,
+        value: Bytes,
+    },
+    PushListItem {
+        value: Bytes,
+        front: bool,
+    },
+    RemoveListItem {
+        index: i64,
+    },
+    #[serde(rename = "set_zset_member")]
+    SetZSetMember {
+        member: Bytes,
+        score: f64,
+    },
+    #[serde(rename = "remove_zset_member")]
+    RemoveZSetMember {
+        member: Bytes,
+    },
+    SetTtl {
+        ttl_ms: Option<i64>,
+    },
     DeleteKey,
 }
 

@@ -42,7 +42,8 @@ const FULL_READ_LIMIT: ValueLimit = ValueLimit {
 /// Quem fez a mudança: uma pessoa pela UI, ou a LLM (Task 16) através das
 /// ferramentas MCP (Task 15). Guardado em toda entrada do histórico para que
 /// a UI possa distinguir e, por exemplo, destacar mudanças feitas pela LLM.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Actor {
     Human,
     Llm,
@@ -55,7 +56,7 @@ pub enum Actor {
 /// a própria criação da chave) — nesse caso, "desfazer" apaga a chave de
 /// novo. `rolled_back` marca que esta entrada já foi revertida, para a UI
 /// não oferecer desfazer de novo sobre algo que já voltou atrás.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistoryEntry {
     pub id: i64,
     pub host_id: String,

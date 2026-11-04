@@ -30,6 +30,7 @@ use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 
 use super::config::Host;
 use super::conn::{ConnError, Pool};
@@ -84,7 +85,7 @@ pub type Result<T> = std::result::Result<T, IndexError>;
 /// é conhecido assim que a lista de chaves chega — não é uma estimativa no
 /// sentido de incerta, é só nomeada assim porque a UI a trata como tal, já
 /// que chaves podem aparecer/sumir no servidor durante a varredura).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanProgress {
     pub scanned: u64,
     pub total_estimate: u64,
@@ -92,7 +93,7 @@ pub struct ScanProgress {
 
 /// Resultado de uma varredura concluída, também o que fica persistido (e é
 /// devolvido depois por `last_scan`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanReport {
     pub host_id: String,
     pub db: u8,

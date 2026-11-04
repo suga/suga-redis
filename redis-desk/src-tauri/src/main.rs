@@ -1,6 +1,21 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
+// Impede uma janela de console extra no Windows em release, NÃO REMOVER!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// Argumento que põe o binário em modo servidor MCP.
+const MCP_FLAG: &str = "--mcp";
+
+/// Um binário, dois modos. Sem argumento, sobe a janela; com `--mcp`, roda
+/// como servidor MCP em stdio e nunca abre janela nenhuma — o Claude local
+/// conversa com este processo pela entrada e saída padrão, e qualquer coisa
+/// escrita em stdout que não seja protocolo quebraria essa conversa.
 fn main() {
+    if std::env::args().any(|arg| arg == MCP_FLAG) {
+        if let Err(err) = redis_desk_lib::run_mcp() {
+            eprintln!("redis-desk: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     redis_desk_lib::run()
 }

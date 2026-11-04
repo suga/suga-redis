@@ -7,6 +7,7 @@ use redis::aio::MultiplexedConnection;
 
 use super::config::Host;
 use super::conn::{ConnError, Pool};
+use serde::{Deserialize, Serialize};
 
 /// `COUNT` pedido a cada chamada de `SCAN`: alto o bastante para que um
 /// banco com muitas chaves não precise de milhares de idas e vindas, sem
@@ -22,11 +23,13 @@ const METADATA_BATCH: usize = 200;
 const SEPARATOR: char = ':';
 
 /// Tipo de uma chave Redis, conforme a resposta de `TYPE`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum KeyKind {
     String,
     Hash,
     List,
+    #[serde(rename = "zset")]
     ZSet,
     Set,
     Stream,
@@ -67,7 +70,7 @@ impl KeyKind {
 }
 
 /// Metadados de uma chave coletados durante a varredura.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KeyMeta {
     pub key: String,
     pub kind: KeyKind,
@@ -180,7 +183,7 @@ async fn scan_once(conn: &mut MultiplexedConnection) -> redis::RedisResult<Vec<K
 /// duas coisas ao mesmo tempo: por exemplo, se as chaves `cache` e
 /// `cache:a` existem, o nó `cache` tem `leaf_key == Some("cache")` e também
 /// um filho `a`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TreeNode {
     pub label: String,
     pub full_prefix: String,

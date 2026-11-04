@@ -41,6 +41,7 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use rusqlite::params;
+use serde::{Deserialize, Serialize};
 
 use super::config::Host;
 use super::conn::{ConnError, Pool};
@@ -72,7 +73,8 @@ const ELLIPSIS: char = '…';
 /// Onde a agulha foi encontrada. Uma chave cujo NOME casa é sempre
 /// reportada como `KeyName`, mesmo que o valor também case: é a informação
 /// mais específica das duas, e o nome é o que a pessoa reconhece na lista.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Where {
     KeyName,
     Value,
@@ -83,7 +85,7 @@ pub enum Where {
 /// interface grifar o pedaço: `&snippet[match_start..match_start + match_len]`
 /// é o texto que casou, COMO ESTÁ guardado — que pode diferir da agulha
 /// digitada na caixa das letras.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchHit {
     pub key: String,
     pub kind: KeyKind,
@@ -98,7 +100,7 @@ pub struct SearchHit {
 /// pessoa o que acabou de acontecer: quantas chaves o pré-filtro trouxe para
 /// conferir (`scanned`), quanto tempo levou, quantas chaves mortas foram
 /// descartadas pelo caminho, e de quando é o retrato que respondeu.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SearchOutcome {
     pub hits: Vec<SearchHit>,
     pub scanned: u64,

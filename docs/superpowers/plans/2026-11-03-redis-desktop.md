@@ -101,7 +101,7 @@ redis-desk/
 
 Hosts em `hosts.json` no diretório de dados do app; senha no chaveiro sob serviço `redis-desk` e conta `<host id>`. `id` é um UUID v4 gerado no `add`.
 
-- [ ] **Step 1: Instalar o toolchain e criar o scaffold**
+- [x] **Step 1: Instalar o toolchain e criar o scaffold**
 
 Rust não está instalado nesta máquina. Rodar:
 
@@ -115,7 +115,7 @@ cd redis-desk && npm install && git init
 
 Acrescentar ao `.gitignore` da raiz: `.superpowers/`, `node_modules/`, `target/`, `dist/`.
 
-- [ ] **Step 2: Escrever os testes que falham**
+- [x] **Step 2: Escrever os testes que falham**
 
 Em `core/config.rs`, com `keyring::set_default_credential_builder(keyring::mock::default_credential_builder())` no começo de cada teste e um `tempfile::TempDir` como diretório:
 
@@ -127,25 +127,25 @@ Em `core/config.rs`, com `keyring::set_default_credential_builder(keyring::mock:
 #[test] fn reopening_the_store_keeps_the_hosts()      // nova HostStore::open no mesmo dir devolve o host
 ```
 
-- [ ] **Step 3: Rodar os testes e confirmar que falham**
+- [x] **Step 3: Rodar os testes e confirmar que falham**
 
 Run: `cd redis-desk/src-tauri && cargo test config::`
 Expected: FAIL — `HostStore` não existe.
 
-- [ ] **Step 4: Implementar `core/config.rs`**
+- [x] **Step 4: Implementar `core/config.rs`**
 
 Dependências novas no `Cargo.toml`: `serde`/`serde_json`, `keyring = "3"`, `uuid` (feature `v4`), `thiserror`, e `tempfile` em `[dev-dependencies]`. Gravação do `hosts.json` por arquivo temporário + rename, para não corromper se o app morrer no meio.
 
-- [ ] **Step 5: Rodar os testes e confirmar que passam**
+- [x] **Step 5: Rodar os testes e confirmar que passam**
 
 Run: `cargo test config::`
 Expected: PASS, 5 testes.
 
-- [ ] **Step 6: Escrever `scripts/test-redis.sh`**
+- [x] **Step 6: Escrever `scripts/test-redis.sh`**
 
 `up` sobe `redis:7-alpine` como container `redis-desk-test` em `127.0.0.1:6399`; `down` remove; `reset` roda `FLUSHALL` nesse container de teste. É o único lugar do repositório onde `FLUSHALL` aparece, e só contra a porta 6399.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A && git commit -m "feat: project scaffold and host registry with keychain-backed passwords"
@@ -167,7 +167,7 @@ git add -A && git commit -m "feat: project scaffold and host registry with keych
   - `async fn ping(&self, host: &Host, pw: Option<&str>) -> Result<Duration, ConnError>`
   - `async fn db_sizes(&self, host: &Host, pw: Option<&str>) -> Result<Vec<(u8, u64)>, ConnError>` — lê `INFO keyspace`, devolve `(índice do db, nº de chaves)`
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn ping_returns_a_duration()                     // contra 127.0.0.1:6399
@@ -178,21 +178,21 @@ git add -A && git commit -m "feat: project scaffold and host registry with keych
 
 O terceiro teste é a situação 1 do Review Focus: erro tratado, com nome do host, sem travar.
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `./scripts/test-redis.sh up && cargo test conn::`
 Expected: FAIL — `Pool` não existe.
 
-- [ ] **Step 3: Implementar `core/conn.rs`**
+- [x] **Step 3: Implementar `core/conn.rs`**
 
 `redis = { version = "1", features = ["tokio-comp", "tls-rustls-webpki-roots"] }`. A URL sai do `Host`: `rediss://` quando `tls`, senão `redis://`. Timeout de conexão e de resposta de 5 segundos — sem isso a VPN caindo congela a interface.
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `cargo test conn::`
 Expected: PASS, 4 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: redis connection pool with typed, host-named errors"
@@ -215,7 +215,7 @@ git add -A && git commit -m "feat: redis connection pool with typed, host-named 
   - `struct TreeNode { label: String, full_prefix: String, count: u64, children: Vec<TreeNode>, leaf_key: Option<String> }`
   - `fn build_tree(keys: &[KeyMeta]) -> Vec<TreeNode>` — separador `:`
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 `build_tree` é função pura, então os testes de árvore não precisam de Redis:
 
@@ -229,21 +229,21 @@ git add -A && git commit -m "feat: redis connection pool with typed, host-named 
 
 O terceiro é a situação 5 do Review Focus.
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test keys::`
 Expected: FAIL — `build_tree` não existe.
 
-- [ ] **Step 3: Implementar `core/keys.rs`**
+- [x] **Step 3: Implementar `core/keys.rs`**
 
 `MEMORY USAGE` pode não existir em servidor gerenciado antigo: quando o comando falhar, `size_bytes` vira 0 em vez de derrubar a varredura.
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `cargo test keys::`
 Expected: PASS, 5 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: key scan with metadata and prefix tree builder"
@@ -267,7 +267,7 @@ git add -A && git commit -m "feat: key scan with metadata and prefix tree builde
 
 Chave inexistente devolve `ConnError::KeyGone(key)`.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn reads_each_editable_type()         // string, hash, list, zset com os valores gravados
@@ -280,21 +280,21 @@ Chave inexistente devolve `ConnError::KeyGone(key)`.
 
 Os dois últimos são as situações 2 e 4 do Review Focus.
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test value::read`
 Expected: FAIL — `read_value` não existe.
 
-- [ ] **Step 3: Implementar a leitura em `core/value.rs`**
+- [x] **Step 3: Implementar a leitura em `core/value.rs`**
 
 Coleções longas vêm por `HSCAN`/`LRANGE`/`ZRANGE` paginados até `max_elements`; `total_elements` vem de `HLEN`/`LLEN`/`ZCARD`, para a tela poder dizer "mostrando 500 de 12.430".
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `cargo test value::read`
 Expected: PASS, 6 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: typed value reader with truncation and binary-safe payloads"
@@ -317,7 +317,7 @@ git add -A && git commit -m "feat: typed value reader with truncation and binary
 
 Regra: `apply_write` preserva o TTL que a chave já tinha, exceto quando a operação é `SetTtl` ou `DeleteKey`. Tipo não editável devolve erro.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn set_string_replaces_the_value()
@@ -329,21 +329,21 @@ Regra: `apply_write` preserva o TTL que a chave já tinha, exceto quando a opera
 #[test]        fn op_summary_is_written_in_portuguese()          // contém a chave e o verbo da ação
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test value::write`
 Expected: FAIL — `apply_write` não existe.
 
-- [ ] **Step 3: Implementar a escrita**
+- [x] **Step 3: Implementar a escrita**
 
 `RemoveListItem` por índice não existe no Redis: marcar com um sentinela por `LSET` e depois `LREM` desse sentinela, dentro de um `MULTI`/`EXEC`. É o único ponto do módulo onde o algoritmo não sai da assinatura.
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `cargo test value::write`
 Expected: PASS, 7 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: typed write operations preserving ttl"
@@ -366,7 +366,7 @@ git add -A && git commit -m "feat: typed write operations preserving ttl"
 
 `write_with_backup` lê o valor inteiro antes (sem truncar), grava a linha, só então aplica a escrita. Se a escrita falhar, a linha é removida. `rollback` regrava o `before_json` e marca `rolled_back`.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn backup_is_taken_before_the_write()
@@ -377,21 +377,21 @@ git add -A && git commit -m "feat: typed write operations preserving ttl"
 #[test]        fn entry_records_whether_the_llm_or_the_human_did_it()
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test history::`
 Expected: FAIL — `History` não existe.
 
-- [ ] **Step 3: Implementar `core/history.rs`**
+- [x] **Step 3: Implementar `core/history.rs`**
 
 `rusqlite = { version = "0.3x", features = ["bundled"] }` — a versão mais recente que compile com o resto. Uma tabela `history`, índice em `(host_id, at)`. Banco em `<dir de dados do app>/redis-desk.sqlite`, o mesmo arquivo que a Task 7 usa para o índice.
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `cargo test history::`
 Expected: PASS, 6 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: value backup, change history and rollback"
@@ -417,7 +417,7 @@ git add -A && git commit -m "feat: value backup, change history and rollback"
 
 Tabela FTS5 `key_index(host_id, db, key, kind, ttl_ms, body)` onde `body` é o texto achatado do valor: string é ela mesma; hash vira `campo valor` por linha; lista e sorted set viram um elemento por linha. Teto de **64 KB por chave** no `body`, com coluna `truncated`. Valor não-UTF-8 entra no índice como string vazia e `binary = 1` — não quebra a varredura e não polui a busca.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn rescan_indexes_every_type_into_body()
@@ -428,21 +428,21 @@ Tabela FTS5 `key_index(host_id, db, key, kind, ttl_ms, body)` onde `body` é o t
 #[tokio::test] async fn progress_callback_is_called_at_least_once()
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test index::`
 Expected: FAIL — `Index` não existe.
 
-- [ ] **Step 3: Implementar `core/index.rs`**
+- [x] **Step 3: Implementar `core/index.rs`**
 
 A varredura roda por `(host, db)` dentro de uma transação, trocando o retrato inteiro no fim. Só varre o host aberto; os outros ficam para quando forem abertos.
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `cargo test index::`
 Expected: PASS, 6 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: local fts index with incremental rescan"
@@ -466,7 +466,7 @@ git add -A && git commit -m "feat: local fts index with incremental rescan"
 
 Busca é por **substring literal**, não por palavra: procurar `marco@` tem que achar dentro de `"email":"marco@empresa.com"`. Cada acerto é conferido com `EXISTS` antes de entrar no resultado; o que não existe mais sai do índice e entra em `stale_keys_removed`.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn finds_text_inside_a_hash_field()
@@ -479,21 +479,21 @@ Busca é por **substring literal**, não por palavra: procurar `marco@` tem que 
 #[tokio::test] async fn snippet_points_at_the_match()
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test search::`
 Expected: FAIL — `search` não existe.
 
-- [ ] **Step 3: Implementar `core/search.rs`**
+- [x] **Step 3: Implementar `core/search.rs`**
 
 FTS5 sozinho casa por token e não acha substring no meio de palavra. A combinação: FTS5 com tokenizador `trigram` (vem no SQLite embutido) para pré-filtrar, e confirmação por `contains` em Rust sobre os candidatos. É o algoritmo que a assinatura não determina — o resto sai dela.
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `cargo test search::`
 Expected: PASS, 8 testes. Se o teste de um segundo falhar, o problema é o pré-filtro, não o `contains`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: substring search across key names and values"
@@ -522,7 +522,7 @@ git add -A && git commit -m "feat: substring search across key names and values"
 
 `main.rs` olha `std::env::args()`: com `--mcp`, chama `mcp::run_stdio()` e nunca sobe janela.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn prod_write_without_confirmation_is_refused()  // WriteOutcome::NeedsConfirmation, e o valor no Redis não mudou
@@ -531,23 +531,23 @@ git add -A && git commit -m "feat: substring search across key names and values"
 #[tokio::test] async fn prod_rollback_follows_the_same_rule()
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test commands::`
 Expected: FAIL — `write_value` não existe.
 
-- [ ] **Step 3: Implementar `commands.rs`, registrar no `lib.rs`, ramificar o `main.rs`**
+- [x] **Step 3: Implementar `commands.rs`, registrar no `lib.rs`, ramificar o `main.rs`**
 
-- [ ] **Step 4: Escrever `src/lib/api.ts`**
+- [x] **Step 4: Escrever `src/lib/api.ts`**
 
 Tipos TypeScript espelhando os structs de serde, e um wrapper por comando sobre `invoke`. É o único arquivo da interface que fala com o Rust.
 
-- [ ] **Step 5: Rodar e confirmar que passam**
+- [x] **Step 5: Rodar e confirmar que passam**
 
 Run: `cargo test commands:: && npm run check`
 Expected: PASS nos 4 testes; `svelte-check` sem erro.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat: tauri command surface with prod write confirmation gate"
