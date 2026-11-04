@@ -83,6 +83,182 @@ pub struct KeyMeta {
     pub size_bytes: u64,
 }
 
+/// Teto de filhos distintos listados num nível.
+///
+/// Existe para o caso degenerado: um nível em que cada chave tem um
+/// identificador próprio (`pedido:<uuid>:item`) não é uma árvore, é a lista
+/// de chaves disfarçada. Listar tudo devolveria à tela exatamente o volume
+/// que esta varredura existe para evitar.
+pub const MAX_CHILDREN: usize = 2_000;
+
+/// Um filho de um nível da árvore: um galho a abrir ou uma folha a ler.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Branch {
+    /// O segmento, sem o prefixo do pai.
+    pub label: String,
+    /// O prefixo acumulado, já com o `:` no fim — é o que se passa a
+    /// `scan_level` para abrir este galho.
+    pub full_prefix: String,
+    pub count: u64,
+    /// Preenchido só quando este filho É uma chave, não um galho.
+    pub leaf_key: Option<String>,
+}
+
+/// Um nível da árvore, varrido sob demanda.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeLevel {
+    /// O prefixo deste nível (vazio na raiz).
+    pub prefix: String,
+    pub children: Vec<Branch>,
+    /// Quantas chaves foram varridas para montar este nível.
+    pub scanned: u64,
+    pub total_estimate: u64,
+    /// A lista de filhos bateu em `MAX_CHILDREN` e foi cortada.
+    pub capped: bool,
+}
+
+/// Escapa os curingas do `MATCH` do Redis (`*`, `?`, `[`, `]`, `\\`).
+///
+/// Sem isso, um prefixo contendo `*` deixaria de selecionar o que está sob
+/// ele e passaria a casar com qualquer coisa — devolvendo chaves de outros
+/// galhos como se fossem deste.
+fn escapar_glob(texto: &str) -> String {
+    let mut out = String::with_capacity(texto.len());
+    for ch in texto.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Varre UM nível da árvore, contando os filhos em vez de guardar as chaves.
+///
+/// É esta troca que torna um banco de milhões de chaves navegável: a memória
+/// passa a ser proporcional ao número de filhos DISTINTOS do nível (dezenas,
+/// em geral), e não ao número de chaves. Guardar 3,7 milhões de nomes para
+/// depois agrupá-los custava quase um gigabyte; contá-los enquanto passam
+/// custa alguns kilobytes.
+///
+/// O `MATCH` do `SCAN` não torna a varredura mais curta no servidor — ele
+/// filtra o que volta pela rede, que é justamente o caro. Abrir um galho de
+/// mil chaves num banco de milhões transfere mil nomes, não milhões.
+pub async fn scan_level(
+    pool: &Pool,
+    host: &Host,
+    pw: Option<&str>,
+    db: u8,
+    prefix: &str,
+    progress: impl Fn(ScanTick),
+) -> Result<TreeLevel, ConnError> {
+    let padrao = format!("{}*", escapar_glob(prefix));
+    let progress = &progress;
+
+    let (mut children, scanned, total_estimate, capped) = pool
+        .with_retry(host, db, pw, move |mut conn| {
+            let padrao = padrao.clone();
+            async move {
+                let total_estimate: u64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+
+                // `BTreeMap` e não `HashMap`: a ordem sai pronta, e ordenar
+                // depois custaria mais do que mantê-la.
+                let mut filhos: std::collections::BTreeMap<String, (u64, Option<String>)> =
+                    std::collections::BTreeMap::new();
+                let mut scanned = 0u64;
+                let mut capped = false;
+                let mut cursor = 0u64;
+
+                loop {
+                    let (next, lote): (u64, Vec<String>) = redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(&padrao)
+                        .arg("COUNT")
+                        .arg(SCAN_COUNT)
+                        .query_async(&mut conn)
+                        .await?;
+
+                    for chave in lote {
+                        // O `MATCH` é do servidor; esta checagem é nossa, e
+                        // protege de um escape que tenha falhado.
+                        let Some(resto) = chave.strip_prefix(prefix) else {
+                            continue;
+                        };
+                        scanned += 1;
+
+                        let (rotulo, folha) = match resto.split_once(SEPARATOR) {
+                            Some((segmento, _)) => (segmento.to_string(), None),
+                            None => (resto.to_string(), Some(chave.clone())),
+                        };
+
+                        // O `len` é lido antes do empréstimo mutável para
+                        // o compilador não ver os dois ao mesmo tempo.
+                        let cheio = filhos.len() >= MAX_CHILDREN;
+                        if let Some(entrada) = filhos.get_mut(&rotulo) {
+                            entrada.0 += 1;
+                            // Duas chaves sob o mesmo rótulo: deixou de ser
+                            // folha, virou galho.
+                            if entrada.0 > 1 {
+                                entrada.1 = None;
+                            }
+                        } else if cheio {
+                            // Teto batido: para de listar filhos novos, mas
+                            // segue contando o que foi varrido, para o
+                            // número na tela continuar verdadeiro.
+                            capped = true;
+                        } else {
+                            filhos.insert(rotulo, (1, folha));
+                        }
+                    }
+
+                    progress(ScanTick {
+                        scanned,
+                        total_estimate,
+                    });
+
+                    if next == 0 {
+                        break;
+                    }
+                    cursor = next;
+                }
+
+                Ok((filhos, scanned, total_estimate, capped))
+            }
+        })
+        .await
+        .map(|(filhos, scanned, total, capped)| {
+            let children: Vec<Branch> = filhos
+                .into_iter()
+                .map(|(label, (count, leaf_key))| Branch {
+                    full_prefix: format!("{prefix}{label}{SEPARATOR}"),
+                    label,
+                    count,
+                    leaf_key,
+                })
+                .collect();
+            (children, scanned, total, capped)
+        })?;
+
+    // Galhos antes de folhas, cada grupo em ordem de nome: a pessoa procura
+    // pelo caminho, e um caminho que some no meio de uma lista de folhas é
+    // um caminho perdido.
+    children.sort_by(|a, b| {
+        a.leaf_key
+            .is_some()
+            .cmp(&b.leaf_key.is_some())
+            .then_with(|| a.label.cmp(&b.label))
+    });
+
+    Ok(TreeLevel {
+        prefix: prefix.to_string(),
+        children,
+        scanned,
+        total_estimate,
+        capped,
+    })
+}
+
 /// Andamento de uma varredura de nomes: quantas chaves já vieram e quantas
 /// o servidor diz ter (`DBSIZE`).
 ///
@@ -447,6 +623,145 @@ mod tests {
             tls: false,
             env: Env::Dev,
         }
+    }
+
+    /// Cria chaves, roda o corpo e apaga tudo — mesmo se o corpo falhar
+    /// numa asserção, para não deixar lixo no banco compartilhado.
+    async fn com_chaves<F, Fut, T>(chaves: &[&str], corpo: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        for chave in chaves {
+            let _: () = redis::cmd("SET")
+                .arg(chave)
+                .arg("x")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+
+        let saida = corpo().await;
+
+        for chave in chaves {
+            let _: () = redis::cmd("DEL")
+                .arg(chave)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+        saida
+    }
+
+    fn galho<'a>(nivel: &'a TreeLevel, rotulo: &str) -> &'a Branch {
+        nivel
+            .children
+            .iter()
+            .find(|b| b.label == rotulo)
+            .unwrap_or_else(|| {
+                panic!(
+                    "esperava o galho {rotulo:?}, vieram {:?}",
+                    nivel.children.iter().map(|b| &b.label).collect::<Vec<_>>()
+                )
+            })
+    }
+
+    #[tokio::test]
+    async fn scan_level_counts_the_first_segment_without_holding_every_key() {
+        let chaves = [
+            "nivel_rs_test:wallet:1",
+            "nivel_rs_test:wallet:2",
+            "nivel_rs_test:wallet:3",
+            "nivel_rs_test:cache:1",
+        ];
+        com_chaves(&chaves, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let nivel = scan_level(&pool, &host, None, host.db, "nivel_rs_test:", |_| {})
+                .await
+                .unwrap();
+
+            assert_eq!(galho(&nivel, "wallet").count, 3);
+            assert_eq!(galho(&nivel, "cache").count, 1);
+            // Galho não é folha: tem filhos abaixo dele.
+            assert_eq!(galho(&nivel, "wallet").leaf_key, None);
+            assert_eq!(galho(&nivel, "wallet").full_prefix, "nivel_rs_test:wallet:");
+            assert!(!nivel.capped);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scan_level_descends_only_into_the_prefix_asked_for() {
+        let chaves = [
+            "desce_rs_test:a:um",
+            "desce_rs_test:a:dois",
+            "desce_rs_test:b:tres",
+        ];
+        com_chaves(&chaves, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let nivel = scan_level(&pool, &host, None, host.db, "desce_rs_test:a:", |_| {})
+                .await
+                .unwrap();
+
+            let rotulos: Vec<&str> = nivel.children.iter().map(|b| b.label.as_str()).collect();
+            assert_eq!(rotulos.len(), 2, "só os filhos de `a:`, veio {rotulos:?}");
+            // Sem mais `:` adiante, cada um é uma folha com a chave inteira.
+            assert_eq!(
+                galho(&nivel, "um").leaf_key.as_deref(),
+                Some("desce_rs_test:a:um")
+            );
+            assert_eq!(galho(&nivel, "dois").count, 1);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scan_level_escapes_glob_characters_in_the_prefix() {
+        // `*`, `?` e `[` são curingas do MATCH do Redis. Sem escapá-los, um
+        // prefixo que os contenha varreria o banco inteiro — e, pior,
+        // devolveria chaves que não estão sob ele.
+        let chaves = ["glob_rs_test:a*b:dentro", "glob_rs_test:axxb:fora"];
+        com_chaves(&chaves, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let nivel = scan_level(&pool, &host, None, host.db, "glob_rs_test:a*b:", |_| {})
+                .await
+                .unwrap();
+
+            let rotulos: Vec<&str> = nivel.children.iter().map(|b| b.label.as_str()).collect();
+            assert_eq!(rotulos, vec!["dentro"], "o `*` foi tratado como curinga");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn scan_level_caps_an_absurd_number_of_children_and_says_so() {
+        // Um nível com um identificador diferente por chave: listar todos
+        // seria devolver a lista inteira de chaves disfarçada de árvore.
+        let chaves: Vec<String> = (0..(MAX_CHILDREN + 20))
+            .map(|i| format!("teto_rs_test:{i}:folha"))
+            .collect();
+        let refs: Vec<&str> = chaves.iter().map(|s| s.as_str()).collect();
+
+        com_chaves(&refs, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let nivel = scan_level(&pool, &host, None, host.db, "teto_rs_test:", |_| {})
+                .await
+                .unwrap();
+
+            assert!(nivel.capped, "a tela precisa saber que a lista foi cortada");
+            assert_eq!(nivel.children.len(), MAX_CHILDREN);
+            // E a contagem de chaves varridas continua verdadeira, mesmo
+            // com a lista cortada.
+            assert_eq!(nivel.scanned, (MAX_CHILDREN + 20) as u64);
+        })
+        .await;
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ use crate::core::config::{ConfigError, Env, Host, HostStore};
 use crate::core::conn::{ConnError, Pool};
 use crate::core::history::{Actor, History, HistoryEntry, HistoryError};
 use crate::core::index::{Index, IndexError, ScanProgress, ScanReport};
-use crate::core::keys::{ScanTick, TreeNode, build_tree, scan_names};
+use crate::core::keys::{ScanTick, TreeLevel, scan_level};
 use crate::core::search::{SearchOutcome, search as search_index};
 use crate::core::value::{
     ValueLimit, ValueView, WriteOp, op_summary, read_value as read_value_from_redis,
@@ -228,21 +228,24 @@ pub async fn list_dbs(state: &AppState, host_id: &str) -> Result<Vec<(u8, u64)>>
 
 // ----------------------------------------------------------------- chaves
 
-/// A árvore de chaves do (host, banco).
+/// Um nível da árvore de chaves, varrido sob demanda.
 ///
-/// Varre SÓ os nomes: é tudo que a árvore usa. `progress` é chamado a cada
-/// lote do cursor, para a tela poder mostrar quanto já veio em vez de uma
-/// mensagem parada — contra um Redis em outra região, essa varredura leva
-/// segundos, e segundos sem notícia parecem travamento.
-pub async fn load_tree(
+/// `prefix` vazio é a raiz. A tela abre um galho pedindo o nível dele, em
+/// vez de receber a árvore inteira de uma vez: num banco de milhões de
+/// chaves, a árvore inteira é quase um gigabyte de memória e dezenas de
+/// segundos de espera para mostrar meia dúzia de prefixos.
+///
+/// `progress` é chamado a cada lote do cursor, para a tela mostrar quanto
+/// já veio em vez de uma mensagem parada.
+pub async fn load_level(
     state: &AppState,
     host_id: &str,
     db: u8,
+    prefix: &str,
     progress: impl Fn(ScanTick),
-) -> Result<Vec<TreeNode>> {
+) -> Result<TreeLevel> {
     let (host, pw) = state.host_and_password(host_id)?;
-    let keys = scan_names(&state.pool, &host, pw.as_deref(), db, progress).await?;
-    Ok(build_tree(&keys))
+    Ok(scan_level(&state.pool, &host, pw.as_deref(), db, prefix, progress).await?)
 }
 
 /// Refaz o índice de busca do (host, banco). `progress` é chamado a cada
@@ -461,13 +464,14 @@ pub async fn cmd_list_dbs(
 }
 
 #[tauri::command]
-pub async fn cmd_load_tree(
+pub async fn cmd_load_level(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     host_id: String,
     db: u8,
-) -> Result<Vec<TreeNode>> {
-    load_tree(&state, &host_id, db, move |tick| {
+    prefix: String,
+) -> Result<TreeLevel> {
+    load_level(&state, &host_id, db, &prefix, move |tick| {
         // Um evento perdido só atrasa a porcentagem; nunca pode derrubar a
         // varredura que já está em andamento.
         let _ = app.emit(TREE_PROGRESS_EVENT, tick);

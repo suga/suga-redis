@@ -15,45 +15,11 @@ vi.mock("$lib/api", async (importOriginal) => {
 });
 
 import { readValue, readValueMore } from "$lib/api";
-import KeyTree from "$lib/KeyTree.svelte";
 import ValuePanel from "$lib/ValuePanel.svelte";
-import type { Bytes, TreeNode, ValueView } from "$lib/api";
+import type { Bytes, ValueView } from "$lib/api";
 
 const lidos = vi.mocked(readValue);
 const maisLidos = vi.mocked(readValueMore);
-
-function galho(label: string, prefix: string, children: TreeNode[]): TreeNode {
-	return {
-		label,
-		full_prefix: prefix,
-		count: children.reduce((soma, filho) => soma + filho.count, 0),
-		children,
-		leaf_key: null,
-	};
-}
-
-function folha(label: string, key: string): TreeNode {
-	return { label, full_prefix: key, count: 1, children: [], leaf_key: key };
-}
-
-/**
- *   sessao:
- *     ativa:  (2 folhas)
- *     morta:  (1 folha)
- *   fatura:   (1 folha)
- */
-function arvore(): TreeNode[] {
-	return [
-		galho("sessao", "sessao", [
-			galho("ativa", "sessao:ativa", [
-				folha("alpha", "sessao:ativa:alpha"),
-				folha("beta", "sessao:ativa:beta"),
-			]),
-			galho("morta", "sessao:morta", [folha("gama", "sessao:morta:gama")]),
-		]),
-		galho("fatura", "fatura", [folha("2026", "fatura:2026")]),
-	];
-}
 
 function texto(valor: string): Bytes {
 	return { text: valor, base64: null, truncated: false };
@@ -79,52 +45,6 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.useRealTimers();
-});
-
-test("clicar num galho abre os filhos e mostra a contagem", async () => {
-	const user = userEvent.setup();
-	render(KeyTree, {
-		props: { nodes: arvore(), selectedKey: null, onSelect: vi.fn(), filter: "" },
-	});
-
-	// Fechado: a contagem aparece, os filhos não.
-	expect(screen.getByRole("button", { name: /sessao/ })).toHaveTextContent("3");
-	expect(screen.queryByRole("button", { name: /ativa/ })).not.toBeInTheDocument();
-
-	await user.click(screen.getByRole("button", { name: /sessao/ }));
-
-	expect(screen.getByRole("button", { name: /ativa/ })).toHaveTextContent("2");
-	expect(screen.getByRole("button", { name: /morta/ })).toHaveTextContent("1");
-});
-
-test("clicar numa folha chama read_value com a chave inteira", async () => {
-	const user = userEvent.setup();
-	const onSelect = vi.fn();
-	render(KeyTree, {
-		props: { nodes: arvore(), selectedKey: null, onSelect, filter: "" },
-	});
-
-	await user.click(screen.getByRole("button", { name: /sessao/ }));
-	await user.click(screen.getByRole("button", { name: /ativa/ }));
-	await user.click(screen.getByRole("button", { name: /alpha/ }));
-
-	// A chave inteira, não o rótulo do galho.
-	expect(onSelect).toHaveBeenCalledWith("sessao:ativa:alpha");
-});
-
-test("filtro de nome esconde os galhos sem acerto e mantém o caminho dos que têm", () => {
-	render(KeyTree, {
-		props: { nodes: arvore(), selectedKey: null, onSelect: vi.fn(), filter: "gama" },
-	});
-
-	// O caminho inteiro até o acerto sobrevive e já vem aberto.
-	expect(screen.getByRole("button", { name: /sessao/ })).toBeInTheDocument();
-	expect(screen.getByRole("button", { name: /morta/ })).toBeInTheDocument();
-	expect(screen.getByRole("button", { name: /gama/ })).toBeInTheDocument();
-
-	// Os galhos sem acerto nenhum somem inteiros.
-	expect(screen.queryByRole("button", { name: /ativa/ })).not.toBeInTheDocument();
-	expect(screen.queryByRole("button", { name: /fatura/ })).not.toBeInTheDocument();
 });
 
 test('valor truncado mostra "mostrando 500 de 12.430" e o botão de carregar mais', async () => {

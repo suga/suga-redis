@@ -14,7 +14,6 @@
 	import {
 		errorMessage,
 		listDbs,
-		loadTree,
 		onRescanProgress,
 		onTreeProgress,
 		rescan,
@@ -25,7 +24,6 @@
 		type ScanProgress,
 		type ScanTick,
 		type ScanReport,
-		type TreeNode,
 		type WriteOp,
 	} from "$lib/api";
 	import { onMount, untrack } from "svelte";
@@ -44,12 +42,10 @@
 	 */
 	let db = $state(untrack(() => host.db));
 	let bancos = $state<[number, number][]>([]);
-	let nodes = $state<TreeNode[]>([]);
 	let filtro = $state("");
 	let selecionada = $state<string | null>(null);
 	let relatorio = $state<ScanReport | null>(null);
 	let progresso = $state<ScanProgress | null>(null);
-	let carregando = $state(false);
 	/** Andamento da varredura que monta a árvore. */
 	let lendo = $state<ScanTick | null>(null);
 	let varrendo = $state(false);
@@ -84,25 +80,22 @@
 			: 0,
 	);
 
-	async function carregarArvore(hostId: string, banco: number) {
-		carregando = true;
-		lendo = null;
+	/**
+	 * A árvore se carrega sozinha, nível a nível — aqui só vem a idade do
+	 * índice de busca, que é do (host, banco) e não de um galho.
+	 */
+	async function carregarEstado(hostId: string, banco: number) {
 		erro = "";
 		selecionada = null;
 		try {
-			nodes = await loadTree(hostId, banco);
 			relatorio = await scanStatus(hostId, banco);
 		} catch (err) {
-			nodes = [];
 			erro = errorMessage(err);
-		} finally {
-			carregando = false;
-			lendo = null;
 		}
 	}
 
 	$effect(() => {
-		carregarArvore(host.id, db);
+		carregarEstado(host.id, db);
 	});
 
 	$effect(() => {
@@ -161,7 +154,6 @@
 				return;
 			}
 			criacaoPendente = null;
-			await carregarArvore(host.id, db);
 			selecionada = key;
 		} catch (err) {
 			criacaoPendente = null;
@@ -170,17 +162,13 @@
 	}
 
 	/** Uma escrita foi aplicada: relê a chave e atualiza a árvore. */
-	async function escreveu() {
-		const chave = selecionada;
-		await carregarArvore(host.id, db);
-		selecionada = chave;
+	function escreveu() {
 		revisao += 1;
 	}
 
-	/** A chave sumiu entre a varredura e o clique: tira da árvore. */
+	/** A chave sumiu entre a varredura e o clique: tira da seleção. */
 	function chaveSumiu() {
 		selecionada = null;
-		carregarArvore(host.id, db);
 	}
 </script>
 
@@ -204,7 +192,7 @@
 				<input
 					class="filtro"
 					bind:value={filtro}
-					placeholder="Filtrar por nome"
+					placeholder="Filtrar o que está aberto"
 					aria-label="Filtrar chaves por nome"
 				/>
 				<button onclick={() => (criando = true)}>Nova chave</button>
@@ -227,36 +215,35 @@
 			</div>
 		</div>
 
-		<div class="arvore">
-			{#if carregando}
-				<div class="lendo" data-testid="lendo">
-					<p class="lendo-linha">
-						Lendo as chaves
-						{#if lendo}
-							<span class="mono">
-								{porcentagem}% ({numero(lendo.scanned)} de {numero(lendo.total_estimate)})
-							</span>
-						{/if}
-					</p>
-					<div
-						class="barra"
-						role="progressbar"
-						aria-valuenow={porcentagem}
-						aria-valuemin="0"
-						aria-valuemax="100"
-						aria-label="Progresso da leitura das chaves"
-					>
-						<div class="barra-cheia" style="width: {porcentagem}%"></div>
-					</div>
+		{#if lendo}
+			<div class="lendo" data-testid="lendo">
+				<p class="lendo-linha">
+					Lendo as chaves
+					<span class="mono">
+						{porcentagem}% ({numero(lendo.scanned)} de {numero(lendo.total_estimate)})
+					</span>
+				</p>
+				<div
+					class="barra"
+					role="progressbar"
+					aria-valuenow={porcentagem}
+					aria-valuemin="0"
+					aria-valuemax="100"
+					aria-label="Progresso da leitura das chaves"
+				>
+					<div class="barra-cheia" style="width: {porcentagem}%"></div>
 				</div>
-			{:else}
-				<KeyTree
-					{nodes}
-					selectedKey={selecionada}
-					onSelect={(key) => (selecionada = key)}
-					filter={filtro}
-				/>
-			{/if}
+			</div>
+		{/if}
+
+		<div class="arvore">
+			<KeyTree
+				hostId={host.id}
+				{db}
+				selectedKey={selecionada}
+				onSelect={(key) => (selecionada = key)}
+				filter={filtro}
+			/>
 		</div>
 	</div>
 

@@ -1,90 +1,152 @@
 <script lang="ts">
 	/**
-	 * A árvore de chaves, agrupada por prefixo.
+	 * A árvore de chaves, agrupada por prefixo e carregada por NÍVEL.
 	 *
-	 * Desenha só as linhas que cabem na janela de rolagem. Um banco com
-	 * dezenas de milhares de chaves vira dezenas de milhares de nós na
-	 * árvore, e pôr todos no DOM trava a janela inteira — inclusive a barra
-	 * do ambiente, que é justamente o que não pode sumir.
+	 * Um banco de milhões de chaves não cabe numa árvore montada de uma vez:
+	 * guardar os nomes todos para depois agrupá-los custava quase um
+	 * gigabyte e mais de um minuto antes de aparecer qualquer coisa na tela.
+	 * Aqui cada galho é varrido quando a pessoa o abre, e o servidor devolve
+	 * só os filhos daquele prefixo, já contados.
+	 *
+	 * O que estiver aberto continua desenhado por janela: um nível com
+	 * milhares de filhos ainda pesaria no DOM.
 	 */
-	import { SvelteSet } from "svelte/reactivity";
-	import type { TreeNode } from "$lib/api";
+	import { untrack } from "svelte";
+	import { SvelteMap, SvelteSet } from "svelte/reactivity";
+	import { errorMessage, loadLevel, type Branch, type TreeLevel } from "$lib/api";
+	import { numero } from "$lib/formato";
 
 	interface Props {
-		nodes: TreeNode[];
+		hostId: string;
+		db: number;
 		selectedKey: string | null;
 		onSelect: (key: string) => void;
-		/** Filtro por nome. Vazio mostra a árvore inteira. */
+		/** Filtra o que já está aberto. Vazio mostra tudo. */
 		filter: string;
 	}
 
-	let { nodes, selectedKey, onSelect, filter }: Props = $props();
+	let { hostId, db, selectedKey, onSelect, filter }: Props = $props();
 
 	/** Altura fixa de cada linha, em pixels. É o que torna a janela calculável. */
 	const ROW_HEIGHT = 26;
 	/** Linhas desenhadas além da janela, para a rolagem não mostrar buraco. */
 	const OVERSCAN = 8;
 
-	let abertos = $state(new SvelteSet<string>());
+	/** O que se sabe de cada prefixo já pedido. */
+	type Estado =
+		| { situacao: "carregando" }
+		| { situacao: "pronto"; nivel: TreeLevel }
+		| { situacao: "erro"; mensagem: string };
+
+	let niveis = new SvelteMap<string, Estado>();
+	let abertos = new SvelteSet<string>();
 	let scrollTop = $state(0);
 	let viewport = $state(0);
 
-	/**
-	 * Mantém um galho quando ele mesmo casa com o filtro ou quando sobra
-	 * algum descendente: o caminho até um acerto precisa continuar
-	 * navegável, senão o acerto fica inalcançável. Galho que casa pelo
-	 * próprio nome mantém os filhos todos — quem procurou por ele quer ver
-	 * o que tem dentro.
-	 */
-	function filtrar(lista: TreeNode[], alvo: string): TreeNode[] {
-		const resultado: TreeNode[] = [];
-		for (const node of lista) {
-			const casa =
-				node.label.toLowerCase().includes(alvo) ||
-				(node.leaf_key?.toLowerCase().includes(alvo) ?? false);
-			const filhos = filtrar(node.children, alvo);
-			if (casa) {
-				resultado.push(node);
-			} else if (filhos.length > 0) {
-				resultado.push({ ...node, children: filhos });
-			}
+	async function carregar(prefixo: string) {
+		if (niveis.has(prefixo)) return;
+		niveis.set(prefixo, { situacao: "carregando" });
+		try {
+			niveis.set(prefixo, { situacao: "pronto", nivel: await loadLevel(hostId, db, prefixo) });
+		} catch (err) {
+			// O erro fica NO GALHO: uma falha ao abrir um prefixo não pode
+			// derrubar o que já está navegável acima dele.
+			niveis.set(prefixo, { situacao: "erro", mensagem: errorMessage(err) });
 		}
-		return resultado;
 	}
 
-	let visivel = $derived(
-		filter.trim() ? filtrar(nodes, filter.trim().toLowerCase()) : nodes,
-	);
+	// Trocar de host ou de banco invalida tudo que foi carregado.
+	//
+	// As únicas dependências deste efeito são `hostId` e `db`. O resto vai
+	// dentro de `untrack` porque `carregar` LÊ `niveis` e o efeito o
+	// ESCREVE: sem isso, o efeito depende do que ele mesmo escreve e se
+	// chama em laço até o Svelte abortar.
+	$effect(() => {
+		const id = hostId;
+		const banco = db;
+		untrack(() => {
+			niveis.clear();
+			abertos.clear();
+			void id;
+			void banco;
+			carregar("");
+		});
+	});
 
-	interface Row {
-		node: TreeNode;
+	function alternar(branch: Branch) {
+		if (abertos.has(branch.full_prefix)) {
+			abertos.delete(branch.full_prefix);
+		} else {
+			abertos.add(branch.full_prefix);
+			carregar(branch.full_prefix);
+		}
+	}
+
+	interface Linha {
+		tipo: "galho" | "aviso";
+		branch?: Branch;
 		depth: number;
-		open: boolean;
+		aberto: boolean;
+		/** Para as linhas de aviso: o texto e o papel na tela. */
+		texto?: string;
+		papel?: "carregando" | "erro" | "cortado" | "vazio";
 	}
 
-	/**
-	 * Achata a árvore nas linhas que estão à vista. Com filtro ativo tudo
-	 * que sobrou já vem aberto: a pessoa filtrou para VER os acertos, não
-	 * para abrir galho por galho até chegar neles.
-	 */
-	function achatar(lista: TreeNode[], depth: number, out: Row[]): Row[] {
-		for (const node of lista) {
-			const folha = node.leaf_key !== null;
-			const open = folha ? false : filtrandoAgora || abertos.has(node.full_prefix);
-			out.push({ node, depth, open });
-			if (open) achatar(node.children, depth + 1, out);
+	let alvo = $derived(filter.trim().toLowerCase());
+
+	/** Achata o que está carregado e aberto nas linhas à vista. */
+	function achatar(prefixo: string, depth: number, out: Linha[]): Linha[] {
+		const estado = niveis.get(prefixo);
+		if (!estado) return out;
+
+		if (estado.situacao === "carregando") {
+			out.push({ tipo: "aviso", depth, aberto: false, texto: "Lendo…", papel: "carregando" });
+			return out;
+		}
+		if (estado.situacao === "erro") {
+			out.push({ tipo: "aviso", depth, aberto: false, texto: estado.mensagem, papel: "erro" });
+			return out;
+		}
+
+		const visiveis = alvo
+			? estado.nivel.children.filter((b) => b.label.toLowerCase().includes(alvo))
+			: estado.nivel.children;
+
+		for (const branch of visiveis) {
+			const aberto = abertos.has(branch.full_prefix);
+			out.push({ tipo: "galho", branch, depth, aberto });
+			if (aberto) achatar(branch.full_prefix, depth + 1, out);
+		}
+
+		if (alvo && visiveis.length === 0) {
+			out.push({
+				tipo: "aviso",
+				depth,
+				aberto: false,
+				texto: "Nada com esse nome entre os galhos abertos. Use a aba Busca para procurar no banco inteiro.",
+				papel: "vazio",
+			});
+		}
+
+		if (estado.nivel.capped) {
+			out.push({
+				tipo: "aviso",
+				depth,
+				aberto: false,
+				texto: `Este nível tem mais nomes distintos do que cabem na árvore. Use a aba Busca para chegar ao que falta.`,
+				papel: "cortado",
+			});
 		}
 		return out;
 	}
 
-	let filtrandoAgora = $derived(filter.trim().length > 0);
-	let linhas = $derived(achatar(visivel, 0, []));
+	let linhas = $derived(achatar("", 0, []));
 
 	/**
 	 * A fatia a desenhar. Enquanto a janela não foi medida (primeira pintura,
 	 * e também em teste fora de um navegador de verdade) `viewport` é zero —
-	 * aí desenha tudo, que é o comportamento correto para as árvores
-	 * pequenas e nunca esconde linha de ninguém.
+	 * aí desenha tudo, que é o correto para as listas pequenas e nunca
+	 * esconde linha de ninguém.
 	 */
 	let inicio = $derived(
 		viewport === 0 ? 0 : Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN),
@@ -99,18 +161,12 @@
 	);
 	let fatia = $derived(linhas.slice(inicio, fim));
 
-	function alternar(node: TreeNode) {
-		if (abertos.has(node.full_prefix)) abertos.delete(node.full_prefix);
-		else abertos.add(node.full_prefix);
-	}
-
 	function medir(el: HTMLElement) {
 		viewport = el.clientHeight;
 		const observer = new ResizeObserver(() => (viewport = el.clientHeight));
 		observer.observe(el);
 		return { destroy: () => observer.disconnect() };
 	}
-
 </script>
 
 <div
@@ -119,28 +175,38 @@
 	onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
 >
 	{#if linhas.length === 0}
-		<p class="vazio">
-			{filtrandoAgora ? "Nenhuma chave com esse nome." : "Nenhuma chave neste banco."}
-		</p>
+		<p class="vazio">Nenhuma chave neste banco.</p>
 	{:else}
 		<div class="pista" style="height: {linhas.length * ROW_HEIGHT}px">
 			<div class="janela" style="transform: translateY({inicio * ROW_HEIGHT}px)">
-				{#each fatia as row (row.node.full_prefix)}
-					{@const folha = row.node.leaf_key}
-					<button
-						class="linha"
-						class:selecionada={folha !== null && folha === selectedKey}
-						style="padding-left: {0.5 + row.depth * 0.85}rem"
-						onclick={() => (folha !== null ? onSelect(folha) : alternar(row.node))}
-					>
-						<span class="caret" aria-hidden="true">
-							{folha !== null ? "" : row.open ? "▾" : "▸"}
-						</span>
-						<span class="rotulo">{row.node.label}</span>
-						{#if folha === null}
-							<span class="contagem mono">{row.node.count}</span>
-						{/if}
-					</button>
+				{#each fatia as linha, i (linha.branch?.full_prefix ?? `${linha.papel}-${inicio + i}`)}
+					{#if linha.tipo === "galho" && linha.branch}
+						{@const branch = linha.branch}
+						<button
+							class="linha"
+							class:selecionada={branch.leaf_key !== null && branch.leaf_key === selectedKey}
+							style="padding-left: {0.5 + linha.depth * 0.85}rem"
+							onclick={() =>
+								branch.leaf_key !== null ? onSelect(branch.leaf_key) : alternar(branch)}
+						>
+							<span class="caret" aria-hidden="true">
+								{branch.leaf_key !== null ? "" : linha.aberto ? "▾" : "▸"}
+							</span>
+							<span class="rotulo">{branch.label}</span>
+							{#if branch.leaf_key === null}
+								<span class="contagem mono">{numero(branch.count)}</span>
+							{/if}
+						</button>
+					{:else}
+						<p
+							class="linha aviso aviso--{linha.papel}"
+							style="padding-left: {0.5 + linha.depth * 0.85}rem"
+							role={linha.papel === "erro" ? "alert" : undefined}
+							data-testid={linha.papel === "cortado" ? "cortado-nivel" : undefined}
+						>
+							{linha.texto}
+						</p>
+					{/if}
 				{/each}
 			</div>
 		</div>
@@ -159,7 +225,7 @@
 		color: var(--text-faint);
 	}
 
-	/* A pista tem a altura da árvore INTEIRA, para a barra de rolagem
+	/* A pista tem a altura de tudo que está aberto, para a barra de rolagem
 	   corresponder ao conteúdo real; a janela desliza dentro dela. */
 	.pista {
 		position: relative;
@@ -178,6 +244,7 @@
 		gap: 0.35rem;
 		width: 100%;
 		height: 26px;
+		margin: 0;
 		padding-right: 0.6rem;
 		border: none;
 		border-radius: 0;
@@ -185,7 +252,7 @@
 		white-space: nowrap;
 	}
 
-	.linha:hover {
+	button.linha:hover {
 		background: var(--panel-dark);
 	}
 
@@ -209,5 +276,20 @@
 		margin-left: auto;
 		color: var(--text-faint);
 		font-size: 0.85em;
+	}
+
+	.aviso {
+		font-size: 0.85rem;
+		color: var(--text-faint);
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+
+	.aviso--erro {
+		color: #e49a94;
+	}
+
+	.aviso--cortado {
+		color: var(--action);
 	}
 </style>

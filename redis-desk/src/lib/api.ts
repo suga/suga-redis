@@ -56,13 +56,27 @@ export interface KeyMeta {
 	size_bytes: number;
 }
 
-export interface TreeNode {
+/** Um filho de um nível da árvore: um galho a abrir ou uma folha a ler. */
+export interface Branch {
+	/** O segmento, sem o prefixo do pai. */
 	label: string;
+	/** O prefixo acumulado, já com o `:` no fim. Abre este galho. */
 	full_prefix: string;
 	count: number;
-	children: TreeNode[];
-	/** Preenchido só nas folhas: o nome completo da chave. */
+	/** Preenchido só quando este filho É uma chave, não um galho. */
 	leaf_key: string | null;
+}
+
+/** Um nível da árvore, varrido sob demanda. */
+export interface TreeLevel {
+	/** O prefixo deste nível. Vazio na raiz. */
+	prefix: string;
+	children: Branch[];
+	/** Quantas chaves foram varridas para montar este nível. */
+	scanned: number;
+	total_estimate: number;
+	/** A lista de filhos bateu no teto e foi cortada. */
+	capped: boolean;
 }
 
 // ------------------------------------------------------------------ valor
@@ -291,8 +305,16 @@ export function listDbs(hostId: string): Promise<[number, number][]> {
 	return invoke("cmd_list_dbs", { hostId });
 }
 
-export function loadTree(hostId: string, db: number): Promise<TreeNode[]> {
-	return invoke("cmd_load_tree", { hostId, db });
+/**
+ * Um nível da árvore. `prefix` vazio traz a raiz; para abrir um galho,
+ * passe o `full_prefix` dele.
+ */
+export function loadLevel(
+	hostId: string,
+	db: number,
+	prefix: string,
+): Promise<TreeLevel> {
+	return invoke("cmd_load_level", { hostId, db, prefix });
 }
 
 /** Acompanha a varredura que monta a árvore. Chame o retorno para parar. */
