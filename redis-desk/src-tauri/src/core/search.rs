@@ -25,10 +25,11 @@
 //!
 //! Procurar por NOME não passa pelo índice: os nomes das chaves são lidos
 //! do servidor na hora, a cada busca. É o que faz `UNIDADE07` achar
-//! `vitrine:...:UNIDADE07:t1` num banco que nunca foi varrido — e varrer
-//! 50 mil chaves para montar a árvore já custa onze idas e voltas, então
-//! lê-las de novo aqui é barato perto de devolver "nenhuma chave" para
-//! uma chave que está ali.
+//! `vitrine:...:UNIDADE07:t1` num banco que nunca foi varrido.
+//!
+//! Essa leitura filtra enquanto varre e para ao juntar `limit` acertos, de
+//! modo que a memória não cresce com o tamanho do banco — só com o número
+//! de acertos que a tela vai mostrar.
 //!
 //! O VALOR continua vindo do índice, porque lê-lo ao vivo exigiria baixar
 //! o banco inteiro a cada letra digitada.
@@ -58,7 +59,7 @@ use serde::{Deserialize, Serialize};
 use super::config::Host;
 use super::conn::{ConnError, Pool};
 use super::index::{Index, Result, kind_from_label, now_unix_ms};
-use super::keys::{KeyKind, scan_names};
+use super::keys::{KeyKind, scan_matching_names};
 
 /// Mínimo de caracteres para o tokenizador `trigram` conseguir indexar (e
 /// portanto casar) a agulha. Abaixo disso, ver "Agulha curta" no topo.
@@ -171,7 +172,10 @@ pub async fn search(
     // junto, e a versão ao vivo viria sem ele.
     let conhecidas: std::collections::HashSet<&str> =
         candidates.iter().map(|c| c.key.as_str()).collect();
-    let ao_vivo: Vec<Candidate> = scan_names(pool, host, pw, db, |_| {})
+    // O filtro acontece DURANTE a varredura, não depois: juntar os nomes
+    // de um banco de milhões de chaves para descartá-los em seguida custa
+    // centenas de megabytes a cada busca.
+    let ao_vivo: Vec<Candidate> = scan_matching_names(pool, host, pw, db, needle, limit)
         .await?
         .into_iter()
         .filter(|nome| !conhecidas.contains(nome.as_str()))

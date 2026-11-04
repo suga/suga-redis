@@ -272,55 +272,79 @@ pub struct ScanTick {
     pub total_estimate: u64,
 }
 
-/// Varre só os NOMES das chaves, sem pedir metadado nenhum.
+/// Varre os nomes e guarda SÓ os que contêm `needle`, até `limit`.
 ///
-/// É o que a árvore da tela precisa — e só isso: `build_tree` lê o nome e
-/// descarta o resto. Pedir `TYPE`, `PTTL` e `MEMORY USAGE` de cada chave
-/// para montá-la custava uma ida e volta a cada 200 chaves, trazendo da
-/// outra ponta da rede um dado que ia direto para o lixo. Num Redis
-/// gerenciado em outra região, com 50 mil chaves, eram 250 viagens de ~130 ms
-/// só para isso.
+/// Filtra enquanto os nomes passam e para assim que tem acertos
+/// suficientes, de modo que a memória acompanha o número de ACERTOS e não o
+/// tamanho do banco. Juntar o banco inteiro num `Vec` para filtrar depois
+/// custava centenas de megabytes a cada busca.
 ///
-/// `progress` é chamado a cada lote do cursor, com o que já veio e o
-/// `DBSIZE` lido antes de começar.
-pub async fn scan_names(
+/// A comparação ignora a caixa. Para uma chave em ASCII puro — a esmagadora
+/// maioria — isso é feito sem alocar nada; só um nome com acento ou
+/// caractere fora do ASCII paga uma cópia em caixa baixa.
+pub async fn scan_matching_names(
     pool: &Pool,
     host: &Host,
     pw: Option<&str>,
     db: u8,
-    progress: impl Fn(ScanTick),
+    needle: &str,
+    limit: usize,
 ) -> Result<Vec<String>, ConnError> {
-    let progress = &progress;
-    pool.with_retry(host, db, pw, move |mut conn| async move {
-        // Uma ida e volta a mais, no começo, para a tela poder dizer
-        // "45%" em vez de "aguarde". Vale a troca.
-        let total_estimate: u64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+    let agulha = needle.to_lowercase();
+    let agulha = &agulha;
 
-        let mut names: Vec<String> = Vec::with_capacity(total_estimate as usize);
-        let mut cursor: u64 = 0;
+    pool.with_retry(host, db, pw, move |mut conn| async move {
+        let mut achados: Vec<String> = Vec::new();
+        let mut cursor = 0u64;
+
         loop {
-            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            let (next, lote): (u64, Vec<String>) = redis::cmd("SCAN")
                 .arg(cursor)
                 .arg("COUNT")
                 .arg(SCAN_COUNT)
                 .query_async(&mut conn)
                 .await?;
 
-            names.extend(batch);
-            progress(ScanTick {
-                scanned: names.len() as u64,
-                total_estimate,
-            });
+            for chave in lote {
+                if contem_ignorando_caixa(&chave, agulha) {
+                    achados.push(chave);
+                    if achados.len() >= limit {
+                        return Ok(achados);
+                    }
+                }
+            }
 
-            if next_cursor == 0 {
+            if next == 0 {
                 break;
             }
-            cursor = next_cursor;
+            cursor = next;
         }
 
-        Ok(names)
+        Ok(achados)
     })
     .await
+}
+
+/// `palheiro` contém `agulha` (já em caixa baixa), ignorando a caixa.
+///
+/// O caminho de ASCII não aloca: percorre os bytes comparando com a caixa
+/// dobrada na hora. Só um nome com byte fora do ASCII cai no caminho geral,
+/// que copia a string em caixa baixa — correto para todo o Unicode, e raro
+/// o bastante em nome de chave para não pesar.
+fn contem_ignorando_caixa(palheiro: &str, agulha: &str) -> bool {
+    if agulha.is_empty() {
+        return true;
+    }
+    if !palheiro.is_ascii() || !agulha.is_ascii() {
+        return palheiro.to_lowercase().contains(agulha);
+    }
+
+    let (p, a) = (palheiro.as_bytes(), agulha.as_bytes());
+    if a.len() > p.len() {
+        return false;
+    }
+    p.windows(a.len())
+        .any(|janela| janela.eq_ignore_ascii_case(a))
 }
 
 /// Varre todas as chaves de `db` no host informado, usando `SCAN` (nunca
@@ -765,87 +789,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scan_names_returns_every_key_without_asking_for_metadata() {
-        let pool = Pool::new();
-        let host = test_host();
-        let mut conn = pool.get(&host, host.db, None).await.unwrap();
-
+    async fn scan_matching_names_keeps_only_the_matches_and_stops_at_the_limit() {
         let chaves = [
-            "keys_rs_test:nomes:wallet:1",
-            "keys_rs_test:nomes:cache:1",
-            "keys_rs_test:nomes:provider_config",
+            "casa_rs_test:ALVO:1",
+            "casa_rs_test:alvo:2",
+            "casa_rs_test:alvo:3",
+            "casa_rs_test:outro:1",
         ];
-        for chave in chaves {
-            let _: () = redis::cmd("SET")
-                .arg(chave)
-                .arg("x")
-                .query_async(&mut conn)
+        com_chaves(&chaves, || async {
+            let pool = Pool::new();
+            let host = test_host();
+
+            // Caixa diferente ainda é o mesmo nome.
+            let achados = scan_matching_names(&pool, &host, None, host.db, "alvo", 10)
                 .await
                 .unwrap();
-        }
+            let meus: Vec<&String> = achados
+                .iter()
+                .filter(|n| n.starts_with("casa_rs_test:"))
+                .collect();
+            assert_eq!(meus.len(), 3, "veio {meus:?}");
+            assert!(meus.iter().all(|n| !n.contains("outro")));
 
-        let nomes = scan_names(&pool, &host, None, host.db, |_| {})
-            .await
-            .unwrap();
-
-        for chave in chaves {
-            let _: () = redis::cmd("DEL")
-                .arg(chave)
-                .query_async(&mut conn)
+            // O teto corta a coleta — é ele que impede um banco de milhões
+            // de chaves virar um Vec de milhões de nomes.
+            let poucos = scan_matching_names(&pool, &host, None, host.db, "casa_rs_test:", 2)
                 .await
                 .unwrap();
-        }
-        for chave in chaves {
-            assert!(
-                nomes.iter().any(|nome| nome == chave),
-                "a varredura por nomes precisava trazer {chave}, veio {nomes:?}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn scan_names_reports_progress_against_the_database_size() {
-        let pool = Pool::new();
-        let host = test_host();
-        let mut conn = pool.get(&host, host.db, None).await.unwrap();
-
-        let chave = "keys_rs_test:progresso:unica";
-        let _: () = redis::cmd("SET")
-            .arg(chave)
-            .arg("x")
-            .query_async(&mut conn)
-            .await
-            .unwrap();
-
-        let ticks = std::sync::Mutex::new(Vec::new());
-        let nomes = scan_names(&pool, &host, None, host.db, |tick: ScanTick| {
-            ticks.lock().unwrap().push(tick);
+            assert_eq!(poucos.len(), 2);
         })
-        .await
-        .unwrap();
-        let _: () = redis::cmd("DEL")
-            .arg(chave)
-            .query_async(&mut conn)
-            .await
-            .unwrap();
-
-        let ticks = ticks.into_inner().unwrap();
-        assert!(
-            !ticks.is_empty(),
-            "a varredura precisa avisar o andamento ao menos uma vez"
-        );
-
-        // O total é estimativa (`DBSIZE`), e o banco é compartilhado com os
-        // outros testes — mas tem que ser um número de verdade, ou a tela
-        // não teria como calcular porcentagem nenhuma.
-        assert!(ticks.iter().all(|t| t.total_estimate > 0));
-        // E o contador só anda para a frente, terminando no que foi achado.
-        let scanned: Vec<u64> = ticks.iter().map(|t| t.scanned).collect();
-        assert!(
-            scanned.windows(2).all(|par| par[0] <= par[1]),
-            "veio {scanned:?}"
-        );
-        assert_eq!(*scanned.last().unwrap(), nomes.len() as u64);
+        .await;
     }
 
     #[tokio::test]
