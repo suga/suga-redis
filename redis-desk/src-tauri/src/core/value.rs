@@ -87,6 +87,25 @@ impl Bytes {
             }
         }
     }
+
+    /// Bytes crus prontos para mandar ao Redis — o inverso de `from_raw`,
+    /// usado pela escrita (Task 5). Prefere `text` (o caminho comum: a UI
+    /// edita um campo como texto) e só decodifica `base64` quando não há
+    /// texto, para reabrir um valor binário sem passar por uma conversão de
+    /// texto que corromperia bytes que não são UTF-8 válido. Um `Bytes`
+    /// nem `text` nem `base64` preenchidos (não deveria acontecer vindo da
+    /// UI, que sempre preenche um dos dois) vira bytes vazios em vez de
+    /// entrar em pânico — o pior caso é gravar um valor vazio, não derrubar
+    /// o processo por causa de um dado malformado.
+    fn to_raw(&self) -> Vec<u8> {
+        if let Some(text) = &self.text {
+            text.as_bytes().to_vec()
+        } else if let Some(encoded) = &self.base64 {
+            BASE64.decode(encoded).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 /// Maior prefixo de `text` (em caracteres) cujo tamanho em bytes cabe em
@@ -533,6 +552,278 @@ async fn read_stream(
         .collect();
 
     Ok((page, total))
+}
+
+/// Uma mudança tipada no conteúdo ou no TTL de uma chave editável. Todo
+/// caminho que grava dado neste produto — o editor da UI, o desfazer da
+/// Task 6 e as escritas controladas da LLM na Task 16 — passa por aqui, nunca
+/// por um comando Redis solto montado em outro lugar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WriteOp {
+    SetString { value: Bytes },
+    SetHashField { field: String, value: Bytes },
+    DeleteHashField { field: String },
+    SetListItem { index: i64, value: Bytes },
+    PushListItem { value: Bytes, front: bool },
+    RemoveListItem { index: i64 },
+    SetZSetMember { member: Bytes, score: f64 },
+    RemoveZSetMember { member: Bytes },
+    SetTtl { ttl_ms: Option<i64> },
+    DeleteKey,
+}
+
+/// Sentinela usado só durante `RemoveListItem`, para marcar com `LSET` o
+/// item no índice alvo e removê-lo em seguida com `LREM` (ver
+/// `remove_list_item`). Fixo (não gerado por request) porque o algoritmo não
+/// precisa de aleatoriedade de verdade — só precisa de um valor que nenhum
+/// dado real escrito por um humano ou por este produto jamais vai igualar
+/// por acidente. O prefixo identifica a ferramenta e o UUID embutido é
+/// estático (não é gerado a cada chamada): mesmo assim, a chance de uma
+/// string de usuário colidir byte a byte com um UUID v4 de 128 bits
+/// prefixado é desprezível (2^-122), e o próprio texto deixa claro, a quem
+/// inspecionar a lista no meio da operação, que aquele item é um marcador
+/// interno transitório, não dado de produção.
+const REMOVE_LIST_SENTINEL: &str =
+    "\u{0}__redis-desk:tombstone:f47ac10b-58cc-4372-a567-0e02b2c3d479__";
+
+/// Aplica `op` sobre `key`, preservando o TTL que a chave já tinha — exceto
+/// quando a própria operação é `SetTtl` ou `DeleteKey`, que decidem o TTL
+/// explicitamente. A preservação é por fora do comando Redis específico
+/// (lê o TTL antes, reaplica depois com `PEXPIRE`) em vez de depender de
+/// opções por comando (ex. `SET ... KEEPTTL`): várias escritas deste módulo
+/// substituem a chave inteira como efeito colateral (a mais notória é
+/// `SET`, que sem `KEEPTTL` apaga o TTL existente), e um wrapper único cobre
+/// todas elas sem precisar lembrar, comando a comando, qual tem esse
+/// efeito colateral e qual não tem.
+///
+/// Tipo não editável (`Set`, `Stream`, `RedisJSON` ou um tipo desconhecido)
+/// é recusado antes de qualquer tentativa de escrita — `KeyKind::editable`
+/// é quem decide. Isso vale para toda operação, incluindo `SetTtl` e
+/// `DeleteKey`: este produto trata esses tipos como somente leitura de
+/// ponta a ponta, não só o conteúdo deles.
+pub async fn apply_write(
+    pool: &Pool,
+    host: &Host,
+    pw: Option<&str>,
+    db: u8,
+    key: &str,
+    op: &WriteOp,
+) -> Result<(), ConnError> {
+    let type_name: String = pool
+        .with_retry(host, db, pw, |mut conn| async move {
+            let type_name: String = redis::cmd("TYPE").arg(key).query_async(&mut conn).await?;
+            Ok(type_name)
+        })
+        .await?;
+
+    let key_exists = type_name != "none";
+    if key_exists {
+        let kind = KeyKind::from_type_name(&type_name);
+        if !kind.editable() {
+            return Err(ConnError::Protocol(format!(
+                "a chave \"{key}\" é do tipo \"{type_name}\", que não é editável neste produto"
+            )));
+        }
+    }
+
+    // `SetTtl`/`DeleteKey` decidem o TTL (ou a existência da chave) por
+    // conta própria — não há nada para preservar nesses casos, e tentar
+    // preservar depois de um `DeleteKey` nem faria sentido (a chave já era).
+    let preserve_ttl = !matches!(op, WriteOp::SetTtl { .. } | WriteOp::DeleteKey);
+
+    let existing_ttl_ms = if preserve_ttl && key_exists {
+        let pttl: i64 = pool
+            .with_retry(host, db, pw, |mut conn| async move {
+                let pttl: i64 = redis::cmd("PTTL").arg(key).query_async(&mut conn).await?;
+                Ok(pttl)
+            })
+            .await?;
+        if pttl >= 0 { Some(pttl) } else { None }
+    } else {
+        None
+    };
+
+    pool.with_retry(host, db, pw, |mut conn| {
+        let op = op.clone();
+        async move { execute_op(&mut conn, key, &op).await }
+    })
+    .await?;
+
+    if let Some(ttl_ms) = existing_ttl_ms {
+        pool.with_retry(host, db, pw, |mut conn| async move {
+            let _: () = redis::cmd("PEXPIRE")
+                .arg(key)
+                .arg(ttl_ms)
+                .query_async(&mut conn)
+                .await?;
+            Ok(())
+        })
+        .await?;
+    }
+
+    Ok(())
+}
+
+/// Executa o comando Redis de `op`, assumindo que o tipo da chave já foi
+/// validado como editável por quem chama (`apply_write`).
+async fn execute_op(
+    conn: &mut MultiplexedConnection,
+    key: &str,
+    op: &WriteOp,
+) -> redis::RedisResult<()> {
+    match op {
+        WriteOp::SetString { value } => {
+            redis::cmd("SET")
+                .arg(key)
+                .arg(value.to_raw())
+                .query_async::<()>(conn)
+                .await
+        }
+        WriteOp::SetHashField { field, value } => {
+            redis::cmd("HSET")
+                .arg(key)
+                .arg(field)
+                .arg(value.to_raw())
+                .query_async::<()>(conn)
+                .await
+        }
+        WriteOp::DeleteHashField { field } => {
+            redis::cmd("HDEL")
+                .arg(key)
+                .arg(field)
+                .query_async::<()>(conn)
+                .await
+        }
+        WriteOp::SetListItem { index, value } => {
+            redis::cmd("LSET")
+                .arg(key)
+                .arg(*index)
+                .arg(value.to_raw())
+                .query_async::<()>(conn)
+                .await
+        }
+        WriteOp::PushListItem { value, front } => {
+            let cmd_name = if *front { "LPUSH" } else { "RPUSH" };
+            redis::cmd(cmd_name)
+                .arg(key)
+                .arg(value.to_raw())
+                .query_async::<()>(conn)
+                .await
+        }
+        WriteOp::RemoveListItem { index } => remove_list_item(conn, key, *index).await,
+        WriteOp::SetZSetMember { member, score } => {
+            redis::cmd("ZADD")
+                .arg(key)
+                .arg(score)
+                .arg(member.to_raw())
+                .query_async::<()>(conn)
+                .await
+        }
+        WriteOp::RemoveZSetMember { member } => {
+            redis::cmd("ZREM")
+                .arg(key)
+                .arg(member.to_raw())
+                .query_async::<()>(conn)
+                .await
+        }
+        WriteOp::SetTtl { ttl_ms } => set_ttl(conn, key, *ttl_ms).await,
+        WriteOp::DeleteKey => redis::cmd("DEL").arg(key).query_async::<()>(conn).await,
+    }
+}
+
+/// `PEXPIRE` quando há um TTL novo, `PERSIST` quando `ttl_ms` é `None` — os
+/// dois comandos que, juntos, cobrem toda mudança de TTL que a UI oferece.
+async fn set_ttl(
+    conn: &mut MultiplexedConnection,
+    key: &str,
+    ttl_ms: Option<i64>,
+) -> redis::RedisResult<()> {
+    match ttl_ms {
+        Some(ms) => {
+            redis::cmd("PEXPIRE")
+                .arg(key)
+                .arg(ms)
+                .query_async::<()>(conn)
+                .await
+        }
+        None => redis::cmd("PERSIST").arg(key).query_async::<()>(conn).await,
+    }
+}
+
+/// Remove o item de `key` no índice `index`. O Redis não tem um comando de
+/// "apagar elemento de lista por índice" — `LREM` remove por VALOR, `LSET`
+/// substitui por índice — então a técnica é: marcar o item alvo (por
+/// índice, via `LSET`) com `REMOVE_LIST_SENTINEL`, depois remover esse
+/// sentinela (por valor, via `LREM count=0`, que apaga todas as ocorrências,
+/// mas só deve haver a que acabamos de marcar). As duas idas ao Redis
+/// acontecem dentro de um `MULTI`/`EXEC` (`Pipeline::atomic`) para que
+/// nenhuma outra escrita concorrente consiga enxergar ou reagir ao estado
+/// intermediário em que o sentinela está visível na lista.
+async fn remove_list_item(
+    conn: &mut MultiplexedConnection,
+    key: &str,
+    index: i64,
+) -> redis::RedisResult<()> {
+    let mut pipe = redis::pipe();
+    pipe.atomic();
+    pipe.cmd("LSET")
+        .arg(key)
+        .arg(index)
+        .arg(REMOVE_LIST_SENTINEL);
+    pipe.cmd("LREM").arg(key).arg(0).arg(REMOVE_LIST_SENTINEL);
+    pipe.query_async::<()>(conn).await
+}
+
+/// Representação curta de um `Bytes` para aparecer numa frase de resumo:
+/// o texto quando há, ou um aviso quando o valor é binário (sem texto
+/// decodificável) — nunca o base64 cru, que não ajudaria quem está lendo o
+/// diálogo de confirmação.
+fn bytes_label(bytes: &Bytes) -> String {
+    bytes
+        .text
+        .clone()
+        .unwrap_or_else(|| "(valor binário)".to_string())
+}
+
+/// Frase em português para o diálogo de confirmação de escrita — é o texto
+/// que a pessoa lê antes de autorizar a mudança em produção, então a
+/// redação aqui é copy de produto, não uma string de debug.
+pub fn op_summary(key: &str, op: &WriteOp) -> String {
+    match op {
+        WriteOp::SetString { .. } => format!("Definir o valor de {key}"),
+        WriteOp::SetHashField { field, .. } => {
+            format!("Definir o campo \"{field}\" de {key}")
+        }
+        WriteOp::DeleteHashField { field } => {
+            format!("Apagar o campo \"{field}\" de {key}")
+        }
+        WriteOp::SetListItem { index, .. } => {
+            format!("Definir o item de índice {index} de {key}")
+        }
+        WriteOp::PushListItem { front, .. } => {
+            let posicao = if *front { "no início" } else { "no final" };
+            format!("Adicionar um item {posicao} de {key}")
+        }
+        WriteOp::RemoveListItem { index } => {
+            format!("Remover o item de índice {index} de {key}")
+        }
+        WriteOp::SetZSetMember { member, score } => {
+            format!(
+                "Definir o membro \"{}\" de {key} com score {score}",
+                bytes_label(member)
+            )
+        }
+        WriteOp::RemoveZSetMember { member } => {
+            format!("Remover o membro \"{}\" de {key}", bytes_label(member))
+        }
+        WriteOp::SetTtl { ttl_ms: Some(ms) } => {
+            format!("Definir o TTL de {key} para {ms} ms")
+        }
+        WriteOp::SetTtl { ttl_ms: None } => {
+            format!("Tornar {key} persistente (remover o TTL)")
+        }
+        WriteOp::DeleteKey => format!("Apagar a chave {key}"),
+    }
 }
 
 #[cfg(test)]
@@ -1146,5 +1437,295 @@ mod tests {
             }
             other => panic!("esperava Value::List, veio {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+    use crate::core::config::Env;
+
+    fn text(value: &str) -> Bytes {
+        Bytes {
+            text: Some(value.to_string()),
+            base64: None,
+            truncated: false,
+        }
+    }
+
+    fn test_host() -> Host {
+        Host {
+            id: "value-write-test-host".to_string(),
+            name: "Redis de teste".to_string(),
+            addr: "127.0.0.1".to_string(),
+            port: 6399,
+            // db3: db0 é do teste de `conn::db_sizes_counts_keys_in_db0`,
+            // db1 é do teste de varredura de `keys.rs` e db2 é dos testes de
+            // leitura logo acima neste arquivo; a suíte roda em paralelo
+            // contra o mesmo container, então a escrita precisa do seu
+            // próprio banco.
+            db: 3,
+            username: None,
+            tls: false,
+            env: Env::Dev,
+        }
+    }
+
+    async fn del(conn: &mut MultiplexedConnection, keys: &[&str]) {
+        for key in keys {
+            let _: () = redis::cmd("DEL").arg(key).query_async(conn).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn set_string_replaces_the_value() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "value_rs_write_test:set_string";
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("valor-antigo")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = apply_write(
+            &pool,
+            &host,
+            None,
+            host.db,
+            key,
+            &WriteOp::SetString {
+                value: text("valor-novo"),
+            },
+        )
+        .await;
+
+        let stored: String = redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        result.unwrap();
+        assert_eq!(stored, "valor-novo");
+    }
+
+    #[tokio::test]
+    async fn editing_a_key_preserves_its_ttl() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "value_rs_write_test:preserve_ttl";
+
+        let _: () = redis::cmd("HSET")
+            .arg(key)
+            .arg("campo1")
+            .arg("valor1")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("EXPIRE")
+            .arg(key)
+            .arg(100)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = apply_write(
+            &pool,
+            &host,
+            None,
+            host.db,
+            key,
+            &WriteOp::SetHashField {
+                field: "campo2".to_string(),
+                value: text("valor2"),
+            },
+        )
+        .await;
+
+        let pttl: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        result.unwrap();
+        assert!(
+            pttl > 90_000 && pttl <= 100_000,
+            "esperava PTTL perto de 100s (100000ms) preservado, veio {pttl}ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_ttl_none_makes_the_key_persistent() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "value_rs_write_test:set_ttl_none";
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("valor")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("EXPIRE")
+            .arg(key)
+            .arg(100)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = apply_write(
+            &pool,
+            &host,
+            None,
+            host.db,
+            key,
+            &WriteOp::SetTtl { ttl_ms: None },
+        )
+        .await;
+
+        let pttl: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        result.unwrap();
+        assert_eq!(
+            pttl, -1,
+            "esperava chave persistente (PTTL == -1), veio {pttl}"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_key_removes_it() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "value_rs_write_test:delete_key";
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("valor")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = apply_write(&pool, &host, None, host.db, key, &WriteOp::DeleteKey).await;
+
+        let exists: bool = redis::cmd("EXISTS")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        result.unwrap();
+        assert!(!exists, "a chave deveria ter sido apagada");
+    }
+
+    #[tokio::test]
+    async fn remove_list_item_by_index_keeps_order() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "value_rs_write_test:remove_list_item";
+
+        let _: () = redis::cmd("RPUSH")
+            .arg(key)
+            .arg("a")
+            .arg("b")
+            .arg("c")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = apply_write(
+            &pool,
+            &host,
+            None,
+            host.db,
+            key,
+            &WriteOp::RemoveListItem { index: 1 },
+        )
+        .await;
+
+        let items: Vec<String> = redis::cmd("LRANGE")
+            .arg(key)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        result.unwrap();
+        assert_eq!(items, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn writing_a_set_is_refused() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "value_rs_write_test:refuse_set";
+
+        let _: () = redis::cmd("SADD")
+            .arg(key)
+            .arg("membro")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = apply_write(
+            &pool,
+            &host,
+            None,
+            host.db,
+            key,
+            &WriteOp::SetString { value: text("x") },
+        )
+        .await;
+
+        let unchanged: Vec<String> = redis::cmd("SMEMBERS")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        assert!(result.is_err(), "escrever num Set deveria ser recusado");
+        assert_eq!(
+            unchanged,
+            vec!["membro".to_string()],
+            "o Set não pode ter sido tocado pela escrita recusada"
+        );
+    }
+
+    #[test]
+    fn op_summary_is_written_in_portuguese() {
+        let key = "session:user:4471";
+        let summary = op_summary(
+            key,
+            &WriteOp::DeleteHashField {
+                field: "email".to_string(),
+            },
+        );
+
+        assert!(summary.contains(key), "resumo deveria citar a chave");
+        assert!(
+            summary.contains("Apagar"),
+            "resumo deveria conter o verbo da ação"
+        );
+        assert_eq!(summary, "Apagar o campo \"email\" de session:user:4471");
     }
 }
