@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { untrack } from "svelte";
+	import { formatarJson, pareceJson, realcarJson, validarJson } from "$lib/json";
 	import { textBytes, type ValueView, type WriteOp } from "$lib/api";
 
 	interface Props {
@@ -19,21 +20,23 @@
 	 */
 	let binario = $derived(dado !== null && dado.text === null);
 
-	let texto = $state(
-		untrack(() => (view.value.kind === "string" ? (view.value.data.text ?? "") : "")),
+	const inicial = untrack(() =>
+		view.value.kind === "string" ? (view.value.data.text ?? "") : "",
+	);
+	let texto = $state(inicial);
+
+	/**
+	 * Um valor JSON abre para LER, colorido, porque é assim que se confere
+	 * um valor de produção; editar é um passo deliberado a partir dali. Um
+	 * valor que não é JSON abre direto no campo de texto: não há nada a
+	 * colorir, e um clique a mais só atrapalharia.
+	 */
+	let modo = $state<"realce" | "texto">(
+		untrack(() => (pareceJson(inicial) && validarJson(inicial) === null ? "realce" : "texto")),
 	);
 
-	/** O conteúdo é JSON? Só então faz sentido oferecer para formatá-lo. */
-	let json = $derived.by(() => {
-		const limpo = texto.trim();
-		if (!limpo.startsWith("{") && !limpo.startsWith("[")) return null;
-		try {
-			return JSON.stringify(JSON.parse(limpo), null, 2);
-		} catch {
-			return null;
-		}
-	});
-
+	let erroJson = $derived(validarJson(texto));
+	let indentado = $derived(formatarJson(texto));
 	let mudou = $derived(texto !== (dado?.text ?? ""));
 </script>
 
@@ -42,6 +45,15 @@
 		Valor binário: editar como texto corromperia o conteúdo. Use o painel de
 		leitura para conferi-lo.
 	</p>
+{:else if modo === "realce"}
+	<div class="editor">
+		<pre class="mono realce" data-testid="json-realce">{#each realcarJson(indentado ?? texto) as token}{#if token.classe}<span
+						class={token.classe}>{token.texto}</span>{:else}{token.texto}{/if}{/each}</pre>
+
+		<div class="acoes">
+			<button type="button" onclick={() => (modo = "texto")}>Editar como texto</button>
+		</div>
+	</div>
 {:else}
 	<div class="editor">
 		<label>
@@ -49,16 +61,23 @@
 			<textarea bind:value={texto} spellcheck="false" rows="14" class="mono"></textarea>
 		</label>
 
+		{#if erroJson}
+			<p class="erro-json" role="alert" data-testid="json-erro">{erroJson}</p>
+		{/if}
+
 		<div class="acoes">
-			{#if json !== null && json !== texto}
-				<button type="button" onclick={() => (texto = json ?? texto)}>
+			{#if indentado !== null && indentado !== texto}
+				<button type="button" onclick={() => (texto = indentado ?? texto)}>
 					Formatar JSON
 				</button>
+			{/if}
+			{#if erroJson === null && pareceJson(texto)}
+				<button type="button" onclick={() => (modo = "realce")}>Ver colorido</button>
 			{/if}
 			<button
 				type="button"
 				class="primary"
-				disabled={busy || !mudou}
+				disabled={busy || !mudou || erroJson !== null}
 				onclick={() => onSubmit({ op: "set_string", value: textBytes(texto) })}
 			>
 				Salvar
@@ -85,7 +104,8 @@
 		font-size: 0.9rem;
 	}
 
-	textarea {
+	textarea,
+	.realce {
 		font-family: var(--mono);
 		font-size: 0.92em;
 		color: var(--text);
@@ -93,8 +113,41 @@
 		border: 1px solid var(--rule-strong);
 		border-radius: var(--radius);
 		padding: 0.55rem 0.65rem;
-		resize: vertical;
 		width: 100%;
+	}
+
+	textarea {
+		resize: vertical;
+	}
+
+	.realce {
+		margin: 0;
+		max-height: 32rem;
+		overflow: auto;
+		white-space: pre;
+	}
+
+	/* Cada tipo com a sua cor, todas conferidas contra o fundo do painel.
+	   A chave puxa para o âmbar da ação porque é por ela que se procura. */
+	.realce .chave {
+		color: #f2a33c;
+	}
+
+	.realce .texto {
+		color: #9ecf8a;
+	}
+
+	.realce .numero {
+		color: #7fb6e8;
+	}
+
+	.realce .booleano {
+		color: #d08fd0;
+	}
+
+	.realce .nulo {
+		color: var(--text-faint);
+		font-style: italic;
 	}
 
 	.acoes {
@@ -106,5 +159,14 @@
 	.aviso {
 		margin: 0;
 		color: var(--text-faint);
+	}
+
+	.erro-json {
+		margin: 0;
+		padding: 0.4rem 0.6rem;
+		border: 1px solid #5e3a38;
+		border-radius: var(--radius);
+		background: #2e2326;
+		color: #e49a94;
 	}
 </style>

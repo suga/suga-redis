@@ -343,15 +343,6 @@ mod tests {
         keys.iter().map(|key| key.to_string()).collect()
     }
 
-    fn meta(key: &str) -> KeyMeta {
-        KeyMeta {
-            key: key.to_string(),
-            kind: KeyKind::String,
-            ttl_ms: None,
-            size_bytes: 0,
-        }
-    }
-
     #[test]
     fn groups_by_colon_prefix() {
         let keys = nomes(&["session:user:1", "session:user:2", "cache:a"]);
