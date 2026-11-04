@@ -16,13 +16,15 @@
 		listDbs,
 		onRescanProgress,
 		onTreeProgress,
+		scanTree,
 		rescan,
 		scanStatus,
 		textBytes,
 		writeValue,
 		type Host,
 		type ScanProgress,
-		type ScanTick,
+		type Branch,
+		type ScanSnapshot,
 		type ScanReport,
 		type WriteOp,
 	} from "$lib/api";
@@ -47,7 +49,9 @@
 	let relatorio = $state<ScanReport | null>(null);
 	let progresso = $state<ScanProgress | null>(null);
 	/** Andamento da varredura que monta a árvore. */
-	let lendo = $state<ScanTick | null>(null);
+	let lendo = $state<ScanSnapshot | null>(null);
+	/** Os prefixos de primeiro nível, crescendo a cada retrato. */
+	let raiz = $state<Branch[]>([]);
 	let varrendo = $state(false);
 	let erro = $state("");
 	let criando = $state(false);
@@ -66,7 +70,11 @@
 
 	onMount(() => {
 		const pararVarredura = onRescanProgress((p) => (progresso = p));
-		const pararLeitura = onTreeProgress((tick) => (lendo = tick));
+		const pararLeitura = onTreeProgress((retrato) => {
+			raiz = retrato.root;
+			// `done` apaga a barra, mas a raiz fica: ela É a árvore.
+			lendo = retrato.done ? null : retrato;
+		});
 		return () => {
 			pararVarredura.then((fn) => fn());
 			pararLeitura.then((fn) => fn());
@@ -81,21 +89,35 @@
 	);
 
 	/**
-	 * A árvore se carrega sozinha, nível a nível — aqui só vem a idade do
-	 * índice de busca, que é do (host, banco) e não de um galho.
+	 * Dispara a varredura do banco e NÃO espera por ela.
+	 *
+	 * Os retratos chegam por evento, a raiz aparece em menos de um segundo
+	 * e os galhos já abrem com o que foi lido até ali — a varredura segue
+	 * preenchendo o resto em segundo plano. Esperá-la terminar antes de
+	 * desenhar seria deixar a tela muda por quase um minuto num banco de
+	 * milhões de chaves.
 	 */
-	async function carregarEstado(hostId: string, banco: number) {
+	async function abrirBanco(hostId: string, banco: number) {
 		erro = "";
 		selecionada = null;
+		raiz = [];
+		lendo = { scanned: 0, total_estimate: 0, root: [], done: false };
+
+		scanStatus(hostId, banco)
+			.then((r) => (relatorio = r))
+			.catch(() => (relatorio = null));
+
 		try {
-			relatorio = await scanStatus(hostId, banco);
+			await scanTree(hostId, banco);
 		} catch (err) {
 			erro = errorMessage(err);
+		} finally {
+			lendo = null;
 		}
 	}
 
 	$effect(() => {
-		carregarEstado(host.id, db);
+		abrirBanco(host.id, db);
 	});
 
 	$effect(() => {
@@ -218,10 +240,12 @@
 		{#if lendo}
 			<div class="lendo" data-testid="lendo">
 				<p class="lendo-linha">
-					Lendo as chaves
-					<span class="mono">
-						{porcentagem}% ({numero(lendo.scanned)} de {numero(lendo.total_estimate)})
-					</span>
+					Lendo as chaves em segundo plano
+					{#if lendo.total_estimate > 0}
+						<span class="mono">
+							{porcentagem}% ({numero(lendo.scanned)} de {numero(lendo.total_estimate)})
+						</span>
+					{/if}
 				</p>
 				<div
 					class="barra"
@@ -240,6 +264,7 @@
 			<KeyTree
 				hostId={host.id}
 				{db}
+				root={raiz}
 				selectedKey={selecionada}
 				onSelect={(key) => (selecionada = key)}
 				filter={filtro}

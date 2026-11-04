@@ -13,19 +13,24 @@
 	 */
 	import { untrack } from "svelte";
 	import { SvelteMap, SvelteSet } from "svelte/reactivity";
-	import { errorMessage, loadLevel, type Branch, type TreeLevel } from "$lib/api";
+	import { errorMessage, treeLevel, type Branch } from "$lib/api";
 	import { numero } from "$lib/formato";
 
 	interface Props {
 		hostId: string;
 		db: number;
+		/**
+		 * Os prefixos de primeiro nível, vindos dos retratos da varredura.
+		 * Chegam parciais e vão crescendo — a árvore não os busca.
+		 */
+		root: Branch[];
 		selectedKey: string | null;
 		onSelect: (key: string) => void;
 		/** Filtra o que já está aberto. Vazio mostra tudo. */
 		filter: string;
 	}
 
-	let { hostId, db, selectedKey, onSelect, filter }: Props = $props();
+	let { hostId, db, root, selectedKey, onSelect, filter }: Props = $props();
 
 	/** Altura fixa de cada linha, em pixels. É o que torna a janela calculável. */
 	const ROW_HEIGHT = 26;
@@ -35,7 +40,8 @@
 	/** O que se sabe de cada prefixo já pedido. */
 	type Estado =
 		| { situacao: "carregando" }
-		| { situacao: "pronto"; nivel: TreeLevel }
+		| { situacao: "pronto"; filhos: Branch[] }
+		| { situacao: "ainda-nao" }
 		| { situacao: "erro"; mensagem: string };
 
 	let niveis = new SvelteMap<string, Estado>();
@@ -43,11 +49,24 @@
 	let scrollTop = $state(0);
 	let viewport = $state(0);
 
+	/**
+	 * Lê os filhos de um prefixo da árvore em memória.
+	 *
+	 * Sempre relê, mesmo que já tenha lido antes: enquanto a varredura
+	 * corre, o mesmo galho ganha filhos novos, e guardar a primeira
+	 * resposta congelaria a árvore no estado em que ela estava quando a
+	 * pessoa abriu.
+	 */
 	async function carregar(prefixo: string) {
-		if (niveis.has(prefixo)) return;
-		niveis.set(prefixo, { situacao: "carregando" });
+		if (!niveis.has(prefixo)) {
+			niveis.set(prefixo, { situacao: "carregando" });
+		}
 		try {
-			niveis.set(prefixo, { situacao: "pronto", nivel: await loadLevel(hostId, db, prefixo) });
+			const filhos = await treeLevel(hostId, db, prefixo);
+			niveis.set(
+				prefixo,
+				filhos === null ? { situacao: "ainda-nao" } : { situacao: "pronto", filhos },
+			);
 		} catch (err) {
 			// O erro fica NO GALHO: uma falha ao abrir um prefixo não pode
 			// derrubar o que já está navegável acima dele.
@@ -55,7 +74,7 @@
 		}
 	}
 
-	// Trocar de host ou de banco invalida tudo que foi carregado.
+	// Trocar de host ou de banco invalida tudo que foi aberto.
 	//
 	// As únicas dependências deste efeito são `hostId` e `db`. O resto vai
 	// dentro de `untrack` porque `carregar` LÊ `niveis` e o efeito o
@@ -65,11 +84,19 @@
 		const id = hostId;
 		const banco = db;
 		untrack(() => {
-			niveis.clear();
-			abertos.clear();
 			void id;
 			void banco;
-			carregar("");
+			niveis.clear();
+			abertos.clear();
+		});
+	});
+
+	// A raiz cresce a cada retrato da varredura; os galhos abertos
+	// acompanham, para as contagens de dentro subirem junto com as de fora.
+	$effect(() => {
+		void root;
+		untrack(() => {
+			for (const prefixo of abertos) carregar(prefixo);
 		});
 	});
 
@@ -89,28 +116,40 @@
 		aberto: boolean;
 		/** Para as linhas de aviso: o texto e o papel na tela. */
 		texto?: string;
-		papel?: "carregando" | "erro" | "cortado" | "vazio";
+		papel?: "carregando" | "erro" | "ainda-nao" | "vazio";
 	}
 
 	let alvo = $derived(filter.trim().toLowerCase());
 
-	/** Achata o que está carregado e aberto nas linhas à vista. */
+	/** Achata o que está aberto nas linhas à vista. */
 	function achatar(prefixo: string, depth: number, out: Linha[]): Linha[] {
-		const estado = niveis.get(prefixo);
-		if (!estado) return out;
+		// A raiz vem de fora; os demais níveis, da árvore em memória.
+		const filhosDoNivel: Branch[] | null = (() => {
+			if (prefixo === "") return root;
+			const estado = niveis.get(prefixo);
+			if (!estado) return null;
+			if (estado.situacao === "pronto") return estado.filhos;
+			if (estado.situacao === "carregando") {
+				out.push({ tipo: "aviso", depth, aberto: false, texto: "Lendo…", papel: "carregando" });
+			} else if (estado.situacao === "ainda-nao") {
+				out.push({
+					tipo: "aviso",
+					depth,
+					aberto: false,
+					texto: "Este trecho ainda sendo lido — aparece assim que a varredura chegar nele.",
+					papel: "ainda-nao",
+				});
+			} else {
+				out.push({ tipo: "aviso", depth, aberto: false, texto: estado.mensagem, papel: "erro" });
+			}
+			return null;
+		})();
 
-		if (estado.situacao === "carregando") {
-			out.push({ tipo: "aviso", depth, aberto: false, texto: "Lendo…", papel: "carregando" });
-			return out;
-		}
-		if (estado.situacao === "erro") {
-			out.push({ tipo: "aviso", depth, aberto: false, texto: estado.mensagem, papel: "erro" });
-			return out;
-		}
+		if (filhosDoNivel === null) return out;
 
 		const visiveis = alvo
-			? estado.nivel.children.filter((b) => b.label.toLowerCase().includes(alvo))
-			: estado.nivel.children;
+			? filhosDoNivel.filter((b) => b.label.toLowerCase().includes(alvo))
+			: filhosDoNivel;
 
 		for (const branch of visiveis) {
 			const aberto = abertos.has(branch.full_prefix);
@@ -128,15 +167,6 @@
 			});
 		}
 
-		if (estado.nivel.capped) {
-			out.push({
-				tipo: "aviso",
-				depth,
-				aberto: false,
-				texto: `Este nível tem mais nomes distintos do que cabem na árvore. Use a aba Busca para chegar ao que falta.`,
-				papel: "cortado",
-			});
-		}
 		return out;
 	}
 
@@ -202,7 +232,7 @@
 							class="linha aviso aviso--{linha.papel}"
 							style="padding-left: {0.5 + linha.depth * 0.85}rem"
 							role={linha.papel === "erro" ? "alert" : undefined}
-							data-testid={linha.papel === "cortado" ? "cortado-nivel" : undefined}
+							data-testid={linha.papel === "ainda-nao" ? "ainda-nao" : undefined}
 						>
 							{linha.texto}
 						</p>
@@ -289,7 +319,7 @@
 		color: #e49a94;
 	}
 
-	.aviso--cortado {
+	.aviso--ainda-nao {
 		color: var(--action);
 	}
 </style>

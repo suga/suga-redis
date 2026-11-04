@@ -67,16 +67,13 @@ export interface Branch {
 	leaf_key: string | null;
 }
 
-/** Um nível da árvore, varrido sob demanda. */
-export interface TreeLevel {
-	/** O prefixo deste nível. Vazio na raiz. */
-	prefix: string;
-	children: Branch[];
-	/** Quantas chaves foram varridas para montar este nível. */
+/** Um retrato da varredura em andamento. */
+export interface ScanSnapshot {
 	scanned: number;
 	total_estimate: number;
-	/** A lista de filhos bateu no teto e foi cortada. */
-	capped: boolean;
+	/** Os prefixos de primeiro nível achados até aqui, já contados. */
+	root: Branch[];
+	done: boolean;
 }
 
 // ------------------------------------------------------------------ valor
@@ -306,22 +303,33 @@ export function listDbs(hostId: string): Promise<[number, number][]> {
 }
 
 /**
- * Um nível da árvore. `prefix` vazio traz a raiz; para abrir um galho,
- * passe o `full_prefix` dele.
+ * Varre o banco UMA vez e guarda a árvore de prefixos.
+ *
+ * Não espere por ela para mostrar alguma coisa: acompanhe `onTreeProgress`,
+ * que entrega a raiz parcial enquanto a varredura corre, e use `treeLevel`
+ * para abrir galhos desde o primeiro retrato.
  */
-export function loadLevel(
+export function scanTree(hostId: string, db: number): Promise<void> {
+	return invoke("cmd_scan_tree", { hostId, db });
+}
+
+/**
+ * Os filhos de um prefixo, lidos da árvore já varrida — sem ida ao
+ * servidor. `null` quando este banco ainda não começou a ser varrido.
+ */
+export function treeLevel(
 	hostId: string,
 	db: number,
 	prefix: string,
-): Promise<TreeLevel> {
-	return invoke("cmd_load_level", { hostId, db, prefix });
+): Promise<Branch[] | null> {
+	return invoke("cmd_tree_level", { hostId, db, prefix });
 }
 
 /** Acompanha a varredura que monta a árvore. Chame o retorno para parar. */
 export function onTreeProgress(
-	handler: (tick: ScanTick) => void,
+	handler: (retrato: ScanSnapshot) => void,
 ): Promise<UnlistenFn> {
-	return listen<ScanTick>("tree://progress", (event) => handler(event.payload));
+	return listen<ScanSnapshot>("tree://progress", (event) => handler(event.payload));
 }
 
 /** Refaz o índice de busca. Acompanhe o andamento com `onRescanProgress`. */

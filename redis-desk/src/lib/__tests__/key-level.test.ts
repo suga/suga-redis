@@ -4,14 +4,14 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("$lib/api", async (importOriginal) => {
 	const real = await importOriginal<typeof import("$lib/api")>();
-	return { ...real, loadLevel: vi.fn() };
+	return { ...real, treeLevel: vi.fn() };
 });
 
-import { loadLevel } from "$lib/api";
+import { treeLevel } from "$lib/api";
 import KeyTree from "$lib/KeyTree.svelte";
-import type { Branch, TreeLevel } from "$lib/api";
+import type { Branch } from "$lib/api";
 
-const carregou = vi.mocked(loadLevel);
+const nivel = vi.mocked(treeLevel);
 
 function galho(label: string, prefixoPai: string, count: number): Branch {
 	return { label, full_prefix: `${prefixoPai}${label}:`, count, leaf_key: null };
@@ -26,29 +26,23 @@ function folha(label: string, prefixoPai: string): Branch {
 	};
 }
 
-function nivel(prefix: string, children: Branch[], partes: Partial<TreeLevel> = {}): TreeLevel {
-	return {
-		prefix,
-		children,
-		scanned: 3_759_873,
-		total_estimate: 3_759_873,
-		capped: false,
-		...partes,
-	};
+/** Cada prefixo responde com os seus filhos, como a trie em memória faria. */
+function arvore(mapa: Record<string, Branch[]>) {
+	nivel.mockImplementation(async (_h, _db, prefix) => mapa[prefix] ?? null);
 }
 
-/** Cada prefixo responde com o seu nível, como o backend faria. */
-function bancoDeNiveis(mapa: Record<string, TreeLevel>) {
-	carregou.mockImplementation(async (_h, _db, prefix) => {
-		const achado = mapa[prefix];
-		if (!achado) throw new Error(`nível inesperado: ${prefix}`);
-		return achado;
-	});
-}
+const RAIZ: Branch[] = [galho("catalogo", "", 24), galho("scheduler", "", 3_479_578)];
 
-function montar() {
+function montar(raiz: Branch[] = RAIZ) {
 	return render(KeyTree, {
-		props: { hostId: "h1", db: 0, selectedKey: null, onSelect: vi.fn(), filter: "" },
+		props: {
+			hostId: "h1",
+			db: 0,
+			root: raiz,
+			selectedKey: null,
+			onSelect: vi.fn(),
+			filter: "",
+		},
 	});
 }
 
@@ -56,68 +50,65 @@ beforeEach(() => {
 	vi.clearAllMocks();
 });
 
-test("a raiz chega sozinha, com a contagem de cada prefixo", async () => {
-	bancoDeNiveis({
-		"": nivel("", [galho("wallet", "", 3_500_000), galho("cache", "", 211)]),
-	});
+test("a raiz vem pronta de fora, sem a árvore pedir nada", () => {
 	montar();
 
-	expect(await screen.findByRole("button", { name: /wallet/ })).toHaveTextContent(
-		"3.500.000",
+	expect(screen.getByRole("button", { name: /scheduler/ })).toHaveTextContent(
+		"3.479.578",
 	);
-	expect(carregou).toHaveBeenCalledWith("h1", 0, "");
+	// A raiz chega pelos retratos da varredura; abrir um galho é que consulta.
+	expect(nivel).not.toHaveBeenCalled();
 });
 
-test("abrir um galho busca só o nível dele, não a árvore inteira", async () => {
+test("abrir um galho lê a árvore em memória, sem varredura nova", async () => {
 	const user = userEvent.setup();
-	bancoDeNiveis({
-		"": nivel("", [galho("wallet", "", 3_500_000)]),
-		"wallet:": nivel("wallet:", [galho("user", "wallet:", 900), folha("total", "wallet:")]),
+	arvore({
+		"catalogo:": [galho("events", "catalogo:", 2), folha("total", "catalogo:")],
 	});
 	montar();
 
-	await user.click(await screen.findByRole("button", { name: /wallet/ }));
+	await user.click(screen.getByRole("button", { name: /catalogo/ }));
 
-	// Pede exatamente o prefixo clicado — e nada além dele.
-	await waitFor(() => expect(carregou).toHaveBeenCalledWith("h1", 0, "wallet:"));
-	expect(carregou).toHaveBeenCalledTimes(2);
-	expect(await screen.findByRole("button", { name: /user/ })).toBeInTheDocument();
+	await waitFor(() => expect(nivel).toHaveBeenCalledWith("h1", 0, "catalogo:"));
+	expect(await screen.findByRole("button", { name: /events/ })).toBeInTheDocument();
 });
 
 test("clicar numa folha entrega a chave inteira", async () => {
 	const user = userEvent.setup();
 	const onSelect = vi.fn();
-	bancoDeNiveis({ "": nivel("", [folha("solta", "")]) });
 	render(KeyTree, {
-		props: { hostId: "h1", db: 0, selectedKey: null, onSelect, filter: "" },
+		props: {
+			hostId: "h1",
+			db: 0,
+			root: [folha("solta", "")],
+			selectedKey: null,
+			onSelect,
+			filter: "",
+		},
 	});
 
-	await user.click(await screen.findByRole("button", { name: /solta/ }));
+	await user.click(screen.getByRole("button", { name: /solta/ }));
 	expect(onSelect).toHaveBeenCalledWith("solta");
 });
 
-test("nível cortado avisa, em vez de fingir que aquilo é tudo", async () => {
-	bancoDeNiveis({
-		"": nivel("", [galho("pedido", "", 1)], { capped: true }),
-	});
+test("galho ainda não varrido avisa, em vez de parecer vazio", async () => {
+	const user = userEvent.setup();
+	// A varredura ainda não chegou neste prefixo: a trie responde `null`.
+	arvore({});
 	montar();
 
-	expect(await screen.findByTestId("cortado-nivel")).toHaveTextContent(
-		/não cabem na árvore|Busca/i,
-	);
+	await user.click(screen.getByRole("button", { name: /catalogo/ }));
+
+	expect(await screen.findByTestId("ainda-nao")).toHaveTextContent(/ainda sendo lid/i);
 });
 
 test("erro ao abrir um galho fica no galho, sem derrubar a árvore", async () => {
 	const user = userEvent.setup();
-	carregou.mockImplementation(async (_h, _db, prefix) => {
-		if (prefix === "") return nivel("", [galho("wallet", "", 10)]);
-		throw { kind: "unreachable", message: 'host "Valkey" não responde' };
-	});
+	nivel.mockRejectedValue({ kind: "unreachable", message: 'host "Valkey" não responde' });
 	montar();
 
-	await user.click(await screen.findByRole("button", { name: /wallet/ }));
+	await user.click(screen.getByRole("button", { name: /catalogo/ }));
 
 	expect(await screen.findByRole("alert")).toHaveTextContent("Valkey");
-	// A raiz continua navegável.
-	expect(screen.getByRole("button", { name: /wallet/ })).toBeInTheDocument();
+	expect(screen.getByRole("button", { name: /scheduler/ })).toBeInTheDocument();
 });

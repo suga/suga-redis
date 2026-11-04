@@ -16,6 +16,7 @@
 //! interface pode ter um botão que esquece de perguntar, mas nenhum caminho
 //! chega ao Redis sem passar por esta função.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -29,7 +30,7 @@ use crate::core::config::{ConfigError, Env, Host, HostStore};
 use crate::core::conn::{ConnError, Pool};
 use crate::core::history::{Actor, History, HistoryEntry, HistoryError};
 use crate::core::index::{Index, IndexError, ScanProgress, ScanReport};
-use crate::core::keys::{ScanTick, TreeLevel, scan_level};
+use crate::core::keys::{Branch, KeyTrie, ScanSnapshot, scan_trie};
 use crate::core::search::{SearchOutcome, search as search_index};
 use crate::core::value::{
     ValueLimit, ValueView, WriteOp, op_summary, read_value as read_value_from_redis,
@@ -57,7 +58,7 @@ const DB_FILE: &str = "suga-redis.sqlite";
 /// de progresso da interface.
 pub const RESCAN_PROGRESS_EVENT: &str = "rescan://progress";
 
-/// Evento emitido durante `load_tree`, um por lote do cursor do `SCAN`.
+/// Retratos da varredura da árvore, enquanto ela corre.
 pub const TREE_PROGRESS_EVENT: &str = "tree://progress";
 
 /// Erro de qualquer comando. Existe para dar à interface um DISCRIMINANTE
@@ -156,7 +157,20 @@ pub struct AppState {
     /// `Arc` porque o servidor do socket roda numa tarefa própria e precisa
     /// da MESMA fila que os comandos da tela leem.
     pub approvals: Arc<ApprovalQueue>,
+    /// A árvore de prefixos de cada (host, banco) aberto.
+    ///
+    /// É o que permite abrir um galho sem voltar ao servidor. Sem ela, cada
+    /// clique custaria uma varredura do banco inteiro, porque o `MATCH` do
+    /// `SCAN` não encurta o trabalho do Redis — só filtra o que volta.
+    pub trees: Mutex<TreeCache>,
 }
+
+/// As árvores de prefixo, por (host, banco).
+///
+/// Um `Arc<Mutex<_>>` por árvore, e não uma trava só para o mapa: a
+/// varredura escreve numa árvore a cada lote enquanto a tela lê dela para
+/// abrir galhos, e uma trava única faria uma esperar pela outra.
+pub type TreeCache = HashMap<(String, u8), Arc<Mutex<KeyTrie>>>;
 
 impl AppState {
     /// Abre (ou cria) o estado no diretório de dados do app: `hosts.json`
@@ -170,6 +184,7 @@ impl AppState {
             index: Index::open(&db_path)?,
             history: History::open(&db_path)?,
             approvals: Arc::new(ApprovalQueue::new()),
+            trees: Mutex::new(TreeCache::new()),
         })
     }
 
@@ -228,24 +243,49 @@ pub async fn list_dbs(state: &AppState, host_id: &str) -> Result<Vec<(u8, u64)>>
 
 // ----------------------------------------------------------------- chaves
 
-/// Um nível da árvore de chaves, varrido sob demanda.
+/// Varre o (host, banco) UMA vez e guarda a árvore de prefixos.
 ///
-/// `prefix` vazio é a raiz. A tela abre um galho pedindo o nível dele, em
-/// vez de receber a árvore inteira de uma vez: num banco de milhões de
-/// chaves, a árvore inteira é quase um gigabyte de memória e dezenas de
-/// segundos de espera para mostrar meia dúzia de prefixos.
+/// A árvore entra no cache ANTES de a varredura começar e é preenchida
+/// enquanto ela corre: é isso que deixa a pessoa abrir um galho no meio do
+/// caminho, com o que já chegou, em vez de esperar o banco inteiro.
 ///
-/// `progress` é chamado a cada lote do cursor, para a tela mostrar quanto
-/// já veio em vez de uma mensagem parada.
-pub async fn load_level(
+/// `snapshot` é chamado ao longo da varredura com a raiz parcial, para a
+/// tela mostrar os prefixos e as contagens crescendo.
+pub async fn scan_tree(
     state: &AppState,
     host_id: &str,
     db: u8,
-    prefix: &str,
-    progress: impl Fn(ScanTick),
-) -> Result<TreeLevel> {
+    snapshot: impl Fn(ScanSnapshot),
+) -> Result<()> {
     let (host, pw) = state.host_and_password(host_id)?;
-    Ok(scan_level(&state.pool, &host, pw.as_deref(), db, prefix, progress).await?)
+
+    let trie = Arc::new(Mutex::new(KeyTrie::new()));
+    state
+        .trees
+        .lock()
+        .unwrap()
+        .insert((host_id.to_string(), db), trie.clone());
+
+    scan_trie(&state.pool, &host, pw.as_deref(), db, &trie, snapshot).await?;
+    Ok(())
+}
+
+/// Os filhos de um prefixo, lidos da árvore em memória.
+///
+/// `None` quando este (host, banco) ainda não começou a ser varrido, ou
+/// quando a varredura ainda não chegou neste prefixo. Nunca vai ao
+/// servidor: é essa consulta em memória que torna abrir um galho imediato.
+pub fn tree_level(state: &AppState, host_id: &str, db: u8, prefix: &str) -> Option<Vec<Branch>> {
+    // A trava do mapa é solta antes da trava da árvore, para a varredura —
+    // que escreve na árvore a cada lote — não ficar presa atrás desta
+    // leitura.
+    let trie = state
+        .trees
+        .lock()
+        .unwrap()
+        .get(&(host_id.to_string(), db))
+        .cloned()?;
+    trie.lock().unwrap().level(prefix)
 }
 
 /// Refaz o índice de busca do (host, banco). `progress` é chamado a cada
@@ -464,19 +504,28 @@ pub async fn cmd_list_dbs(
 }
 
 #[tauri::command]
-pub async fn cmd_load_level(
+pub async fn cmd_scan_tree(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     host_id: String,
     db: u8,
-    prefix: String,
-) -> Result<TreeLevel> {
-    load_level(&state, &host_id, db, &prefix, move |tick| {
-        // Um evento perdido só atrasa a porcentagem; nunca pode derrubar a
-        // varredura que já está em andamento.
-        let _ = app.emit(TREE_PROGRESS_EVENT, tick);
+) -> Result<()> {
+    scan_tree(&state, &host_id, db, move |retrato| {
+        // Um retrato perdido só atrasa o que a tela mostra; nunca pode
+        // derrubar a varredura que já está em andamento.
+        let _ = app.emit(TREE_PROGRESS_EVENT, retrato);
     })
     .await
+}
+
+#[tauri::command]
+pub fn cmd_tree_level(
+    state: tauri::State<'_, AppState>,
+    host_id: String,
+    db: u8,
+    prefix: String,
+) -> Option<Vec<Branch>> {
+    tree_level(&state, &host_id, db, &prefix)
 }
 
 #[tauri::command]
@@ -683,6 +732,7 @@ fn vigiar_pedidos(app: tauri::AppHandle) {
 mod tests {
     use super::*;
     use crate::core::config::{Env, Host};
+    use crate::core::keys::Branch;
     use crate::core::value::{Bytes, WriteOp};
     use redis::aio::MultiplexedConnection;
 
@@ -742,6 +792,46 @@ mod tests {
 
     async fn del(conn: &mut MultiplexedConnection, key: &str) {
         let _: () = redis::cmd("DEL").arg(key).query_async(conn).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_arvore_pode_ser_explorada_enquanto_a_varredura_corre() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn().await;
+        let chaves = [
+            "andamento_rs_test:api:itens:1",
+            "andamento_rs_test:api:lotes:1",
+        ];
+        for chave in chaves {
+            set_string(&mut conn, chave, "x").await;
+        }
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+
+        // Durante a varredura (retrato com `done: false`), abrir um galho
+        // já precisa responder — é a promessa inteira deste desenho: ver e
+        // explorar sem esperar o banco acabar de ser lido.
+        let durante: std::sync::Mutex<Option<Vec<Branch>>> = std::sync::Mutex::new(None);
+        scan_tree(&state, &host_id, TEST_DB, |retrato| {
+            if !retrato.done && durante.lock().unwrap().is_none() {
+                *durante.lock().unwrap() = tree_level(&state, &host_id, TEST_DB, "");
+            }
+        })
+        .await
+        .unwrap();
+
+        for chave in chaves {
+            del(&mut conn, chave).await;
+        }
+
+        let raiz = durante
+            .into_inner()
+            .unwrap()
+            .expect("o nível já tinha que responder no meio da varredura");
+        assert!(
+            raiz.iter().any(|b| b.label == "andamento_rs_test"),
+            "veio {:?}",
+            raiz.iter().map(|b| &b.label).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
