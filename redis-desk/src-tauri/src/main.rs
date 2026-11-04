@@ -1,21 +1,21 @@
 // Impede uma janela de console extra no Windows em release, NÃO REMOVER!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-/// Argumento que põe o binário em modo servidor MCP.
-const MCP_FLAG: &str = "--mcp";
+use suga_redis_lib::{Modo, ajuda, modo_de, run, run_mcp};
 
-/// Um binário, dois modos. Sem argumento, sobe a janela; com `--mcp`, roda
-/// como servidor MCP em stdio e nunca abre janela nenhuma — o Claude local
-/// conversa com este processo pela entrada e saída padrão, e qualquer coisa
-/// escrita em stdout que não seja protocolo quebraria essa conversa.
+/// Um binário, dois modos de trabalho e duas bandeiras de texto. A decisão
+/// mora em `modo_de`, na biblioteca, onde dá para testá-la.
 fn main() {
-    if std::env::args().any(|arg| arg == MCP_FLAG) {
-        if let Err(err) = suga_redis_lib::run_mcp() {
-            eprintln!("suga-redis: {err}");
-            std::process::exit(1);
+    match modo_de(std::env::args()) {
+        Modo::Janela => run(),
+        Modo::Mcp => {
+            if let Err(err) = run_mcp() {
+                eprintln!("suga-redis: {err}");
+                std::process::exit(1);
+            }
         }
-        return;
+        // Em stdout: são saídas pedidas por quem chamou, não diagnóstico.
+        Modo::Versao => println!("Suga-Redis {}", env!("CARGO_PKG_VERSION")),
+        Modo::Ajuda => println!("{}", ajuda()),
     }
-
-    suga_redis_lib::run()
 }

@@ -8,3 +8,8 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# Os pacotes gerados: ~16 MB por build, e um build novo a cada correção.
+# Versioná-los encheria o histórico do git de binários que ninguém vai
+# comparar. `npm run dist` os recria a qualquer momento.
+/dist
