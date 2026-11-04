@@ -23,7 +23,7 @@ const METADATA_BATCH: usize = 200;
 const SEPARATOR: char = ':';
 
 /// Tipo de uma chave Redis, conforme a resposta de `TYPE`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyKind {
     String,

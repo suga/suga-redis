@@ -788,7 +788,7 @@ git add -A && git commit -m "feat: history panel with before/after diff and roll
 
 Ferramenta de leitura que precisa de índice e não tem varredura recente varre antes, sozinha, e diz no resultado que varreu.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn list_hosts_never_returns_a_password()
@@ -799,21 +799,21 @@ Ferramenta de leitura que precisa de índice e não tem varredura recente varre 
 #[tokio::test] async fn reading_without_a_recent_scan_scans_first_and_says_so()
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test mcp::`
 Expected: FAIL — `run_stdio` não existe.
 
-- [ ] **Step 3: Implementar com `rmcp = "3"`**
+- [x] **Step 3: Implementar com `rmcp = "3"`**
 
 Descrição de cada ferramenta em português, porque é o que o Claude vai ler para escolher.
 
-- [ ] **Step 4: Verificar de verdade, por fora**
+- [x] **Step 4: Verificar de verdade, por fora**
 
 Run: `./target/debug/redis-desk --mcp` e mandar um `initialize` seguido de `tools/list` por stdin.
 Expected: as 7 ferramentas na resposta.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: mcp stdio server with read-only tools"

@@ -52,7 +52,7 @@ impl Default for ValueLimit {
 /// UTF-8 válido, base64 quando não são — nunca uma conversão "lossy" que
 /// corromperia o conteúdo original. `truncated` indica que o que está aqui é
 /// só um pedaço do valor real (ver `max_bytes` em `ValueLimit`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Bytes {
     pub text: Option<String>,
     pub base64: Option<String>,
@@ -122,7 +122,7 @@ fn char_boundary_prefix(text: &str, max_bytes: usize) -> &str {
 
 /// Uma entrada de stream: id (`"<ms>-<seq>"`) e seus campos, na mesma forma
 /// binary-safe usada pelo resto do arquivo.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StreamEntry {
     pub id: String,
     pub fields: Vec<(String, Bytes)>,
@@ -131,7 +131,7 @@ pub struct StreamEntry {
 /// O conteúdo tipado de uma chave. `Set`, `Stream` e `ReadOnlyText` (usado
 /// para RedisJSON e qualquer tipo não reconhecido) são somente leitura neste
 /// produto — ver `KeyKind::editable`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 pub enum Value {
     #[serde(rename = "string")]
@@ -150,7 +150,7 @@ pub enum Value {
 /// valor é truncado para exibição) e `truncated`, que avisa quando o que
 /// está em `value` é só parte do conteúdo real (elementos a mais além da
 /// página pedida, ou um valor individual cortado por `max_bytes`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ValueView {
     pub key: String,
     pub kind: KeyKind,

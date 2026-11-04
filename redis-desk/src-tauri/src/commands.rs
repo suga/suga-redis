@@ -159,7 +159,7 @@ impl AppState {
     /// O host e a senha dele, resolvidos juntos — nenhuma operação precisa
     /// de um sem o outro, e separá-los daria duas chances de esquecer a
     /// senha.
-    fn host(&self, host_id: &str) -> Result<(Host, Option<String>)> {
+    pub(crate) fn host_and_password(&self, host_id: &str) -> Result<(Host, Option<String>)> {
         let hosts = self.hosts.lock().unwrap();
         let host = hosts
             .list()
@@ -198,21 +198,21 @@ pub fn remove_host(state: &AppState, host_id: &str) -> Result<()> {
 /// Testa a conexão com o host, devolvendo o tempo de resposta em
 /// milissegundos.
 pub async fn test_host(state: &AppState, host_id: &str) -> Result<u64> {
-    let (host, pw) = state.host(host_id)?;
+    let (host, pw) = state.host_and_password(host_id)?;
     let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
     Ok(elapsed.as_millis() as u64)
 }
 
 /// Os bancos do host que têm ao menos uma chave, com a contagem de cada um.
 pub async fn list_dbs(state: &AppState, host_id: &str) -> Result<Vec<(u8, u64)>> {
-    let (host, pw) = state.host(host_id)?;
+    let (host, pw) = state.host_and_password(host_id)?;
     Ok(state.pool.db_sizes(&host, pw.as_deref()).await?)
 }
 
 // ----------------------------------------------------------------- chaves
 
 pub async fn load_tree(state: &AppState, host_id: &str, db: u8) -> Result<Vec<TreeNode>> {
-    let (host, pw) = state.host(host_id)?;
+    let (host, pw) = state.host_and_password(host_id)?;
     let keys = scan_all(&state.pool, &host, pw.as_deref(), db).await?;
     Ok(build_tree(&keys))
 }
@@ -225,7 +225,7 @@ pub async fn rescan(
     db: u8,
     progress: impl Fn(ScanProgress),
 ) -> Result<ScanReport> {
-    let (host, pw) = state.host(host_id)?;
+    let (host, pw) = state.host_and_password(host_id)?;
     Ok(state
         .index
         .rescan(&state.pool, &host, pw.as_deref(), db, progress)
@@ -251,7 +251,7 @@ pub async fn read_value_more(
     key: &str,
     offset: usize,
 ) -> Result<ValueView> {
-    let (host, pw) = state.host(host_id)?;
+    let (host, pw) = state.host_and_password(host_id)?;
     let limit = ValueLimit {
         offset,
         max_bytes: PAGE_BYTES,
@@ -272,7 +272,7 @@ pub async fn write_value(
     op: WriteOp,
     confirmed: bool,
 ) -> Result<WriteOutcome> {
-    let (host, pw) = state.host(host_id)?;
+    let (host, pw) = state.host_and_password(host_id)?;
 
     if needs_confirmation(host.env, confirmed) {
         return Ok(WriteOutcome::NeedsConfirmation {
@@ -325,7 +325,7 @@ pub async fn rollback(state: &AppState, entry_id: i64, confirmed: bool) -> Resul
         });
     }
 
-    let (host, pw) = state.host(&entry.host_id)?;
+    let (host, pw) = state.host_and_password(&entry.host_id)?;
     state
         .history
         .rollback(&state.pool, &host, pw.as_deref(), entry_id)
@@ -345,7 +345,7 @@ pub async fn search(
     db: u8,
     needle: &str,
 ) -> Result<SearchOutcome> {
-    let (host, pw) = state.host(host_id)?;
+    let (host, pw) = state.host_and_password(host_id)?;
     Ok(search_index(
         &state.index,
         &state.pool,
@@ -503,9 +503,42 @@ pub async fn cmd_search(
     search(&state, &host_id, db, &needle).await
 }
 
+/// Identificador do app, o mesmo de `tauri.conf.json`.
+const APP_IDENTIFIER: &str = "com.marcosugamele.redis-desk";
+
+/// Variável de ambiente que reposiciona o diretório de dados. Existe para
+/// rodar uma segunda instalação lado a lado (e para os testes não
+/// encostarem nos dados de verdade de quem está desenvolvendo).
+const DATA_DIR_ENV: &str = "REDIS_DESK_DATA_DIR";
+
+/// O diretório onde moram `hosts.json` e o SQLite.
+///
+/// Calculado aqui, e não pedido ao Tauri, porque o processo do servidor MCP
+/// (`--mcp`) não tem um `AppHandle` para perguntar — e os dois processos
+/// PRECISAM chegar ao mesmo caminho, senão o Claude leria um cadastro de
+/// hosts diferente do que a janela mostra.
+pub fn data_dir() -> std::io::Result<PathBuf> {
+    if let Some(custom) = std::env::var_os(DATA_DIR_ENV) {
+        return Ok(PathBuf::from(custom));
+    }
+
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| std::io::Error::other("HOME não está definida no ambiente"))?;
+    let base = if cfg!(target_os = "macos") {
+        PathBuf::from(home).join("Library/Application Support")
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(home).join(".local/share"))
+    };
+
+    Ok(base.join(APP_IDENTIFIER))
+}
+
 /// Monta o `AppState` no diretório de dados do app e o entrega ao Tauri.
 pub fn setup(app: &tauri::App) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let dir = app.path().app_data_dir()?;
+    let dir = data_dir()?;
+    std::fs::create_dir_all(&dir)?;
     app.manage(AppState::open(&dir)?);
     Ok(())
 }

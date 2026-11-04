@@ -3,6 +3,7 @@
 
 pub mod commands;
 pub mod core;
+pub mod mcp;
 
 /// Sobe a janela do app. Este é o modo normal, sem argumento nenhum.
 pub fn run() {
@@ -32,11 +33,12 @@ pub fn run() {
 
 /// Roda como servidor MCP em stdio, sem janela nenhuma.
 ///
-/// Ainda não implementado: é a Task 15 do plano. Quem chamar `--mcp` hoje
-/// recebe esta recusa explícita, em vez de uma janela abrindo por engano ou
-/// de um processo que fica mudo esperando um protocolo que ninguém fala.
+/// Monta o runtime do tokio aqui dentro (e não com `#[tokio::main]` no
+/// `main`) porque o modo janela tem o seu próprio, montado pelo Tauri: dois
+/// runtimes vivos no mesmo processo é exatamente o que este `if` evita.
 pub fn run_mcp() -> std::io::Result<()> {
-    Err(std::io::Error::other(
-        "o modo servidor MCP (--mcp) ainda não foi implementado",
-    ))
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(mcp::run_stdio())
 }
