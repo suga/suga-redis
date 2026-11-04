@@ -841,7 +841,7 @@ git add -A && git commit -m "feat: mcp stdio server with read-only tools"
 
 Socket unix em `<dir de runtime do app>/redis-desk.sock`, permissão 0600. Sem app aberto, as ferramentas de escrita devolvem "abra o aplicativo para liberar esta escrita". Veredito `Allowed` só sai quando o texto digitado for **exatamente** o nome do host. Tempo de espera: 120 segundos.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```rust
 #[tokio::test] async fn llm_write_waits_for_the_human()
@@ -860,21 +860,21 @@ test('botão liberar fica desligado até o nome do host estar digitado certo')
 test('nome digitado errado mostra o que se espera e não libera')
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `cargo test approval:: && npm run test -- approval`
 Expected: FAIL.
 
-- [ ] **Step 3: Implementar o socket, a fila, as três ferramentas e o diálogo**
+- [x] **Step 3: Implementar o socket, a fila, as três ferramentas e o diálogo**
 
 A janela ganha foco e toca o alerta do sistema quando um pedido chega — pedido que ninguém vê é pedido que expira.
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `cargo test approval:: && npm run test -- approval`
 Expected: PASS, 8 + 3 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: human-in-the-loop gate for llm writes"

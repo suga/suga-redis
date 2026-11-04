@@ -17,6 +17,7 @@ use std::sync::Arc;
 use rmcp::ServiceExt;
 use rmcp::transport::stdio;
 
+use crate::approval::{APPROVAL_TIMEOUT, socket_path};
 use crate::commands::{AppState, data_dir};
 use tools::Tools;
 
@@ -29,7 +30,7 @@ pub async fn run_stdio() -> std::io::Result<()> {
     let state = AppState::open(&dir)
         .map_err(|err| std::io::Error::other(format!("ao abrir os dados do app: {err}")))?;
 
-    let servico = Tools::new(Arc::new(state))
+    let servico = Tools::new(Arc::new(state), socket_path()?, APPROVAL_TIMEOUT)
         .serve(stdio())
         .await
         .map_err(|err| std::io::Error::other(format!("ao subir o servidor MCP: {err}")))?;

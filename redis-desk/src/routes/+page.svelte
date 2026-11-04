@@ -5,11 +5,19 @@
 	 * painel de valor na Task 11.
 	 */
 	import { onMount } from "svelte";
+	import ApprovalDialog from "$lib/ApprovalDialog.svelte";
 	import EnvBand from "$lib/EnvBand.svelte";
 	import HostForm from "$lib/HostForm.svelte";
 	import HostList from "$lib/HostList.svelte";
 	import Workspace from "$lib/Workspace.svelte";
-	import { errorMessage, listHosts, type Host } from "$lib/api";
+	import {
+		errorMessage,
+		listHosts,
+		onApprovalsChanged,
+		pendingApprovals,
+		type ApprovalRequest,
+		type Host,
+	} from "$lib/api";
 
 	let hosts = $state<Host[]>([]);
 	let aberto = $state<Host | null>(null);
@@ -32,6 +40,31 @@
 	// `onMount` e não `$effect`: `carregar` lê e escreve `aberto`, e um
 	// efeito que depende do que ele mesmo escreve se chamaria em laço.
 	onMount(carregar);
+
+	// ------------------------------- escritas pedidas pelo Claude
+
+	let pedidos = $state<ApprovalRequest[]>([]);
+
+	async function lerPedidos() {
+		try {
+			pedidos = await pendingApprovals();
+		} catch {
+			// A fila não responder não pode apagar a tela: o pior caso é o
+			// pedido aparecer um instante depois, na próxima rodada.
+		}
+	}
+
+	onMount(() => {
+		lerPedidos();
+		const parar = onApprovalsChanged(lerPedidos);
+		// O evento é o caminho rápido; a varredura periódica é a garantia de
+		// que um evento perdido não deixa um pedido invisível até expirar.
+		const relogio = setInterval(lerPedidos, 3000);
+		return () => {
+			clearInterval(relogio);
+			parar.then((fn) => fn());
+		};
+	});
 
 	function salvou(hostId: string) {
 		editando = null;
@@ -82,6 +115,12 @@
 		</main>
 	</div>
 </div>
+
+<!-- Um pedido por vez: decidir dois ao mesmo tempo é decidir nenhum com
+     atenção, e o resto da fila continua esperando sem risco. -->
+{#if pedidos.length > 0}
+	<ApprovalDialog request={pedidos[0]} onSettled={lerPedidos} />
+{/if}
 
 <style>
 	.app {

@@ -11,18 +11,22 @@
 //! O valor vai para a LLM EM CLARO, sem máscara. É decisão registrada do
 //! dono (ver as Global Constraints do plano), não um descuido.
 
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{ErrorData, Json, ServerHandler, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::approval::{ApprovalRequest, ApprovalVerdict, request_approval};
 use crate::commands::{AppState, CommandError};
 use crate::core::config::Env;
+use crate::core::history::Actor;
 use crate::core::keys::{KeyMeta, scan_all};
 use crate::core::search::{SearchHit, search};
-use crate::core::value::{ValueLimit, ValueView, read_value};
+use crate::core::value::{Bytes, ValueLimit, ValueView, WriteOp, op_summary, read_value};
 
 /// Teto padrão de acertos devolvidos por `search_keys`.
 const LIMITE_BUSCA_PADRAO: usize = 50;
@@ -90,6 +94,31 @@ pub struct SummarizeArgs {
     pub depth: usize,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WriteKeyArgs {
+    pub host_id: String,
+    pub db: u8,
+    pub key: String,
+    /// O texto a gravar. Só vale para chaves do tipo `string`.
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteKeyArgs {
+    pub host_id: String,
+    pub db: u8,
+    pub key: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetTtlArgs {
+    pub host_id: String,
+    pub db: u8,
+    pub key: String,
+    /// Prazo em milissegundos, ou nulo para a chave deixar de expirar.
+    pub ttl_ms: Option<i64>,
+}
+
 // ------------------------------------------------------- o que sai
 
 /// Um host cadastrado, SEM senha. A senha mora no chaveiro do sistema e não
@@ -146,6 +175,15 @@ pub struct TtlResult {
     pub median_ms: Option<i64>,
 }
 
+/// O que uma escrita liberada produziu.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct WriteResult {
+    /// A entrada de histórico que registra a mudança, com o valor anterior
+    /// guardado. É por este id que o dono desfaz a mudança no aplicativo.
+    pub entry_id: i64,
+    pub summary: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct PrefixSummary {
     pub prefix: String,
@@ -158,16 +196,28 @@ pub struct PrefixSummary {
 #[derive(Clone)]
 pub struct Tools {
     state: Arc<AppState>,
+    /// Onde o aplicativo aberto escuta os pedidos de escrita.
+    socket: PathBuf,
+    /// Quanto esperar por uma resposta humana. Parâmetro, e não constante,
+    /// para o teste da espera estourada não levar dois minutos.
+    approval_timeout: Duration,
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Tools>,
 }
 
 #[tool_router]
 impl Tools {
-    pub fn new(state: Arc<AppState>) -> Tools {
+    pub fn new(state: Arc<AppState>, socket: PathBuf, approval_timeout: Duration) -> Tools {
         Tools {
             state,
+            socket,
+            approval_timeout,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// O estado compartilhado, para quem precisa auditar o que a LLM fez.
+    pub fn state(&self) -> &AppState {
+        &self.state
     }
 
     /// Lista os hosts Redis cadastrados no aplicativo, com o ambiente de cada
@@ -400,9 +450,138 @@ impl Tools {
         resumo.sort_by(|a, b| b.keys.cmp(&a.keys).then_with(|| a.prefix.cmp(&b.prefix)));
         Ok(Json(resumo))
     }
+
+    // ------------------------------------------------- escrita
+
+    /// Grava um texto numa chave do tipo string.
+    #[tool(
+        description = "Grava um texto numa chave do tipo string. NÃO acontece sozinha: o dono do banco precisa liberar a escrita na janela do aplicativo redis-desk, digitando o nome do host. Se ninguém liberar em 120 segundos, nada é escrito. O valor anterior é guardado e pode ser desfeito pelo aplicativo."
+    )]
+    pub async fn write_key(
+        &self,
+        Parameters(args): Parameters<WriteKeyArgs>,
+    ) -> Result<Json<WriteResult>, ErrorData> {
+        self.pedir_e_escrever(
+            &args.host_id,
+            args.db,
+            &args.key,
+            WriteOp::SetString {
+                value: Bytes {
+                    text: Some(args.value),
+                    base64: None,
+                    truncated: false,
+                },
+            },
+        )
+        .await
+    }
+
+    /// Apaga uma chave.
+    #[tool(
+        description = "Apaga uma chave inteira. NÃO acontece sozinha: o dono do banco precisa liberar na janela do aplicativo redis-desk, digitando o nome do host. O valor apagado é guardado e pode ser desfeito pelo aplicativo."
+    )]
+    pub async fn delete_key(
+        &self,
+        Parameters(args): Parameters<DeleteKeyArgs>,
+    ) -> Result<Json<WriteResult>, ErrorData> {
+        self.pedir_e_escrever(&args.host_id, args.db, &args.key, WriteOp::DeleteKey)
+            .await
+    }
+
+    /// Muda ou tira o prazo de expiração de uma chave.
+    #[tool(
+        description = "Muda o prazo de expiração de uma chave, ou o remove (ttl_ms nulo) para ela deixar de expirar. NÃO acontece sozinha: o dono do banco precisa liberar na janela do aplicativo redis-desk, digitando o nome do host."
+    )]
+    pub async fn set_ttl(
+        &self,
+        Parameters(args): Parameters<SetTtlArgs>,
+    ) -> Result<Json<WriteResult>, ErrorData> {
+        self.pedir_e_escrever(
+            &args.host_id,
+            args.db,
+            &args.key,
+            WriteOp::SetTtl {
+                ttl_ms: args.ttl_ms,
+            },
+        )
+        .await
+    }
 }
 
 impl Tools {
+    /// O ÚNICO caminho pelo qual uma escrita pedida pela LLM chega ao Redis.
+    ///
+    /// Monta o pedido, manda para o aplicativo e espera. Só um veredito
+    /// `Allowed` segue adiante: qualquer outro desfecho — negado, espera
+    /// estourada, aplicativo fechado — devolve erro sem ter tocado em nada.
+    ///
+    /// A escrita em si passa por `write_with_backup` com `Actor::Llm`, igual
+    /// a qualquer escrita humana: mesma cópia de segurança, mesmo histórico,
+    /// mesmo desfazer. A diferença fica registrada em quem pediu, que é o
+    /// que permite auditar depois.
+    async fn pedir_e_escrever(
+        &self,
+        host_id: &str,
+        db: u8,
+        key: &str,
+        op: WriteOp,
+    ) -> Result<Json<WriteResult>, ErrorData> {
+        let (host, pw) = self.state.host_and_password(host_id).map_err(erro)?;
+        let summary = op_summary(key, &op);
+
+        let pedido = ApprovalRequest {
+            id: uuid::Uuid::new_v4().to_string(),
+            host_id: host.id.clone(),
+            host_name: host.name.clone(),
+            env: host.env,
+            db,
+            key: key.to_string(),
+            summary: summary.clone(),
+            op: op.clone(),
+            asked_at: crate::core::index::now_unix_ms(),
+        };
+
+        match request_approval(&self.socket, pedido, self.approval_timeout).await {
+            Ok(ApprovalVerdict::Allowed) => {}
+            Ok(ApprovalVerdict::Denied) => {
+                return Err(ErrorData::invalid_request(
+                    "o dono do banco recusou esta escrita na janela do aplicativo".to_string(),
+                    None,
+                ));
+            }
+            Ok(ApprovalVerdict::TimedOut) => {
+                return Err(ErrorData::invalid_request(
+                    "ninguém liberou a escrita a tempo na janela do aplicativo: \
+                     nada foi alterado"
+                        .to_string(),
+                    None,
+                ));
+            }
+            Err(err) => return Err(ErrorData::invalid_request(err.to_string(), None)),
+        }
+
+        let entry_id = self
+            .state
+            .history
+            .write_with_backup(
+                &self.state.pool,
+                &host,
+                pw.as_deref(),
+                db,
+                key,
+                &op,
+                Actor::Llm,
+            )
+            .await
+            .map_err(|e| erro(e.into()))?;
+
+        // O índice conhecia esta chave com o valor antigo; a busca não pode
+        // continuar devolvendo um texto que já não está lá.
+        let _ = self.state.index.forget_key(&host.id, db, key);
+
+        Ok(Json(WriteResult { entry_id, summary }))
+    }
+
     /// As chaves do banco cujo nome começa com `prefix`.
     ///
     /// Filtra em Rust depois de um `SCAN` completo em vez de mandar o padrão
@@ -463,7 +642,18 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let state = AppState::open(dir.path()).unwrap();
         let host_id = add_host(&state, host_spec(), None).unwrap();
-        (dir, Tools::new(std::sync::Arc::new(state)), host_id)
+        // Socket inexistente de propósito: nenhuma ferramenta DE LEITURA
+        // pode precisar do aplicativo aberto.
+        let socket = dir.path().join("sem-app.sock");
+        (
+            dir,
+            Tools::new(
+                std::sync::Arc::new(state),
+                socket,
+                std::time::Duration::from_millis(50),
+            ),
+            host_id,
+        )
     }
 
     async fn raw_conn() -> MultiplexedConnection {

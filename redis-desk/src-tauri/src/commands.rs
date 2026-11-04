@@ -17,11 +17,14 @@
 //! chega ao Redis sem passar por esta função.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
+use crate::approval::{
+    ApprovalError, ApprovalQueue, ApprovalRequest, ApprovalVerdict, serve, socket_path,
+};
 use crate::core::config::{ConfigError, Env, Host, HostStore};
 use crate::core::conn::{ConnError, Pool};
 use crate::core::history::{Actor, History, HistoryEntry, HistoryError};
@@ -76,6 +79,9 @@ pub enum CommandError {
 
     #[error("host \"{0}\" não está cadastrado")]
     UnknownHost(String),
+
+    #[error(transparent)]
+    Approval(#[from] ApprovalError),
 }
 
 /// A forma como um `CommandError` chega na interface.
@@ -101,6 +107,8 @@ impl CommandError {
             CommandError::Index(_) => "index",
             CommandError::History(_) => "history",
             CommandError::UnknownHost(_) => "unknown_host",
+            CommandError::Approval(ApprovalError::NameMismatch) => "name_mismatch",
+            CommandError::Approval(_) => "approval",
         }
     }
 }
@@ -140,6 +148,10 @@ pub struct AppState {
     pub pool: Pool,
     pub index: Index,
     pub history: History,
+    /// Os pedidos de escrita que a LLM mandou e que esperam o dono.
+    /// `Arc` porque o servidor do socket roda numa tarefa própria e precisa
+    /// da MESMA fila que os comandos da tela leem.
+    pub approvals: Arc<ApprovalQueue>,
 }
 
 impl AppState {
@@ -153,6 +165,7 @@ impl AppState {
             pool: Pool::new(),
             index: Index::open(&db_path)?,
             history: History::open(&db_path)?,
+            approvals: Arc::new(ApprovalQueue::new()),
         })
     }
 
@@ -358,6 +371,29 @@ pub async fn search(
     .await?)
 }
 
+// ------------------------------------------------- escrita pedida pela LLM
+
+/// Os pedidos de escrita à espera de uma decisão do dono.
+pub fn pending_approvals(state: &AppState) -> Vec<ApprovalRequest> {
+    state.approvals.pending()
+}
+
+/// Libera uma escrita pedida pela LLM. `typed_host_name` tem que ser
+/// exatamente o nome do host; qualquer outra coisa devolve erro e o pedido
+/// continua esperando.
+pub fn resolve_approval(
+    state: &AppState,
+    request_id: &str,
+    typed_host_name: &str,
+) -> Result<ApprovalVerdict> {
+    Ok(state.approvals.resolve(request_id, typed_host_name)?)
+}
+
+/// Recusa uma escrita pedida pela LLM.
+pub fn deny_approval(state: &AppState, request_id: &str) -> Result<ApprovalVerdict> {
+    Ok(state.approvals.deny(request_id)?)
+}
+
 /// A regra da trava, num lugar só, para `write_value` e `rollback` não
 /// poderem divergir.
 fn needs_confirmation(env: Env, confirmed: bool) -> bool {
@@ -503,6 +539,31 @@ pub async fn cmd_search(
     search(&state, &host_id, db, &needle).await
 }
 
+#[tauri::command]
+pub fn cmd_pending_approvals(state: tauri::State<'_, AppState>) -> Vec<ApprovalRequest> {
+    pending_approvals(&state)
+}
+
+#[tauri::command]
+pub fn cmd_resolve_approval(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    typed_host_name: String,
+) -> Result<ApprovalVerdict> {
+    resolve_approval(&state, &request_id, &typed_host_name)
+}
+
+#[tauri::command]
+pub fn cmd_deny_approval(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+) -> Result<ApprovalVerdict> {
+    deny_approval(&state, &request_id)
+}
+
+/// Evento avisando que a fila de pedidos mudou.
+pub const APPROVALS_EVENT: &str = "approvals://changed";
+
 /// Identificador do app, o mesmo de `tauri.conf.json`.
 const APP_IDENTIFIER: &str = "com.marcosugamele.redis-desk";
 
@@ -535,12 +596,62 @@ pub fn data_dir() -> std::io::Result<PathBuf> {
     Ok(base.join(APP_IDENTIFIER))
 }
 
-/// Monta o `AppState` no diretório de dados do app e o entrega ao Tauri.
+/// Monta o `AppState`, entrega ao Tauri e abre o socket de aprovação.
 pub fn setup(app: &tauri::App) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir)?;
-    app.manage(AppState::open(&dir)?);
+
+    let state = AppState::open(&dir)?;
+    let queue = state.approvals.clone();
+    app.manage(state);
+
+    // O socket só existe enquanto a janela estiver aberta. É essa a
+    // propriedade que faz "sem aplicativo aberto, a LLM não escreve" valer
+    // por construção, e não por disciplina de quem escreveu o código.
+    let socket = socket_path()?;
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = serve(queue, &socket).await {
+            // stderr, nunca stdout: no modo MCP stdout é o protocolo, e um
+            // hábito de imprimir ali vaza para o lugar errado.
+            eprintln!("redis-desk: o socket de aprovação caiu: {err}");
+        }
+    });
+
+    vigiar_pedidos(app.handle().clone());
     Ok(())
+}
+
+/// Acorda a janela quando um pedido novo chega.
+///
+/// Pedido que ninguém vê é pedido que expira, e uma expiração silenciosa
+/// parece, do lado do Claude, a mesma coisa que uma recusa. Por isso a
+/// janela se levanta sozinha: a decisão é da pessoa, mas a chance de decidir
+/// não pode depender de ela estar olhando para a tela certa.
+fn vigiar_pedidos(app: tauri::AppHandle) {
+    use tauri::{Emitter, Manager};
+
+    tauri::async_runtime::spawn(async move {
+        let mut anterior = 0usize;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            let Some(state) = app.try_state::<AppState>() else {
+                continue;
+            };
+            let atual = state.approvals.pending().len();
+            if atual == anterior {
+                continue;
+            }
+
+            let chegou_pedido = atual > anterior;
+            anterior = atual;
+            let _ = app.emit(APPROVALS_EVENT, atual);
+
+            if let Some(janela) = app.get_webview_window("main").filter(|_| chegou_pedido) {
+                let _ = janela.unminimize();
+                let _ = janela.set_focus();
+            }
+        }
+    });
 }
 
 #[cfg(test)]

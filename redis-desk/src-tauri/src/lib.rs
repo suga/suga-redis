@@ -1,6 +1,7 @@
 //! Biblioteca do redis-desk: o núcleo, a fachada de comandos e a montagem
 //! do app Tauri. O binário (`main.rs`) é só quem escolhe entre os dois modos.
 
+pub mod approval;
 pub mod commands;
 pub mod core;
 pub mod mcp;
@@ -26,6 +27,9 @@ pub fn run() {
             commands::cmd_list_history,
             commands::cmd_rollback,
             commands::cmd_search,
+            commands::cmd_pending_approvals,
+            commands::cmd_resolve_approval,
+            commands::cmd_deny_approval,
         ])
         .run(tauri::generate_context!())
         .expect("erro ao subir a janela do redis-desk");

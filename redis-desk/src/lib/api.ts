@@ -190,6 +190,28 @@ export interface SearchOutcome {
 /** `index_age_secs` quando o (host, banco) nunca foi varrido. */
 export const NEVER_SCANNED = -1;
 
+// ------------------------------------------- escrita pedida pelo Claude
+
+/**
+ * Um pedido de escrita que o Claude mandou pelo servidor MCP e que está
+ * parado esperando uma decisão. Nada foi escrito enquanto ele existe.
+ */
+export interface ApprovalRequest {
+	id: string;
+	host_id: string;
+	/** O texto que precisa ser digitado para liberar. */
+	host_name: string;
+	env: Env;
+	db: number;
+	key: string;
+	summary: string;
+	op: WriteOp;
+	/** Epoch em milissegundos. */
+	asked_at: number;
+}
+
+export type ApprovalVerdict = "allowed" | "denied" | "timed_out";
+
 // ------------------------------------------------------------------ erros
 
 /**
@@ -207,7 +229,9 @@ export interface ApiError {
 		| "config"
 		| "index"
 		| "history"
-		| "unknown_host";
+		| "unknown_host"
+		| "name_mismatch"
+		| "approval";
 	message: string;
 }
 
@@ -338,4 +362,33 @@ export function search(
 	needle: string,
 ): Promise<SearchOutcome> {
 	return invoke("cmd_search", { hostId, db, needle });
+}
+
+/** Os pedidos de escrita do Claude que estão esperando uma decisão. */
+export function pendingApprovals(): Promise<ApprovalRequest[]> {
+	return invoke("cmd_pending_approvals");
+}
+
+/**
+ * Libera uma escrita pedida pelo Claude. `typedHostName` tem que ser
+ * exatamente o nome do host — qualquer outra coisa falha com `name_mismatch`
+ * e o pedido continua esperando.
+ */
+export function resolveApproval(
+	requestId: string,
+	typedHostName: string,
+): Promise<ApprovalVerdict> {
+	return invoke("cmd_resolve_approval", { requestId, typedHostName });
+}
+
+/** Recusa uma escrita pedida pelo Claude. */
+export function denyApproval(requestId: string): Promise<ApprovalVerdict> {
+	return invoke("cmd_deny_approval", { requestId });
+}
+
+/** Avisa que a fila de pedidos mudou. Chame a função devolvida para parar. */
+export function onApprovalsChanged(
+	handler: (pending: number) => void,
+): Promise<UnlistenFn> {
+	return listen<number>("approvals://changed", (event) => handler(event.payload));
 }
