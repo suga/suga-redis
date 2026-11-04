@@ -1,7 +1,7 @@
 {
-  "name": "redis-desk",
+  "name": "suga-redis",
   "version": "0.1.0",
-  "description": "",
+  "description": "Cliente de mesa para Redis, com servidor MCP embutido.",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

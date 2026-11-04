@@ -73,7 +73,7 @@ pub enum ApprovalError {
     NameMismatch,
 
     #[error(
-        "nenhum aplicativo redis-desk está aberto: abra o aplicativo e deixe-o aberto \
+        "nenhum aplicativo Suga-Redis está aberto: abra o aplicativo e deixe-o aberto \
          para liberar esta escrita"
     )]
     AppNotRunning,
@@ -243,7 +243,7 @@ mod tests {
         let state = AppState::open(dir.path()).unwrap();
         let host_id = add_host(&state, host_spec(env), None).unwrap();
 
-        let socket = dir.path().join("redis-desk.sock");
+        let socket = dir.path().join("suga-redis.sock");
         let queue = Arc::new(ApprovalQueue::new());
         let servindo = queue.clone();
         let caminho = socket.clone();

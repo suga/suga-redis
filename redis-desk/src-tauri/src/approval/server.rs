@@ -20,7 +20,7 @@ const SOCKET_MODE: u32 = 0o600;
 /// `commands::data_dir`) — e um socket que os dois lados não acham no mesmo
 /// lugar é o mesmo que socket nenhum.
 pub fn socket_path() -> std::io::Result<PathBuf> {
-    Ok(crate::commands::data_dir()?.join("redis-desk.sock"))
+    Ok(crate::commands::data_dir()?.join("suga-redis.sock"))
 }
 
 /// Escuta pedidos de escrita até o processo acabar.

@@ -110,7 +110,13 @@
 					<Workspace host={aberto} />
 				{/key}
 			{:else}
-				<p class="placeholder">Escolha um host na coluna ao lado.</p>
+				<!-- A marca só aparece aqui, onde não há nada competindo com ela.
+				     No resto do app a cor forte é do ambiente, e nada disputa
+				     atenção com ela. -->
+				<div class="vazio">
+					<img src="/suga-redis-logo.png" alt="Suga-Redis" width="340" />
+					<p>Escolha um host na coluna ao lado, ou cadastre o primeiro.</p>
+				</div>
 			{/if}
 		</main>
 	</div>
@@ -151,13 +157,31 @@
 
 	/* A casca não põe preenchimento em volta da área de trabalho: a árvore
 	   encosta na borda de propósito, para caber o máximo de chaves. */
-	main > :global(.placeholder),
 	main > :global(form),
 	main > :global(.erro) {
 		margin: 1.2rem;
 	}
 
-	.placeholder {
+	.vazio {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 1.2rem;
+		height: 100%;
+		padding: 2rem;
+		text-align: center;
+	}
+
+	.vazio img {
+		max-width: min(340px, 70%);
+		height: auto;
+		/* A arte tem fundo preto próprio; misturá-la ao painel evita a
+		   plaquinha retangular que ela seria em cima do fundo do app. */
+		mix-blend-mode: lighten;
+	}
+
+	.vazio p {
 		margin: 0;
 		color: var(--text-faint);
 	}

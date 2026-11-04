@@ -1,4 +1,4 @@
-//! Biblioteca do redis-desk: o núcleo, a fachada de comandos e a montagem
+//! Biblioteca do suga-redis: o núcleo, a fachada de comandos e a montagem
 //! do app Tauri. O binário (`main.rs`) é só quem escolhe entre os dois modos.
 
 pub mod approval;
@@ -32,7 +32,7 @@ pub fn run() {
             commands::cmd_deny_approval,
         ])
         .run(tauri::generate_context!())
-        .expect("erro ao subir a janela do redis-desk");
+        .expect("erro ao subir a janela do Suga-Redis");
 }
 
 /// Roda como servidor MCP em stdio, sem janela nenhuma.

@@ -1,4 +1,4 @@
-//! Abertura compartilhada do arquivo SQLite único (`redis-desk.sqlite`) usado
+//! Abertura compartilhada do arquivo SQLite único (`suga-redis.sqlite`) usado
 //! pelo histórico (Task 6) e, a partir desta task, também pelo índice de
 //! busca: as mesmas duas pragmas (`journal_mode = WAL`, `busy_timeout`)
 //! precisam valer para toda conexão que toca este arquivo — `History` e

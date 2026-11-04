@@ -51,7 +51,7 @@ const SEARCH_LIMIT: usize = 200;
 
 /// Nome do arquivo SQLite compartilhado por histórico e índice, dentro do
 /// diretório de dados do app.
-const DB_FILE: &str = "redis-desk.sqlite";
+const DB_FILE: &str = "suga-redis.sqlite";
 
 /// Evento emitido durante `rescan`, um por chave processada, para a barra
 /// de progresso da interface.
@@ -565,12 +565,12 @@ pub fn cmd_deny_approval(
 pub const APPROVALS_EVENT: &str = "approvals://changed";
 
 /// Identificador do app, o mesmo de `tauri.conf.json`.
-const APP_IDENTIFIER: &str = "com.sugamele.redisdesk";
+const APP_IDENTIFIER: &str = "com.sugamele.sugaredis";
 
 /// Variável de ambiente que reposiciona o diretório de dados. Existe para
 /// rodar uma segunda instalação lado a lado (e para os testes não
 /// encostarem nos dados de verdade de quem está desenvolvendo).
-const DATA_DIR_ENV: &str = "REDIS_DESK_DATA_DIR";
+const DATA_DIR_ENV: &str = "SUGA_REDIS_DATA_DIR";
 
 /// O diretório onde moram `hosts.json` e o SQLite.
 ///
@@ -613,7 +613,7 @@ pub fn setup(app: &tauri::App) -> std::result::Result<(), Box<dyn std::error::Er
         if let Err(err) = serve(queue, &socket).await {
             // stderr, nunca stdout: no modo MCP stdout é o protocolo, e um
             // hábito de imprimir ali vaza para o lugar errado.
-            eprintln!("redis-desk: o socket de aprovação caiu: {err}");
+            eprintln!("suga-redis: o socket de aprovação caiu: {err}");
         }
     });
 

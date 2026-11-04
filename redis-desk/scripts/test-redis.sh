@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Sobe/derruba um Redis de teste isolado para desenvolvimento e testes de
-# integração do redis-desk. Container: redis-desk-test, porta 127.0.0.1:6399.
+# integração do suga-redis. Container: suga-redis-test, porta 127.0.0.1:6399.
 #
 # Este é o ÚNICO lugar do repositório onde FLUSHALL pode aparecer, e mesmo
 # assim só contra o container de teste (porta 6399). Em qualquer outro lugar
-# do redis-desk, KEYS, FLUSHALL e FLUSHDB são proibidos.
+# do suga-redis, KEYS, FLUSHALL e FLUSHDB são proibidos.
 set -euo pipefail
 
-CONTAINER_NAME="redis-desk-test"
+CONTAINER_NAME="suga-redis-test"
 TEST_PORT="6399"
 TEST_HOST="127.0.0.1"
 REDIS_IMAGE="redis:7-alpine"

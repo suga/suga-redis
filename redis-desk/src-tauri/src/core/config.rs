@@ -1,6 +1,6 @@
 //! Cadastro de hosts Redis: persiste os hosts em `hosts.json` no diretório de
 //! dados do app e guarda a senha de cada host no chaveiro do sistema
-//! operacional (serviço `redis-desk`, conta `<id do host>`), nunca em arquivo.
+//! operacional (serviço `suga-redis`, conta `<id do host>`), nunca em arquivo.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Nome do serviço usado para localizar as senhas no chaveiro do sistema.
-const KEYRING_SERVICE: &str = "redis-desk";
+const KEYRING_SERVICE: &str = "suga-redis";
 
 /// Nome do arquivo onde os hosts (sem senha) são persistidos.
 const HOSTS_FILE: &str = "hosts.json";

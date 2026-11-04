@@ -5,7 +5,7 @@
 //! exatamente o que foi feito — inclusive recriar uma chave apagada, com o
 //! TTL que ela tinha.
 //!
-//! Banco em `<dir de dados do app>/redis-desk.sqlite`, aberto sempre com
+//! Banco em `<dir de dados do app>/suga-redis.sqlite`, aberto sempre com
 //! `PRAGMA journal_mode = WAL` e `PRAGMA busy_timeout = 5000`: o mesmo
 //! arquivo é usado pelo índice de busca (Task 7) e, a partir da Task 15, por
 //! um segundo processo do SO (o servidor MCP) — sem WAL e um busy_timeout
@@ -951,7 +951,7 @@ mod tests {
 
     fn open_history() -> (tempfile::TempDir, History) {
         let dir = tempfile::TempDir::new().unwrap();
-        let history = History::open(&dir.path().join("redis-desk.sqlite")).unwrap();
+        let history = History::open(&dir.path().join("suga-redis.sqlite")).unwrap();
         (dir, history)
     }
 

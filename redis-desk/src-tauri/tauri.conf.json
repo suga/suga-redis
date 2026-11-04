@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "redis-desk",
+  "productName": "Suga-Redis",
   "version": "0.1.0",
-  "identifier": "com.sugamele.redisdesk",
+  "identifier": "com.sugamele.sugaredis",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "redis-desk",
+        "title": "Suga-Redis",
         "width": 1280,
         "height": 800,
         "minWidth": 980,

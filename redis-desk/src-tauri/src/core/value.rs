@@ -613,7 +613,7 @@ pub enum WriteOp {
 /// inspecionar a lista no meio da operação, que aquele item é um marcador
 /// interno transitório, não dado de produção.
 const REMOVE_LIST_SENTINEL: &str =
-    "\u{0}__redis-desk:tombstone:f47ac10b-58cc-4372-a567-0e02b2c3d479__";
+    "\u{0}__suga-redis:tombstone:f47ac10b-58cc-4372-a567-0e02b2c3d479__";
 
 /// Aplica `op` sobre `key`. A chave mantém o TTL que já tinha, exceto quando
 /// a própria operação é `SetTtl` ou `DeleteKey`, que decidem o TTL

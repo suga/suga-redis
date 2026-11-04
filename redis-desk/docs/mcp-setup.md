@@ -1,6 +1,6 @@
-# Ligar o redis-desk ao Claude local
+# Ligar o Suga-Redis ao Claude local
 
-O redis-desk é também um servidor MCP. Ligado ao Claude Code, ele deixa o
+O Suga-Redis é também um servidor MCP. Ligado ao Claude Code, ele deixa o
 Claude olhar os seus bancos Redis — e, com a sua liberação na hora, mexer
 neles.
 
@@ -9,17 +9,17 @@ neles.
 Com o app já instalado no mac:
 
 ```bash
-claude mcp add redis-desk -- /Applications/redis-desk.app/Contents/MacOS/redis-desk --mcp
+claude mcp add suga-redis -- /Applications/suga-redis.app/Contents/MacOS/suga-redis --mcp
 ```
 
 No linux, aponte para o binário onde ele estiver:
 
 ```bash
-claude mcp add redis-desk -- /caminho/para/redis-desk --mcp
+claude mcp add suga-redis -- /caminho/para/suga-redis --mcp
 ```
 
 Compilando do código, o binário sai em
-`src-tauri/target/release/redis-desk`.
+`src-tauri/target/release/suga-redis`.
 
 Confira com `claude mcp list`. Devem aparecer 10 ferramentas.
 
@@ -88,5 +88,5 @@ mudança.
 | :- | :- |
 | `claude mcp list` não mostra o servidor | Caminho do binário errado, ou faltou o `--mcp`. |
 | `list_hosts` devolve lista vazia | Nenhum host cadastrado ainda, ou o Claude está rodando com outro usuário (o cadastro é por usuário). |
-| Escrita recusada com "abra o aplicativo" | A janela do redis-desk não está aberta. |
+| Escrita recusada com "abra o aplicativo" | A janela do Suga-Redis não está aberta. |
 | Erro citando o nome de um host | O Redis não respondeu: VPN caída, host fora do ar ou senha trocada. A mensagem sempre diz qual host. |

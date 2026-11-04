@@ -1,4 +1,4 @@
-# redis-desk
+# Suga-Redis
 
 Cliente de mesa para Redis, feito para quem mexe em banco de produção e não
 quer descobrir o ambiente errado tarde demais.
@@ -45,13 +45,13 @@ Os artefatos saem em `src-tauri/target/release/bundle/`.
 | O quê | Onde |
 | :- | :- |
 | Cadastro de hosts | `<dados>/hosts.json` |
-| Histórico e índice de busca | `<dados>/redis-desk.sqlite` |
-| Socket de aprovação | `<dados>/redis-desk.sock` (permissão 0600) |
+| Histórico e índice de busca | `<dados>/suga-redis.sqlite` |
+| Socket de aprovação | `<dados>/suga-redis.sock` (permissão 0600) |
 | **Senhas** | **Chaveiro do sistema, nunca em arquivo** |
 
-`<dados>` é `~/Library/Application Support/com.sugamele.redisdesk` no mac e
-`~/.local/share/com.sugamele.redisdesk` no linux. A variável de ambiente
-`REDIS_DESK_DATA_DIR` reposiciona tudo isso, se você quiser uma segunda
+`<dados>` é `~/Library/Application Support/com.sugamele.sugaredis` no mac e
+`~/.local/share/com.sugamele.sugaredis` no linux. A variável de ambiente
+`SUGA_REDIS_DATA_DIR` reposiciona tudo isso, se você quiser uma segunda
 instalação lado a lado.
 
 O índice de busca guarda os valores **em claro**, sem cifrar — é uma cópia

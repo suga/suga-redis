@@ -439,7 +439,7 @@ mod tests {
 
     fn open_index() -> (tempfile::TempDir, Index) {
         let dir = tempfile::TempDir::new().unwrap();
-        let index = Index::open(&dir.path().join("redis-desk.sqlite")).unwrap();
+        let index = Index::open(&dir.path().join("suga-redis.sqlite")).unwrap();
         (dir, index)
     }
 

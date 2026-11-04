@@ -455,7 +455,7 @@ impl Tools {
 
     /// Grava um texto numa chave do tipo string.
     #[tool(
-        description = "Grava um texto numa chave do tipo string. NÃO acontece sozinha: o dono do banco precisa liberar a escrita na janela do aplicativo redis-desk, digitando o nome do host. Se ninguém liberar em 120 segundos, nada é escrito. O valor anterior é guardado e pode ser desfeito pelo aplicativo."
+        description = "Grava um texto numa chave do tipo string. NÃO acontece sozinha: o dono do banco precisa liberar a escrita na janela do aplicativo Suga-Redis, digitando o nome do host. Se ninguém liberar em 120 segundos, nada é escrito. O valor anterior é guardado e pode ser desfeito pelo aplicativo."
     )]
     pub async fn write_key(
         &self,
@@ -478,7 +478,7 @@ impl Tools {
 
     /// Apaga uma chave.
     #[tool(
-        description = "Apaga uma chave inteira. NÃO acontece sozinha: o dono do banco precisa liberar na janela do aplicativo redis-desk, digitando o nome do host. O valor apagado é guardado e pode ser desfeito pelo aplicativo."
+        description = "Apaga uma chave inteira. NÃO acontece sozinha: o dono do banco precisa liberar na janela do aplicativo Suga-Redis, digitando o nome do host. O valor apagado é guardado e pode ser desfeito pelo aplicativo."
     )]
     pub async fn delete_key(
         &self,
@@ -490,7 +490,7 @@ impl Tools {
 
     /// Muda ou tira o prazo de expiração de uma chave.
     #[tool(
-        description = "Muda o prazo de expiração de uma chave, ou o remove (ttl_ms nulo) para ela deixar de expirar. NÃO acontece sozinha: o dono do banco precisa liberar na janela do aplicativo redis-desk, digitando o nome do host."
+        description = "Muda o prazo de expiração de uma chave, ou o remove (ttl_ms nulo) para ela deixar de expirar. NÃO acontece sozinha: o dono do banco precisa liberar na janela do aplicativo Suga-Redis, digitando o nome do host."
     )]
     pub async fn set_ttl(
         &self,
@@ -606,8 +606,8 @@ impl Tools {
 
 #[tool_handler(
     router = self.tool_router,
-    name = "redis-desk",
-    instructions = "Ferramentas de LEITURA sobre os bancos Redis cadastrados no aplicativo redis-desk. \
+    name = "suga-redis",
+    instructions = "Ferramentas de LEITURA sobre os bancos Redis cadastrados no aplicativo Suga-Redis. \
 Comece sempre por `list_hosts` para descobrir os ids e, principalmente, o AMBIENTE de cada host. \
 Um host marcado como `prod` é um banco de produção de verdade: trate o que você lê dele como dado real de pessoas. \
 Nenhuma ferramenta aqui altera o que quer que seja — escrever exige que o dono libere na janela do aplicativo."

@@ -10,12 +10,12 @@ const MCP_FLAG: &str = "--mcp";
 /// escrita em stdout que não seja protocolo quebraria essa conversa.
 fn main() {
     if std::env::args().any(|arg| arg == MCP_FLAG) {
-        if let Err(err) = redis_desk_lib::run_mcp() {
-            eprintln!("redis-desk: {err}");
+        if let Err(err) = suga_redis_lib::run_mcp() {
+            eprintln!("suga-redis: {err}");
             std::process::exit(1);
         }
         return;
     }
 
-    redis_desk_lib::run()
+    suga_redis_lib::run()
 }
