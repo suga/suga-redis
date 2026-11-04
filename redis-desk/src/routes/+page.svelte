@@ -8,6 +8,7 @@
 	import EnvBand from "$lib/EnvBand.svelte";
 	import HostForm from "$lib/HostForm.svelte";
 	import HostList from "$lib/HostList.svelte";
+	import Workspace from "$lib/Workspace.svelte";
 	import { errorMessage, listHosts, type Host } from "$lib/api";
 
 	let hosts = $state<Host[]>([]);
@@ -72,9 +73,9 @@
 					/>
 				{/key}
 			{:else if aberto}
-				<p class="placeholder">
-					A árvore de chaves de <span class="mono">{aberto.name}</span> aparece aqui.
-				</p>
+				{#key aberto.id}
+					<Workspace host={aberto} />
+				{/key}
 			{:else}
 				<p class="placeholder">Escolha um host na coluna ao lado.</p>
 			{/if}
@@ -102,8 +103,19 @@
 	}
 
 	main {
-		padding: 1.2rem;
-		overflow-y: auto;
+		min-width: 0;
+		min-height: 0;
+		overflow: hidden;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* A casca não põe preenchimento em volta da área de trabalho: a árvore
+	   encosta na borda de propósito, para caber o máximo de chaves. */
+	main > :global(.placeholder),
+	main > :global(form),
+	main > :global(.erro) {
+		margin: 1.2rem;
 	}
 
 	.placeholder {

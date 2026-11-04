@@ -611,7 +611,7 @@ git add -A && git commit -m "feat: operations-room shell with environment-colore
 
 Galho abre e fecha mostrando a contagem. Lista virtualizada — milhares de folhas não podem pesar. O painel mostra chave, tipo, tamanho, TTL em contagem regressiva, e o conteúdo. Valor truncado mostra "mostrando X de Y" com botão de carregar mais. Topo da coluna tem o filtro de nome, instantâneo, e a idade da última varredura com botão de varrer de novo.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```ts
 test('clicar num galho abre os filhos e mostra a contagem')
@@ -622,19 +622,19 @@ test('tipo só leitura não mostra botão de salvar')
 test('ttl aparece em contagem regressiva e some quando a chave não expira')
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `npm run test -- key-tree`
 Expected: FAIL — componentes não existem.
 
-- [ ] **Step 3: Implementar os três componentes**
+- [x] **Step 3: Implementar os três componentes**
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `npm run test -- key-tree`
 Expected: PASS, 6 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: virtualized key tree and value panel"
