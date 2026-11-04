@@ -290,6 +290,22 @@ impl Index {
         )?;
         Ok(())
     }
+
+    /// Roda uma consulta de leitura sobre a conexão do índice.
+    ///
+    /// Existe para `core::search` (Task 8) poder escrever o SEU SQL — o
+    /// pré-filtro por trigrama e a varredura por nome de chave são decisões
+    /// da busca, não do índice, e enfiá-las aqui faria este módulo carregar
+    /// um vocabulário de consulta que ele não usa. O que o índice continua
+    /// dono é do schema e das pragmas: por isso a conexão sai emprestada
+    /// dentro do `Mutex`, e não por um getter que a deixaria escapar.
+    pub(crate) fn with_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> Result<T> {
+        let conn = self.conn.lock().unwrap();
+        Ok(f(&conn)?)
+    }
 }
 
 /// Uma linha pronta para inserir no índice — tudo que `build_row` calcula a
@@ -318,6 +334,29 @@ fn kind_label(kind: &KeyKind) -> &'static str {
         KeyKind::Stream => "stream",
         KeyKind::Json => "json",
         KeyKind::Unknown(_) => "unknown",
+    }
+}
+
+/// O inverso de `kind_label`, para quem lê o índice de volta (`core::search`).
+///
+/// Mora coladinho no `kind_label` de propósito: as duas metades do mesmo
+/// mapeamento separadas por arquivos diferentes divergiriam na primeira vez
+/// que alguém acrescentasse um tipo.
+///
+/// `"unknown"` não volta ao nome original do tipo — `kind_label` o descarta
+/// ao gravar, porque o índice só precisa distinguir os tipos que a interface
+/// trata de forma diferente, e um tipo de módulo desconhecido é tratado
+/// igual a qualquer outro desconhecido.
+pub(crate) fn kind_from_label(label: &str) -> KeyKind {
+    match label {
+        "string" => KeyKind::String,
+        "hash" => KeyKind::Hash,
+        "list" => KeyKind::List,
+        "zset" => KeyKind::ZSet,
+        "set" => KeyKind::Set,
+        "stream" => KeyKind::Stream,
+        "json" => KeyKind::Json,
+        other => KeyKind::Unknown(other.to_string()),
     }
 }
 
@@ -422,7 +461,11 @@ fn build_row(key: &str, view: &ValueView) -> IndexedRow {
     }
 }
 
-fn now_unix_ms() -> i64 {
+/// `pub(crate)` porque `core::search` precisa do mesmo relógio para calcular
+/// a idade do índice contra o `finished_at` que ESTE módulo gravou — duas
+/// leituras de relógio têm que vir da mesma fonte para a subtração significar
+/// alguma coisa.
+pub(crate) fn now_unix_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("relógio do sistema antes de 1970")
