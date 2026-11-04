@@ -229,6 +229,7 @@ export interface ApiError {
 	kind:
 		| "unreachable"
 		| "auth"
+		| "cluster_single_db"
 		| "protocol"
 		| "key_gone"
 		| "not_editable"

@@ -102,6 +102,7 @@ impl CommandError {
         match self {
             CommandError::Conn(ConnError::Unreachable { .. }) => "unreachable",
             CommandError::Conn(ConnError::Auth { .. }) => "auth",
+            CommandError::Conn(ConnError::ClusterSingleDb { .. }) => "cluster_single_db",
             CommandError::Conn(ConnError::KeyGone(_)) => "key_gone",
             CommandError::Conn(ConnError::NotEditable { .. }) => "not_editable",
             CommandError::Conn(ConnError::Ambiguous { .. }) => "ambiguous",

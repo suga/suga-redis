@@ -26,6 +26,13 @@ pub enum ConnError {
     #[error("o host \"{host}\" recusou a autenticação")]
     Auth { host: String },
 
+    #[error(
+        "o host \"{host}\" está em modo cluster, onde só existe o banco 0 \
+         (é o caso de todo ElastiCache/Valkey serverless da AWS) — \
+         edite o host e troque o banco para 0"
+    )]
+    ClusterSingleDb { host: String },
+
     #[error("erro de protocolo do Redis: {0}")]
     Protocol(String),
 
@@ -67,6 +74,31 @@ impl Default for Pool {
     fn default() -> Pool {
         Pool::new()
     }
+}
+
+/// Instala o provedor de criptografia do `rustls`, uma vez por processo.
+///
+/// O `rustls` 0.23 não escolhe um sozinho: ele exige que o programa diga
+/// qual usar, e ENTRA EM PÂNICO ao montar a primeira conexão se ninguém
+/// disser. O `redis` habilita um provedor só nas dependências de teste
+/// dele, então quem usa a biblioteca precisa trazer o seu. Sem isso, todo
+/// host marcado com TLS era impossível de conectar — e como o Redis de
+/// teste fala em texto puro, nenhum teste encostava nesse caminho.
+///
+/// `ring` e não `aws-lc-rs`: o segundo precisa de cmake e de um compilador
+/// C, o que complicaria o build do linux dentro do contêiner sem nada em
+/// troca aqui.
+///
+/// Mora aqui, na primeira conexão TLS, e não no `main`: assim vale igual
+/// para a janela, para o servidor MCP e para os testes, sem depender de
+/// ninguém lembrar de chamá-lo na ordem certa.
+fn garantir_provedor_tls() {
+    static UMA_VEZ: std::sync::Once = std::sync::Once::new();
+    UMA_VEZ.call_once(|| {
+        // Falha se outro já instalou um provedor; nesse caso o que está lá
+        // serve, e insistir seria pior.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 impl Pool {
@@ -131,6 +163,10 @@ impl Pool {
         db: u8,
         password: Option<&str>,
     ) -> Result<MultiplexedConnection> {
+        if host.tls {
+            garantir_provedor_tls();
+        }
+
         let url = build_url(host, db, password);
         let client = Client::open(url).map_err(|err| classify(host, err))?;
 
@@ -264,7 +300,22 @@ impl Pool {
         cmd.arg("keyspace");
 
         let info: String = self.run(host, host.db, pw, &cmd).await?;
-        parse_keyspace(&info)
+        let sizes = parse_keyspace(&info)?;
+        if !sizes.is_empty() {
+            return Ok(sizes);
+        }
+
+        // Alguns servidores gerenciados (o Valkey serverless da AWS, entre
+        // eles) respondem `INFO keyspace` vazio. Sem este recuo, o seletor
+        // de bancos da tela ficaria sem contagem nenhuma — e a contagem é
+        // justamente o que diz à pessoa onde há dado.
+        let dbsize = redis::cmd("DBSIZE");
+        let total: u64 = self.run(host, host.db, pw, &dbsize).await?;
+        Ok(if total > 0 {
+            vec![(host.db, total)]
+        } else {
+            Vec::new()
+        })
     }
 }
 
@@ -328,6 +379,18 @@ fn classify(host: &Host, err: redis::RedisError) -> ConnError {
 
     if err.kind() == redis::ErrorKind::AuthenticationFailed {
         return ConnError::Auth {
+            host: host.name.clone(),
+        };
+    }
+
+    // Um servidor em modo cluster recusa o `SELECT` que o driver manda para
+    // qualquer banco diferente de 0. O texto cru do protocolo não diz à
+    // pessoa o que fazer; esta variante diz.
+    if err
+        .to_string()
+        .contains("SELECT is not allowed in cluster mode")
+    {
+        return ConnError::ClusterSingleDb {
             host: host.name.clone(),
         };
     }
@@ -556,6 +619,30 @@ mod tests {
         // nenhuma conexão nova foi aberta (o que `CLIENT LIST` também
         // mostraria, com uma linha a mais por conexão nova).
         assert_eq!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn a_tls_host_fails_with_an_error_not_a_panic() {
+        // O `rustls` exige um provedor de criptografia instalado no
+        // processo; sem ele, ele entra em PÂNICO ao montar a conexão, antes
+        // de qualquer byte na rede. O `redis` só habilita um provedor nas
+        // dependências de teste dele, então quem usa a biblioteca precisa
+        // trazer o seu — e durante um bom tempo este app não trouxe, o que
+        // deixou TODO host com TLS impossível de conectar.
+        //
+        // Aqui o alvo é o Redis de teste, que NÃO fala TLS: o handshake tem
+        // que falhar com um erro tratado. Se o provedor sumir de novo, este
+        // teste volta a quebrar com um pânico em vez de um `Err`.
+        let pool = Pool::new();
+        let mut host = test_host("Redis de teste", 6399);
+        host.tls = true;
+
+        let resultado = pool.ping(&host, None).await;
+
+        assert!(
+            resultado.is_err(),
+            "um servidor sem TLS não pode aceitar uma conexão TLS"
+        );
     }
 
     #[tokio::test]
