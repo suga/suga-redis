@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 
 use super::config::{Env, Host};
 use super::conn::{ConnError, Pool};
-use super::value::{Bytes, Value, ValueLimit, ValueView, WriteOp, apply_write, op_summary, read_value};
+use super::keys::KeyKind;
+use super::value::{
+    Bytes, Value, ValueLimit, ValueView, WriteOp, apply_write, op_summary, read_value,
+};
 
 /// Limite passado a `read_value` ao tirar a cópia de segurança: grande o
 /// bastante para nunca truncar um valor de uso prático (1 GiB / 1 milhão de
@@ -94,6 +97,21 @@ pub enum HistoryError {
 
     #[error("tipo de valor \"{0}\" não tem suporte a volta atrás")]
     UnsupportedKind(String),
+
+    #[error(
+        "a chave \"{key}\" mudou de tipo desde a cópia de segurança (era \"{expected}\", agora \
+         é \"{found}\") — a volta atrás foi recusada para não apagar dados de um tipo diferente"
+    )]
+    TypeChanged {
+        key: String,
+        expected: String,
+        found: String,
+    },
+
+    #[error(
+        "a chave \"{key}\" já tinha expirado sozinha antes da volta atrás — nada foi restaurado"
+    )]
+    ExpiredBeforeRollback { key: String },
 }
 
 /// Resultado padrão das operações deste módulo.
@@ -130,24 +148,43 @@ struct BytesSnapshot {
 }
 
 impl BytesSnapshot {
+    /// Desestrutura `Bytes` por nome, não por acesso a campo (`bytes.text`,
+    /// `bytes.base64`): um campo novo em `Bytes` vira erro de compilação
+    /// aqui (padrão não-exaustivo) em vez de simplesmente nunca chegar ao
+    /// histórico — exatamente o jeito silencioso como esta garantia de
+    /// backup pararia de valer. `truncated` é descartado de propósito: com
+    /// `FULL_READ_LIMIT`, o backup nunca deveria vir truncado, mas o campo
+    /// ainda precisa aparecer no padrão para a exaustividade funcionar.
     fn from_bytes(bytes: &Bytes) -> BytesSnapshot {
+        let Bytes {
+            text,
+            base64,
+            truncated: _,
+        } = bytes;
         BytesSnapshot {
-            text: bytes.text.clone(),
-            base64: bytes.base64.clone(),
+            text: text.clone(),
+            base64: base64.clone(),
         }
     }
 
     /// Inverso de `from_bytes`: prefere `text` (o caminho comum) e só
     /// decodifica `base64` quando não há texto — mesma regra de
     /// `Bytes::to_raw` em `core::value`, reimplementada aqui porque aquele
-    /// método é privado ao módulo `value`.
-    fn to_raw(&self) -> Vec<u8> {
+    /// método é privado ao módulo `value`. Ao contrário daquele método, um
+    /// base64 inválido aqui não pode virar silenciosamente um valor vazio:
+    /// um `before_json` corrompido precisa ser recusado com erro, não
+    /// restaurado como se a chave estivesse vazia — isso seria perder o
+    /// dado duas vezes (uma na corrupção, outra fingindo que não houve
+    /// nada para restaurar).
+    fn to_raw(&self) -> Result<Vec<u8>> {
         if let Some(text) = &self.text {
-            text.as_bytes().to_vec()
+            Ok(text.as_bytes().to_vec())
         } else if let Some(encoded) = &self.base64 {
-            BASE64.decode(encoded).unwrap_or_default()
+            BASE64.decode(encoded).map_err(|err| {
+                HistoryError::Corrupt(format!("base64 inválido no histórico: {err}"))
+            })
         } else {
-            Vec::new()
+            Ok(Vec::new())
         }
     }
 }
@@ -173,13 +210,37 @@ struct ElementSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct ValueSnapshot {
     kind: String,
-    ttl_ms: Option<i64>,
+    /// Instante absoluto (epoch em milissegundos) em que a chave expira, ou
+    /// `None` se ela era persistente. Guardado como instante, não como TTL
+    /// relativo (`PTTL`) no momento da cópia: um TTL relativo reaplicado
+    /// depois, via `PEXPIRE`, conta a partir de agora — o que faria uma
+    /// volta atrás tardia esticar a vida real da chave em vez de restaurar
+    /// o prazo que ela já tinha. Ver `restore_value`/`build_restore_command`,
+    /// que usam `PEXPIREAT` com este instante.
+    expires_at_ms: Option<i64>,
     elements: Vec<ElementSnapshot>,
 }
 
-fn snapshot_from_view(view: &ValueView) -> ValueSnapshot {
-    let ttl_ms = view.ttl_ms;
-    let (kind, elements) = match &view.value {
+/// Converte o valor lido (`ValueView`) para a forma serializável do
+/// histórico. `now_ms` é o instante da leitura (não um instante recalculado
+/// aqui dentro), usado só para transformar o TTL relativo de `PTTL` em um
+/// instante absoluto — ver o comentário de `ValueSnapshot::expires_at_ms`.
+///
+/// Desestruturado por nome (`let ValueView { .. } = view`), não por acesso a
+/// campo: um campo novo em `ValueView` vira erro de compilação aqui em vez
+/// de silenciosamente nunca chegar ao backup.
+fn snapshot_from_view(view: &ValueView, now_ms: i64) -> ValueSnapshot {
+    let ValueView {
+        key: _,
+        kind: _,
+        ttl_ms,
+        size_bytes: _,
+        value,
+        total_elements: _,
+        truncated: _,
+    } = view;
+    let expires_at_ms = ttl_ms.map(|remaining_ms| now_ms + remaining_ms);
+    let (kind, elements) = match value {
         Value::Str(bytes) => (
             "string",
             vec![ElementSnapshot {
@@ -237,7 +298,7 @@ fn snapshot_from_view(view: &ValueView) -> ValueSnapshot {
 
     ValueSnapshot {
         kind: kind.to_string(),
-        ttl_ms,
+        expires_at_ms,
         elements,
     }
 }
@@ -270,7 +331,9 @@ fn actor_from_str(value: &str) -> Result<Actor> {
     match value {
         "human" => Ok(Actor::Human),
         "llm" => Ok(Actor::Llm),
-        other => Err(HistoryError::Corrupt(format!("actor desconhecido: {other}"))),
+        other => Err(HistoryError::Corrupt(format!(
+            "actor desconhecido: {other}"
+        ))),
     }
 }
 
@@ -299,9 +362,7 @@ impl History {
         // `journal_mode` sempre devolve uma linha com o modo resultante —
         // ao contrário da maioria das PRAGMAs, não dá para gravar com
         // `pragma_update` puro.
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| {
-            row.get::<_, String>(0)
-        })?;
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
         conn.pragma_update(None, "busy_timeout", 5000i64)?;
         conn.execute_batch(SCHEMA)?;
 
@@ -385,8 +446,12 @@ impl History {
         op: &WriteOp,
         actor: Actor,
     ) -> Result<i64> {
+        // Um único instante serve tanto para converter o TTL lido (relativo)
+        // em `expires_at_ms` (absoluto) quanto para `at`: os dois descrevem
+        // o mesmo momento, o da cópia de segurança.
+        let now = now_unix_ms();
         let before = match read_value(pool, host, pw, db, key, FULL_READ_LIMIT).await {
-            Ok(view) => Some(snapshot_from_view(&view)),
+            Ok(view) => Some(snapshot_from_view(&view, now)),
             Err(ConnError::KeyGone(_)) => None,
             Err(err) => return Err(HistoryError::Conn(err)),
         };
@@ -396,8 +461,7 @@ impl History {
         };
 
         let summary = op_summary(key, op);
-        let at = now_unix_ms();
-        let id = self.insert_entry(host, db, key, &summary, before_json.as_deref(), actor, at)?;
+        let id = self.insert_entry(host, db, key, &summary, before_json.as_deref(), actor, now)?;
 
         if let Err(err) = apply_write(pool, host, pw, db, key, op).await {
             self.delete_row(id)?;
@@ -405,7 +469,7 @@ impl History {
         }
 
         let after_json = match read_value(pool, host, pw, db, key, FULL_READ_LIMIT).await {
-            Ok(view) => serde_json::to_string(&snapshot_from_view(&view)).ok(),
+            Ok(view) => serde_json::to_string(&snapshot_from_view(&view, now_unix_ms())).ok(),
             Err(_) => None,
         };
         self.update_after_json(id, after_json.as_deref())?;
@@ -543,14 +607,148 @@ fn row_to_raw_entry(row: &rusqlite::Row) -> rusqlite::Result<RawEntry> {
     })
 }
 
+/// Descrição em português de um `KeyKind`, para a mensagem de
+/// `HistoryError::TypeChanged`.
+fn describe_kind(kind: &KeyKind) -> String {
+    match kind {
+        KeyKind::String => "string".to_string(),
+        KeyKind::Hash => "hash".to_string(),
+        KeyKind::List => "list".to_string(),
+        KeyKind::ZSet => "zset".to_string(),
+        KeyKind::Set => "set".to_string(),
+        KeyKind::Stream => "stream".to_string(),
+        KeyKind::Json => "json (RedisJSON)".to_string(),
+        KeyKind::Unknown(name) => format!("desconhecido (\"{name}\")"),
+    }
+}
+
+/// Se `current` (o tipo que a chave tem HOJE no Redis) é compatível com
+/// `snapshot_kind` (o tipo que ela tinha no momento da cópia de segurança).
+/// Só os quatro tipos editáveis entram aqui — `snapshot_kind` nunca é outra
+/// coisa numa entrada que sobreviveu (ver o comentário de `ValueSnapshot`).
+fn kind_matches(current: &KeyKind, snapshot_kind: &str) -> bool {
+    matches!(
+        (current, snapshot_kind),
+        (KeyKind::String, "string")
+            | (KeyKind::Hash, "hash")
+            | (KeyKind::List, "list")
+            | (KeyKind::ZSet, "zset")
+    )
+}
+
+/// O tipo atual de `key` no Redis, ou `None` se ela não existe. Usado por
+/// `restore_value` para recusar uma volta atrás que destruiria uma chave
+/// que mudou de tipo depois do backup.
+async fn current_kind(
+    pool: &Pool,
+    host: &Host,
+    pw: Option<&str>,
+    db: u8,
+    key: &str,
+) -> Result<Option<KeyKind>> {
+    let type_name: String = pool
+        .with_retry(host, db, pw, |mut conn| async move {
+            redis::cmd("TYPE").arg(key).query_async(&mut conn).await
+        })
+        .await
+        .map_err(HistoryError::Conn)?;
+
+    if type_name == "none" {
+        Ok(None)
+    } else {
+        Ok(Some(KeyKind::from_type_name(&type_name)))
+    }
+}
+
+/// O que recriar para restaurar uma chave — já com todo byte decodificado,
+/// para que montar o `Pipeline` (`build_restore_pipeline`) nunca falhe:
+/// decodificar base64 é a única parte fallível (`before_json` corrompido),
+/// e precisa acontecer antes do fechamento passado a `Pool::with_retry`, que
+/// só pode devolver `redis::RedisError` — não `HistoryError`.
+enum RestoreCommand {
+    /// Chave não existia antes da escrita original — restaurar é só apagar.
+    None,
+    SetString(Vec<u8>),
+    Hash(Vec<(String, Vec<u8>)>),
+    List(Vec<Vec<u8>>),
+    ZSet(Vec<(f64, Vec<u8>)>),
+}
+
+/// Converte `snapshot` em `RestoreCommand` + o instante de expiração (se
+/// houver), decodificando todo base64 agora — ver o comentário de
+/// `RestoreCommand`. Erro se `snapshot.kind` não for um dos quatro tipos
+/// editáveis (não deveria acontecer numa entrada que sobreviveu, ver o
+/// comentário de `ValueSnapshot`) ou se algum `base64` estiver corrompido.
+fn build_restore_command(
+    snapshot: &Option<ValueSnapshot>,
+) -> Result<(RestoreCommand, Option<i64>)> {
+    let Some(snap) = snapshot else {
+        return Ok((RestoreCommand::None, None));
+    };
+
+    let command = match snap.kind.as_str() {
+        "string" => {
+            let raw = match snap.elements.first() {
+                Some(element) => element.value.to_raw()?,
+                None => Vec::new(),
+            };
+            RestoreCommand::SetString(raw)
+        }
+        "hash" => {
+            let mut pairs = Vec::with_capacity(snap.elements.len());
+            for element in &snap.elements {
+                pairs.push((
+                    element.field.clone().unwrap_or_default(),
+                    element.value.to_raw()?,
+                ));
+            }
+            RestoreCommand::Hash(pairs)
+        }
+        "list" => {
+            let mut items = Vec::with_capacity(snap.elements.len());
+            for element in &snap.elements {
+                items.push(element.value.to_raw()?);
+            }
+            RestoreCommand::List(items)
+        }
+        "zset" => {
+            let mut pairs = Vec::with_capacity(snap.elements.len());
+            for element in &snap.elements {
+                pairs.push((element.score.unwrap_or(0.0), element.value.to_raw()?));
+            }
+            RestoreCommand::ZSet(pairs)
+        }
+        other => return Err(HistoryError::UnsupportedKind(other.to_string())),
+    };
+
+    Ok((command, snap.expires_at_ms))
+}
+
 /// Restaura `key` para o estado descrito por `snapshot` (ou apaga a chave,
-/// se `snapshot` é `None` — ela não existia antes da escrita original):
-/// `DEL` seguido da recriação do tipo certo, tudo num `MULTI`/`EXEC`
-/// (`Pipeline::atomic`) para que nenhuma outra escrita concorrente veja a
-/// chave num estado intermediário (apagada, ou só parcialmente recriada).
-/// Passa por `Pool::with_retry`: a sequência inteira é idempotente (rodar
-/// `DEL` + recriação de novo produz exatamente o mesmo estado final), ao
-/// contrário das operações de lista de `apply_write` que usam `run_once`.
+/// se `snapshot` é `None` — ela não existia antes da escrita original).
+///
+/// Duas checagens de segurança acontecem ANTES de qualquer escrita:
+///
+/// 1. O tipo atual da chave (se ela existir) precisa bater com o tipo do
+///    snapshot — uma chave que mudou de tipo depois do backup (plausível a
+///    partir das Tasks 15/16, quando a LLM também escreve) não pode ser
+///    apagada só para a volta atrás recriar um tipo diferente por cima. Uma
+///    rede de segurança que destrói dado para restaurar dado não é rede de
+///    segurança.
+/// 2. Se o snapshot tinha TTL, o instante de expiração (`expires_at_ms`,
+///    absoluto — não um TTL relativo recontado a partir de agora, ver o
+///    comentário de `ValueSnapshot::expires_at_ms`) precisa ainda estar no
+///    futuro. Se já passou, a chave expirou sozinha em produção entre a
+///    escrita original e a volta atrás tardia — recriá-la ressuscitaria um
+///    dado que o próprio Redis já tinha descartado.
+///
+/// Só depois dessas checagens o Redis é tocado: `DEL` seguido da recriação
+/// do tipo certo, tudo num `MULTI`/`EXEC` (`Pipeline::atomic`) para que
+/// nenhuma outra escrita concorrente veja a chave num estado intermediário
+/// (apagada, ou só parcialmente recriada). Passa por `Pool::with_retry`: a
+/// sequência inteira é idempotente (rodar `DEL` + recriação de novo produz
+/// exatamente o mesmo estado final), ao contrário das operações de lista de
+/// `apply_write` que usam `run_once`.
 async fn restore_value(
     pool: &Pool,
     host: &Host,
@@ -559,74 +757,91 @@ async fn restore_value(
     key: &str,
     snapshot: &Option<ValueSnapshot>,
 ) -> Result<()> {
-    if let Some(snap) = snapshot
-        && !matches!(snap.kind.as_str(), "string" | "hash" | "list" | "zset")
-    {
-        return Err(HistoryError::UnsupportedKind(snap.kind.clone()));
+    if let Some(snap) = snapshot {
+        if let Some(current) = current_kind(pool, host, pw, db, key).await?
+            && !kind_matches(&current, &snap.kind)
+        {
+            return Err(HistoryError::TypeChanged {
+                key: key.to_string(),
+                expected: snap.kind.clone(),
+                found: describe_kind(&current),
+            });
+        }
+
+        if let Some(expires_at_ms) = snap.expires_at_ms
+            && expires_at_ms <= now_unix_ms()
+        {
+            return Err(HistoryError::ExpiredBeforeRollback {
+                key: key.to_string(),
+            });
+        }
     }
 
+    let (command, expires_at_ms) = build_restore_command(snapshot)?;
     let key_owned = key.to_string();
-    let snapshot_owned = snapshot.clone();
 
     pool.with_retry(host, db, pw, move |mut conn| {
-        let key = key_owned.clone();
-        let snapshot = snapshot_owned.clone();
-        async move {
-            let pipe = build_restore_pipeline(&key, &snapshot);
-            pipe.query_async::<()>(&mut conn).await
-        }
+        let pipe = build_restore_pipeline(&key_owned, &command, expires_at_ms);
+        async move { pipe.query_async::<()>(&mut conn).await }
     })
     .await
     .map_err(HistoryError::Conn)
 }
 
-fn build_restore_pipeline(key: &str, snapshot: &Option<ValueSnapshot>) -> redis::Pipeline {
+/// Monta o `Pipeline` a partir de um `RestoreCommand` já resolvido — etapa
+/// infalível de propósito (ver o comentário de `RestoreCommand`), para que
+/// possa rodar dentro do fechamento de `Pool::with_retry` sem precisar
+/// devolver `HistoryError` dali.
+fn build_restore_pipeline(
+    key: &str,
+    command: &RestoreCommand,
+    expires_at_ms: Option<i64>,
+) -> redis::Pipeline {
     let mut pipe = redis::pipe();
     pipe.atomic();
     pipe.cmd("DEL").arg(key);
 
-    if let Some(snap) = snapshot {
-        match snap.kind.as_str() {
-            "string" => {
-                if let Some(element) = snap.elements.first() {
-                    pipe.cmd("SET").arg(key).arg(element.value.to_raw());
-                }
-            }
-            "hash" => {
-                if !snap.elements.is_empty() {
-                    let cmd = pipe.cmd("HSET");
-                    cmd.arg(key);
-                    for element in &snap.elements {
-                        cmd.arg(element.field.clone().unwrap_or_default());
-                        cmd.arg(element.value.to_raw());
-                    }
-                }
-            }
-            "list" => {
-                if !snap.elements.is_empty() {
-                    let cmd = pipe.cmd("RPUSH");
-                    cmd.arg(key);
-                    for element in &snap.elements {
-                        cmd.arg(element.value.to_raw());
-                    }
-                }
-            }
-            "zset" => {
-                if !snap.elements.is_empty() {
-                    let cmd = pipe.cmd("ZADD");
-                    cmd.arg(key);
-                    for element in &snap.elements {
-                        cmd.arg(element.score.unwrap_or(0.0));
-                        cmd.arg(element.value.to_raw());
-                    }
-                }
-            }
-            _ => {}
+    match command {
+        RestoreCommand::None => {}
+        RestoreCommand::SetString(raw) => {
+            pipe.cmd("SET").arg(key).arg(raw.clone());
         }
+        RestoreCommand::Hash(pairs) => {
+            if !pairs.is_empty() {
+                let cmd = pipe.cmd("HSET");
+                cmd.arg(key);
+                for (field, value) in pairs {
+                    cmd.arg(field.clone());
+                    cmd.arg(value.clone());
+                }
+            }
+        }
+        RestoreCommand::List(items) => {
+            if !items.is_empty() {
+                let cmd = pipe.cmd("RPUSH");
+                cmd.arg(key);
+                for item in items {
+                    cmd.arg(item.clone());
+                }
+            }
+        }
+        RestoreCommand::ZSet(pairs) => {
+            if !pairs.is_empty() {
+                let cmd = pipe.cmd("ZADD");
+                cmd.arg(key);
+                for (score, member) in pairs {
+                    cmd.arg(*score);
+                    cmd.arg(member.clone());
+                }
+            }
+        }
+    }
 
-        if let Some(ttl_ms) = snap.ttl_ms {
-            pipe.cmd("PEXPIRE").arg(key).arg(ttl_ms);
-        }
+    // Instante absoluto, não relativo — ver o comentário de
+    // `ValueSnapshot::expires_at_ms`. Já validado no futuro por quem chamou
+    // (`restore_value`), antes de chegar aqui.
+    if let Some(expires_at_ms) = expires_at_ms {
+        pipe.cmd("PEXPIREAT").arg(key).arg(expires_at_ms);
     }
 
     pipe
@@ -697,10 +912,17 @@ mod tests {
             .await
             .unwrap();
 
-        let current: String = redis::cmd("GET").arg(key).query_async(&mut conn).await.unwrap();
+        let current: String = redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
         del(&mut conn, &[key]).await;
 
-        assert_eq!(current, "valor-novo", "a escrita real precisa ter sido aplicada");
+        assert_eq!(
+            current, "valor-novo",
+            "a escrita real precisa ter sido aplicada"
+        );
 
         let entry = history.get(id).unwrap();
         assert_eq!(entry.host_id, host.id);
@@ -772,14 +994,20 @@ mod tests {
 
         del(&mut conn, &[key]).await;
 
-        assert_eq!(restored1, "valor1", "campo alterado precisa voltar ao valor original");
+        assert_eq!(
+            restored1, "valor1",
+            "campo alterado precisa voltar ao valor original"
+        );
         assert_eq!(
             restored2, "valor2",
             "campo não envolvido na escrita precisa sobreviver à volta atrás"
         );
 
         let entry = history.get(id).unwrap();
-        assert!(entry.rolled_back, "a entrada precisa ser marcada como revertida");
+        assert!(
+            entry.rolled_back,
+            "a entrada precisa ser marcada como revertida"
+        );
     }
 
     #[tokio::test]
@@ -825,8 +1053,16 @@ mod tests {
 
         history.rollback(&pool, &host, None, id).await.unwrap();
 
-        let value: String = redis::cmd("GET").arg(key).query_async(&mut conn).await.unwrap();
-        let pttl: i64 = redis::cmd("PTTL").arg(key).query_async(&mut conn).await.unwrap();
+        let value: String = redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let pttl: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
 
         del(&mut conn, &[key]).await;
 
@@ -887,7 +1123,9 @@ mod tests {
         // cortasse pedaços do valor não passasse despercebido por engano
         // (um valor feito só de "a"s esconderia exatamente esse tipo de
         // erro).
-        let huge_value: String = (0..600_000).map(|i| (b'0' + (i % 10) as u8) as char).collect();
+        let huge_value: String = (0..600_000)
+            .map(|i| (b'0' + (i % 10) as u8) as char)
+            .collect();
         assert!(huge_value.len() > ValueLimit::default().max_bytes);
 
         let _: () = redis::cmd("SET")
@@ -910,12 +1148,20 @@ mod tests {
         // Confere que a escrita real de fato truncaria se fosse exibida
         // (prova que o valor original era grande o bastante para expor um
         // backup que cortasse a cauda), antes de restaurar.
-        let after_write: String = redis::cmd("GET").arg(key).query_async(&mut conn).await.unwrap();
+        let after_write: String = redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
         assert_eq!(after_write, "valor-pequeno-substituto");
 
         history.rollback(&pool, &host, None, id).await.unwrap();
 
-        let restored: String = redis::cmd("GET").arg(key).query_async(&mut conn).await.unwrap();
+        let restored: String = redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
 
         del(&mut conn, &[key]).await;
 
@@ -927,6 +1173,236 @@ mod tests {
         assert_eq!(
             restored, huge_value,
             "a volta atrás precisa restaurar o valor grande byte a byte, não só no tamanho"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_the_shortened_ttl_after_elapsed_time() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_test:rollback_elapsed_ttl";
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("valor-com-ttl-curto")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        // 5s de TTL no momento do backup.
+        let _: () = redis::cmd("PEXPIRE")
+            .arg(key)
+            .arg(5000)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let (_dir, history) = open_history();
+        let op = WriteOp::SetString {
+            value: text("valor-novo"),
+        };
+        let id = history
+            .write_with_backup(&pool, &host, None, host.db, key, &op, Actor::Human)
+            .await
+            .unwrap();
+
+        // Passa um tempo real antes de desfazer — é exatamente o cenário
+        // que o produto existe para cobrir: a pessoa só percebe o problema
+        // e clica em "desfazer" bem depois da escrita.
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+
+        history.rollback(&pool, &host, None, id).await.unwrap();
+
+        let pttl: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        del(&mut conn, &[key]).await;
+
+        // Se a volta atrás tivesse regravado um TTL RELATIVO (`PEXPIRE
+        // 5000`) em vez do instante absoluto capturado no backup, o PTTL
+        // aqui viria perto de 5000ms de novo — esticando a vida real da
+        // chave pelo tempo que a pessoa levou para desfazer. O valor
+        // correto é o que sobrava dos 5s originais menos os ~2s que
+        // passaram: bem abaixo de 5000, mas ainda positivo.
+        assert!(
+            pttl > 0 && pttl < 4000,
+            "esperava TTL restante (~3000ms, não os 5000ms originais), veio {pttl}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_of_an_already_expired_key_restores_nothing() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_test:rollback_already_expired";
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("valor-vai-expirar")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("PEXPIRE")
+            .arg(key)
+            .arg(300)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let (_dir, history) = open_history();
+        let id = history
+            .write_with_backup(
+                &pool,
+                &host,
+                None,
+                host.db,
+                key,
+                &WriteOp::DeleteKey,
+                Actor::Human,
+            )
+            .await
+            .unwrap();
+
+        // Deixa o TTL curto expirar de verdade no Redis antes de desfazer.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+
+        let result = history.rollback(&pool, &host, None, id).await;
+
+        let exists: bool = redis::cmd("EXISTS")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        assert!(
+            matches!(result, Err(HistoryError::ExpiredBeforeRollback { .. })),
+            "esperava ExpiredBeforeRollback, veio {result:?}"
+        );
+        assert!(
+            !exists,
+            "a chave não pode ser recriada — ela já tinha expirado sozinha em produção"
+        );
+
+        let entry = history.get(id).unwrap();
+        assert!(
+            !entry.rolled_back,
+            "uma volta atrás recusada não pode marcar a entrada como revertida"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_refuses_when_the_key_changed_type() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_test:rollback_type_changed";
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("valor-string")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let (_dir, history) = open_history();
+        let id = history
+            .write_with_backup(
+                &pool,
+                &host,
+                None,
+                host.db,
+                key,
+                &WriteOp::DeleteKey,
+                Actor::Human,
+            )
+            .await
+            .unwrap();
+
+        // Entre a escrita original e a volta atrás, outra coisa recria a
+        // chave com um tipo diferente (uma lista, não a string original).
+        let _: () = redis::cmd("RPUSH")
+            .arg(key)
+            .arg("item-de-outro-tipo")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = history.rollback(&pool, &host, None, id).await;
+
+        let current_type: String = redis::cmd("TYPE")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        assert!(
+            matches!(result, Err(HistoryError::TypeChanged { .. })),
+            "esperava TypeChanged, veio {result:?}"
+        );
+        assert_eq!(
+            current_type, "list",
+            "a chave recriada por outra coisa não pode ser apagada pela volta atrás recusada"
+        );
+    }
+
+    #[tokio::test]
+    async fn backup_and_restore_of_a_large_collection_survives_every_element() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_test:large_collection_roundtrip";
+
+        // Bem além de `ValueLimit::default().max_elements` (500) — a tela de
+        // detalhes cortaria essa coleção; o backup não pode.
+        let total_items = 600;
+        let mut cmd = redis::cmd("RPUSH");
+        cmd.arg(key);
+        for i in 0..total_items {
+            cmd.arg(format!("item_{i}"));
+        }
+        let _: () = cmd.query_async(&mut conn).await.unwrap();
+
+        let (_dir, history) = open_history();
+        let op = WriteOp::SetListItem {
+            index: 0,
+            value: text("item_0_mudado"),
+        };
+        let id = history
+            .write_with_backup(&pool, &host, None, host.db, key, &op, Actor::Human)
+            .await
+            .unwrap();
+
+        history.rollback(&pool, &host, None, id).await.unwrap();
+
+        let len: i64 = redis::cmd("LLEN")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let all_items: Vec<String> = redis::cmd("LRANGE")
+            .arg(key)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        del(&mut conn, &[key]).await;
+
+        assert_eq!(
+            len, total_items as i64,
+            "a volta atrás não pode perder elementos de uma coleção grande"
+        );
+        let expected: Vec<String> = (0..total_items).map(|i| format!("item_{i}")).collect();
+        assert_eq!(
+            all_items, expected,
+            "todo elemento precisa sobreviver, inclusive os que ficam além de max_elements (500)"
         );
     }
 
@@ -994,10 +1470,16 @@ mod tests {
         }
 
         let removed_a = history.prune(&host.id, 30, 500).unwrap();
-        assert_eq!(removed_a, 5, "só as 5 entradas com mais de 30 dias deveriam sumir");
+        assert_eq!(
+            removed_a, 5,
+            "só as 5 entradas com mais de 30 dias deveriam sumir"
+        );
 
         for id in &recent_ids {
-            assert!(history.get(*id).is_ok(), "entrada recente não deveria ser removida");
+            assert!(
+                history.get(*id).is_ok(),
+                "entrada recente não deveria ser removida"
+            );
         }
         for id in &old_ids {
             assert!(
@@ -1007,7 +1489,10 @@ mod tests {
         }
 
         let removed_b = history.prune(&other_host.id, 30, 500).unwrap();
-        assert_eq!(removed_b, 10, "das 510 entradas, as 10 mais antigas deveriam sumir");
+        assert_eq!(
+            removed_b, 10,
+            "das 510 entradas, as 10 mais antigas deveriam sumir"
+        );
 
         let remaining_b = history.list(&other_host.id, 1000).unwrap();
         assert_eq!(remaining_b.len(), 500);
