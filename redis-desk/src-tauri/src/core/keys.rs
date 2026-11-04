@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// `COUNT` pedido a cada chamada de `SCAN`: alto o bastante para que um
 /// banco com muitas chaves não precise de milhares de idas e vindas, sem
 /// pedir uma passada tão grande que pese no servidor de uma vez só.
-const SCAN_COUNT: usize = 500;
+const SCAN_COUNT: usize = 5_000;
 
 /// Tamanho do lote de chaves por pipeline de metadados (`TYPE` + `PTTL` +
 /// `MEMORY USAGE`). Lotes menores que o total de chaves evitam um pipeline
@@ -79,8 +79,72 @@ pub struct KeyMeta {
     pub ttl_ms: Option<i64>,
     /// Tamanho estimado em bytes (`MEMORY USAGE`). Fica em `0` quando o
     /// comando não está disponível no servidor (ex.: um gerenciado antigo)
-    /// — isso nunca derruba a varredura.
+    /// ou falha para aquela chave — isso nunca derruba a varredura.
     pub size_bytes: u64,
+}
+
+/// Andamento de uma varredura de nomes: quantas chaves já vieram e quantas
+/// o servidor diz ter (`DBSIZE`).
+///
+/// `total_estimate` é ESTIMATIVA de verdade, não um total conhecido: chaves
+/// nascem e expiram durante a varredura, e o `SCAN` pode devolver a mesma
+/// chave duas vezes se o banco crescer no meio do caminho. Serve para uma
+/// porcentagem na tela, não para uma conta exata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScanTick {
+    pub scanned: u64,
+    pub total_estimate: u64,
+}
+
+/// Varre só os NOMES das chaves, sem pedir metadado nenhum.
+///
+/// É o que a árvore da tela precisa — e só isso: `build_tree` lê o nome e
+/// descarta o resto. Pedir `TYPE`, `PTTL` e `MEMORY USAGE` de cada chave
+/// para montá-la custava uma ida e volta a cada 200 chaves, trazendo da
+/// outra ponta da rede um dado que ia direto para o lixo. Num Redis
+/// gerenciado em outra região, com 50 mil chaves, eram 250 viagens de ~130 ms
+/// só para isso.
+///
+/// `progress` é chamado a cada lote do cursor, com o que já veio e o
+/// `DBSIZE` lido antes de começar.
+pub async fn scan_names(
+    pool: &Pool,
+    host: &Host,
+    pw: Option<&str>,
+    db: u8,
+    progress: impl Fn(ScanTick),
+) -> Result<Vec<String>, ConnError> {
+    let progress = &progress;
+    pool.with_retry(host, db, pw, move |mut conn| async move {
+        // Uma ida e volta a mais, no começo, para a tela poder dizer
+        // "45%" em vez de "aguarde". Vale a troca.
+        let total_estimate: u64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+
+        let mut names: Vec<String> = Vec::with_capacity(total_estimate as usize);
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("COUNT")
+                .arg(SCAN_COUNT)
+                .query_async(&mut conn)
+                .await?;
+
+            names.extend(batch);
+            progress(ScanTick {
+                scanned: names.len() as u64,
+                total_estimate,
+            });
+
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        Ok(names)
+    })
+    .await
 }
 
 /// Varre todas as chaves de `db` no host informado, usando `SCAN` (nunca
@@ -202,10 +266,10 @@ pub struct TreeNode {
 /// `:` e depois juntar de volta reconstrói a chave original sem perdas,
 /// inclusive para nomes degenerados (`""`, `":"`, `"a:"`, `"::b"`), então
 /// duas chaves diferentes nunca colidem na mesma folha.
-pub fn build_tree(keys: &[KeyMeta]) -> Vec<TreeNode> {
+pub fn build_tree(keys: &[String]) -> Vec<TreeNode> {
     let entries: Vec<Entry> = keys
         .iter()
-        .map(|meta| (meta.key.split(SEPARATOR).collect(), meta.key.as_str()))
+        .map(|key| (key.split(SEPARATOR).collect(), key.as_str()))
         .collect();
 
     build_level(entries, None)
@@ -274,6 +338,11 @@ mod tests {
     use super::*;
     use crate::core::config::Env;
 
+    /// `build_tree` recebe nomes; este atalho poupa o `to_string` repetido.
+    fn nomes(keys: &[&str]) -> Vec<String> {
+        keys.iter().map(|key| key.to_string()).collect()
+    }
+
     fn meta(key: &str) -> KeyMeta {
         KeyMeta {
             key: key.to_string(),
@@ -285,11 +354,7 @@ mod tests {
 
     #[test]
     fn groups_by_colon_prefix() {
-        let keys = vec![
-            meta("session:user:1"),
-            meta("session:user:2"),
-            meta("cache:a"),
-        ];
+        let keys = nomes(&["session:user:1", "session:user:2", "cache:a"]);
 
         let tree = build_tree(&keys);
 
@@ -307,7 +372,7 @@ mod tests {
 
     #[test]
     fn leaf_carries_the_full_key() {
-        let keys = vec![meta("session:user:1"), meta("session:user:2")];
+        let keys = nomes(&["session:user:1", "session:user:2"]);
 
         let tree = build_tree(&keys);
 
@@ -329,7 +394,7 @@ mod tests {
         // `:`, `::` no meio e `:` sozinho. A árvore não pode perder nenhuma
         // delas nem criar um galho vazio sem folha.
         let inputs = ["", ":", "a:", "::b", "plain"];
-        let keys: Vec<KeyMeta> = inputs.iter().map(|key| meta(key)).collect();
+        let keys = nomes(&inputs);
 
         let tree = build_tree(&keys);
 
@@ -363,7 +428,7 @@ mod tests {
 
     #[test]
     fn counts_roll_up_through_levels() {
-        let keys = vec![meta("a:b:c"), meta("a:b:d"), meta("a:x")];
+        let keys = nomes(&["a:b:c", "a:b:d", "a:x"]);
 
         let tree = build_tree(&keys);
 
@@ -391,6 +456,90 @@ mod tests {
             tls: false,
             env: Env::Dev,
         }
+    }
+
+    #[tokio::test]
+    async fn scan_names_returns_every_key_without_asking_for_metadata() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+
+        let chaves = [
+            "keys_rs_test:nomes:wallet:1",
+            "keys_rs_test:nomes:cache:1",
+            "keys_rs_test:nomes:provider_config",
+        ];
+        for chave in chaves {
+            let _: () = redis::cmd("SET")
+                .arg(chave)
+                .arg("x")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+
+        let nomes = scan_names(&pool, &host, None, host.db, |_| {})
+            .await
+            .unwrap();
+
+        for chave in chaves {
+            let _: () = redis::cmd("DEL")
+                .arg(chave)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+        for chave in chaves {
+            assert!(
+                nomes.iter().any(|nome| nome == chave),
+                "a varredura por nomes precisava trazer {chave}, veio {nomes:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_names_reports_progress_against_the_database_size() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+
+        let chave = "keys_rs_test:progresso:unica";
+        let _: () = redis::cmd("SET")
+            .arg(chave)
+            .arg("x")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let ticks = std::sync::Mutex::new(Vec::new());
+        let nomes = scan_names(&pool, &host, None, host.db, |tick: ScanTick| {
+            ticks.lock().unwrap().push(tick);
+        })
+        .await
+        .unwrap();
+        let _: () = redis::cmd("DEL")
+            .arg(chave)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let ticks = ticks.into_inner().unwrap();
+        assert!(
+            !ticks.is_empty(),
+            "a varredura precisa avisar o andamento ao menos uma vez"
+        );
+
+        // O total é estimativa (`DBSIZE`), e o banco é compartilhado com os
+        // outros testes — mas tem que ser um número de verdade, ou a tela
+        // não teria como calcular porcentagem nenhuma.
+        assert!(ticks.iter().all(|t| t.total_estimate > 0));
+        // E o contador só anda para a frente, terminando no que foi achado.
+        let scanned: Vec<u64> = ticks.iter().map(|t| t.scanned).collect();
+        assert!(
+            scanned.windows(2).all(|par| par[0] <= par[1]),
+            "veio {scanned:?}"
+        );
+        assert_eq!(*scanned.last().unwrap(), nomes.len() as u64);
     }
 
     #[tokio::test]

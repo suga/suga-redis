@@ -16,12 +16,14 @@
 		listDbs,
 		loadTree,
 		onRescanProgress,
+		onTreeProgress,
 		rescan,
 		scanStatus,
 		textBytes,
 		writeValue,
 		type Host,
 		type ScanProgress,
+		type ScanTick,
 		type ScanReport,
 		type TreeNode,
 		type WriteOp,
@@ -48,6 +50,8 @@
 	let relatorio = $state<ScanReport | null>(null);
 	let progresso = $state<ScanProgress | null>(null);
 	let carregando = $state(false);
+	/** Andamento da varredura que monta a árvore. */
+	let lendo = $state<ScanTick | null>(null);
 	let varrendo = $state(false);
 	let erro = $state("");
 	let criando = $state(false);
@@ -65,14 +69,24 @@
 	];
 
 	onMount(() => {
-		const parar = onRescanProgress((p) => (progresso = p));
+		const pararVarredura = onRescanProgress((p) => (progresso = p));
+		const pararLeitura = onTreeProgress((tick) => (lendo = tick));
 		return () => {
-			parar.then((fn) => fn());
+			pararVarredura.then((fn) => fn());
+			pararLeitura.then((fn) => fn());
 		};
 	});
 
+	/** Quanto da leitura já veio, de 0 a 100. */
+	let porcentagem = $derived(
+		lendo && lendo.total_estimate > 0
+			? Math.min(100, Math.round((lendo.scanned / lendo.total_estimate) * 100))
+			: 0,
+	);
+
 	async function carregarArvore(hostId: string, banco: number) {
 		carregando = true;
+		lendo = null;
 		erro = "";
 		selecionada = null;
 		try {
@@ -83,6 +97,7 @@
 			erro = errorMessage(err);
 		} finally {
 			carregando = false;
+			lendo = null;
 		}
 	}
 
@@ -214,7 +229,26 @@
 
 		<div class="arvore">
 			{#if carregando}
-				<p class="aviso">Lendo as chaves…</p>
+				<div class="lendo" data-testid="lendo">
+					<p class="lendo-linha">
+						Lendo as chaves
+						{#if lendo}
+							<span class="mono">
+								{porcentagem}% ({numero(lendo.scanned)} de {numero(lendo.total_estimate)})
+							</span>
+						{/if}
+					</p>
+					<div
+						class="barra"
+						role="progressbar"
+						aria-valuenow={porcentagem}
+						aria-valuemin="0"
+						aria-valuemax="100"
+						aria-label="Progresso da leitura das chaves"
+					>
+						<div class="barra-cheia" style="width: {porcentagem}%"></div>
+					</div>
+				</div>
 			{:else}
 				<KeyTree
 					{nodes}
@@ -396,6 +430,31 @@
 		margin: 0;
 		padding: 0.8rem 0.2rem;
 		color: var(--text-faint);
+	}
+
+	.lendo {
+		padding: 0.8rem;
+	}
+
+	.lendo-linha {
+		margin: 0 0 0.45rem;
+		color: var(--text-dim);
+		font-size: 0.92rem;
+	}
+
+	/* Barra fina, sem animação própria: ela já se move sozinha conforme os
+	   lotes chegam, e um brilho correndo por cima só competiria com isso. */
+	.barra {
+		height: 3px;
+		background: var(--panel-dark);
+		border-radius: 999px;
+		overflow: hidden;
+	}
+
+	.barra-cheia {
+		height: 100%;
+		background: var(--action);
+		transition: width 120ms linear;
 	}
 
 	.erro {

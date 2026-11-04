@@ -29,7 +29,7 @@ use crate::core::config::{ConfigError, Env, Host, HostStore};
 use crate::core::conn::{ConnError, Pool};
 use crate::core::history::{Actor, History, HistoryEntry, HistoryError};
 use crate::core::index::{Index, IndexError, ScanProgress, ScanReport};
-use crate::core::keys::{TreeNode, build_tree, scan_all};
+use crate::core::keys::{ScanTick, TreeNode, build_tree, scan_names};
 use crate::core::search::{SearchOutcome, search as search_index};
 use crate::core::value::{
     ValueLimit, ValueView, WriteOp, op_summary, read_value as read_value_from_redis,
@@ -56,6 +56,9 @@ const DB_FILE: &str = "suga-redis.sqlite";
 /// Evento emitido durante `rescan`, um por chave processada, para a barra
 /// de progresso da interface.
 pub const RESCAN_PROGRESS_EVENT: &str = "rescan://progress";
+
+/// Evento emitido durante `load_tree`, um por lote do cursor do `SCAN`.
+pub const TREE_PROGRESS_EVENT: &str = "tree://progress";
 
 /// Erro de qualquer comando. Existe para dar à interface um DISCRIMINANTE
 /// estável (`kind`) ao lado da frase em português (`message`): a tela
@@ -224,9 +227,20 @@ pub async fn list_dbs(state: &AppState, host_id: &str) -> Result<Vec<(u8, u64)>>
 
 // ----------------------------------------------------------------- chaves
 
-pub async fn load_tree(state: &AppState, host_id: &str, db: u8) -> Result<Vec<TreeNode>> {
+/// A árvore de chaves do (host, banco).
+///
+/// Varre SÓ os nomes: é tudo que a árvore usa. `progress` é chamado a cada
+/// lote do cursor, para a tela poder mostrar quanto já veio em vez de uma
+/// mensagem parada — contra um Redis em outra região, essa varredura leva
+/// segundos, e segundos sem notícia parecem travamento.
+pub async fn load_tree(
+    state: &AppState,
+    host_id: &str,
+    db: u8,
+    progress: impl Fn(ScanTick),
+) -> Result<Vec<TreeNode>> {
     let (host, pw) = state.host_and_password(host_id)?;
-    let keys = scan_all(&state.pool, &host, pw.as_deref(), db).await?;
+    let keys = scan_names(&state.pool, &host, pw.as_deref(), db, progress).await?;
     Ok(build_tree(&keys))
 }
 
@@ -447,11 +461,17 @@ pub async fn cmd_list_dbs(
 
 #[tauri::command]
 pub async fn cmd_load_tree(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     host_id: String,
     db: u8,
 ) -> Result<Vec<TreeNode>> {
-    load_tree(&state, &host_id, db).await
+    load_tree(&state, &host_id, db, move |tick| {
+        // Um evento perdido só atrasa a porcentagem; nunca pode derrubar a
+        // varredura que já está em andamento.
+        let _ = app.emit(TREE_PROGRESS_EVENT, tick);
+    })
+    .await
 }
 
 #[tauri::command]

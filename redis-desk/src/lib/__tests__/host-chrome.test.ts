@@ -16,6 +16,7 @@ vi.mock("$lib/api", () => ({
 import { addHost } from "$lib/api";
 import EnvBand from "$lib/EnvBand.svelte";
 import HostForm from "$lib/HostForm.svelte";
+import HostList from "$lib/HostList.svelte";
 import type { Env, Host } from "$lib/api";
 
 /** Cores fixadas na seção Global Constraints do plano. */
@@ -88,4 +89,58 @@ test("cadastrar host sem endereço mostra erro e não chama add_host", async () 
 		"Informe o endereço do host.",
 	);
 	expect(addHost).not.toHaveBeenCalled();
+});
+
+/** Endereço de cluster gerenciado: longo o bastante para estourar a coluna. */
+const ENDERECO_LONGO =
+	"redis-cliente-exemplo-um-nome-bem-comprido.a1b2c3.ng.0001.use1.cache.amazonaws.com";
+
+function montarLista(env: Env = "prod") {
+	const alvo: Host = { ...host(env, "Cliente Exemplo"), addr: ENDERECO_LONGO };
+	const onSelect = vi.fn();
+	const { unmount } = render(HostList, {
+		props: {
+			hosts: [alvo],
+			selectedId: null,
+			onSelect,
+			onNew: vi.fn(),
+			onEdit: vi.fn(),
+			onChanged: vi.fn(),
+		},
+	});
+	return { alvo, onSelect, unmount };
+}
+
+test("cada host carrega a flag do seu ambiente", () => {
+	const prod = montarLista("prod");
+	expect(screen.getByTestId("flag-ambiente")).toHaveTextContent("PRODUÇÃO");
+	prod.unmount();
+
+	montarLista("homolog");
+	expect(screen.getByTestId("flag-ambiente")).toHaveTextContent("HOMOLOGAÇÃO");
+});
+
+test("o botão conectar abre o host, igual clicar no nome", async () => {
+	const user = userEvent.setup();
+	const { alvo, onSelect } = montarLista();
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	expect(onSelect).toHaveBeenCalledWith(alvo);
+
+	onSelect.mockClear();
+	await user.click(screen.getByRole("button", { name: /Cliente Exemplo/ }));
+	expect(onSelect).toHaveBeenCalledWith(alvo);
+});
+
+test("endereço comprido continua alcançável inteiro, mesmo cortado na tela", () => {
+	const { alvo } = montarLista();
+
+	// O corte em si é CSS (`text-overflow`), e o jsdom não faz layout para
+	// conferi-lo. O que dá para garantir aqui é o que o corte não pode
+	// custar: o endereço inteiro, que é o que distingue dois clusters do
+	// mesmo ambiente, continua disponível ao passar o mouse.
+	expect(screen.getByTestId("endereco")).toHaveAttribute(
+		"title",
+		`${alvo.addr}:${alvo.port}/${alvo.db}`,
+	);
 });

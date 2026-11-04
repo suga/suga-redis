@@ -152,6 +152,13 @@ export interface HistoryEntry {
 
 // ------------------------------------------------------------- índice/busca
 
+/** Andamento da varredura de nomes que monta a árvore. */
+export interface ScanTick {
+	scanned: number;
+	/** `DBSIZE` lido antes de começar. Estimativa, não total exato. */
+	total_estimate: number;
+}
+
 export interface ScanProgress {
 	scanned: number;
 	total_estimate: number;
@@ -285,6 +292,13 @@ export function listDbs(hostId: string): Promise<[number, number][]> {
 
 export function loadTree(hostId: string, db: number): Promise<TreeNode[]> {
 	return invoke("cmd_load_tree", { hostId, db });
+}
+
+/** Acompanha a varredura que monta a árvore. Chame o retorno para parar. */
+export function onTreeProgress(
+	handler: (tick: ScanTick) => void,
+): Promise<UnlistenFn> {
+	return listen<ScanTick>("tree://progress", (event) => handler(event.payload));
 }
 
 /** Refaz o índice de busca. Acompanhe o andamento com `onRescanProgress`. */
