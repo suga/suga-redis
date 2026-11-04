@@ -7,7 +7,9 @@
 	import KeyEditor from "$lib/KeyEditor.svelte";
 	import KeyTree from "$lib/KeyTree.svelte";
 	import NewKeyDialog from "$lib/NewKeyDialog.svelte";
+	import SearchPanel from "$lib/SearchPanel.svelte";
 	import ValuePanel from "$lib/ValuePanel.svelte";
+	import { haQuantoTempo, numero } from "$lib/formato";
 	import {
 		errorMessage,
 		listDbs,
@@ -52,6 +54,13 @@
 	let criacaoPendente = $state<{ key: string; op: WriteOp; summary: string } | null>(null);
 	/** Força o painel a reler a chave depois de uma escrita. */
 	let revisao = $state(0);
+
+	type Aba = "valor" | "busca";
+	let aba = $state<Aba>("valor");
+	const ABAS: { id: Aba; label: string }[] = [
+		{ id: "valor", label: "Valor" },
+		{ id: "busca", label: "Busca" },
+	];
 
 	onMount(() => {
 		const parar = onRescanProgress((p) => (progresso = p));
@@ -98,17 +107,6 @@
 			varrendo = false;
 			progresso = null;
 		}
-	}
-
-	/** Quanto tempo faz desde a última varredura, em palavras. */
-	function idade(finishedAt: number): string {
-		const segundos = Math.max(0, Math.round((Date.now() - finishedAt) / 1000));
-		if (segundos < 60) return "agora há pouco";
-		const minutos = Math.round(segundos / 60);
-		if (minutos < 60) return `há ${minutos} min`;
-		const horas = Math.round(minutos / 60);
-		if (horas < 24) return `há ${horas} h`;
-		return `há ${Math.round(horas / 24)} dias`;
 	}
 
 	/**
@@ -178,8 +176,8 @@
 					{#if bancos.length === 0}
 						<option value={db}>{db}</option>
 					{:else}
-						{#each bancos as [numero, chaves] (numero)}
-							<option value={numero}>{numero} — {chaves.toLocaleString("pt-BR")} chaves</option>
+						{#each bancos as [indice, chaves] (indice)}
+							<option value={indice}>{indice} — {numero(chaves)} chaves</option>
 						{/each}
 					{/if}
 				</select>
@@ -198,12 +196,12 @@
 			<div class="varredura">
 				<span class="idade">
 					{#if varrendo && progresso}
-						Varrendo {progresso.scanned.toLocaleString("pt-BR")} de
-						{progresso.total_estimate.toLocaleString("pt-BR")}
+						Varrendo {numero(progresso.scanned)} de
+						{numero(progresso.total_estimate)}
 					{:else if varrendo}
 						Varrendo…
 					{:else if relatorio}
-						Índice de busca: {idade(relatorio.finished_at)}
+						Índice de busca: {haQuantoTempo(Math.max(0, Math.round((Date.now() - relatorio.finished_at) / 1000)))}
 					{:else}
 						Índice de busca: nunca varrido
 					{/if}
@@ -227,7 +225,30 @@
 	</div>
 
 	<div class="painel">
-		{#if erro}
+		<nav class="abas">
+			{#each ABAS as item (item.id)}
+				<button
+					class="aba"
+					class:ativa={aba === item.id}
+					aria-current={aba === item.id ? "page" : undefined}
+					onclick={() => (aba = item.id)}
+				>
+					{item.label}
+				</button>
+			{/each}
+		</nav>
+
+		<div class="conteudo">
+		{#if aba === "busca"}
+			<SearchPanel
+				hostId={host.id}
+				{db}
+				onOpenKey={(key) => {
+					selecionada = key;
+					aba = "valor";
+				}}
+			/>
+		{:else if erro}
 			<p class="erro" role="alert">{erro}</p>
 		{:else if selecionada}
 			{#key `${selecionada}#${revisao}`}
@@ -245,6 +266,7 @@
 		{:else}
 			<p class="aviso">Escolha uma chave na árvore.</p>
 		{/if}
+		</div>
 	</div>
 </div>
 
@@ -329,9 +351,41 @@
 	}
 
 	.painel {
+		display: flex;
+		flex-direction: column;
+		min-width: 0;
+		min-height: 0;
+	}
+
+	.abas {
+		display: flex;
+		gap: 0.2rem;
+		padding: 0 1.2rem;
+		border-bottom: 1px solid var(--rule);
+	}
+
+	.aba {
+		padding: 0.45rem 0.7rem;
+		border: none;
+		border-radius: 0;
+		border-bottom: 2px solid transparent;
+		color: var(--text-faint);
+	}
+
+	.aba:hover {
+		color: var(--text-dim);
+	}
+
+	.ativa {
+		color: var(--text);
+		border-bottom-color: var(--action);
+	}
+
+	.conteudo {
+		flex: 1;
+		min-height: 0;
 		padding: 1rem 1.2rem;
 		overflow-y: auto;
-		min-width: 0;
 	}
 
 	.aviso {

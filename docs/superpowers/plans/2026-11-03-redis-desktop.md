@@ -698,7 +698,7 @@ git add -A && git commit -m "feat: per-type editors with prod confirmation dialo
 
 Campo de busca no topo da janela. O resultado mostra, por acerto: a chave, o tipo, o TTL, onde achou (nome ou valor) e o trecho com o pedaço encontrado destacado. Clicar no acerto abre a chave na árvore. Abaixo, uma linha de aviso: quantas chaves varridas, quanto tempo levou, e a idade do índice.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```ts
 test('buscar mostra os acertos com o trecho destacado')
@@ -708,19 +708,19 @@ test('índice velho mostra aviso com botão de varrer de novo')
 test('acerto cujo índice estava velho some da lista e o aviso conta quantos sumiram')
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `npm run test -- search-panel`
 Expected: FAIL.
 
-- [ ] **Step 3: Implementar o `SearchPanel`**
+- [x] **Step 3: Implementar o `SearchPanel`**
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `npm run test -- search-panel`
 Expected: PASS, 5 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: search panel with highlighted snippets and index freshness"

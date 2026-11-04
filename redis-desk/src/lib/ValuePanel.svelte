@@ -10,6 +10,7 @@
 	 */
 	import type { Snippet } from "svelte";
 	import ReadOnlyView from "$lib/editors/ReadOnlyView.svelte";
+	import { formatarPrazo, formatarTamanho, numero } from "$lib/formato";
 	import {
 		errorMessage,
 		isEditable,
@@ -127,23 +128,6 @@
 		return () => clearInterval(timer);
 	});
 
-	function formatarPrazo(ms: number): string {
-		if (ms <= 0) return "expirada";
-		const segundos = Math.floor(ms / 1000);
-		const s = segundos % 60;
-		const m = Math.floor(segundos / 60) % 60;
-		const h = Math.floor(segundos / 3600);
-		if (h > 0) return `${h} h ${m} min`;
-		if (m > 0) return `${m} min ${s} s`;
-		return `${s} s`;
-	}
-
-	function formatarTamanho(bytes: number): string {
-		if (bytes < 1024) return `${bytes} B`;
-		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} kB`;
-		return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-	}
-
 	function nomeDoTipo(kind: ValueView["kind"]): string {
 		return typeof kind === "string" ? kind : kind.unknown;
 	}
@@ -193,8 +177,8 @@
 		{#if view.truncated}
 			<footer data-testid="truncado">
 				<span>
-					Mostrando {mostrados.toLocaleString("pt-BR")} de
-					{view.total_elements.toLocaleString("pt-BR")}
+					Mostrando {numero(mostrados)} de
+					{numero(view.total_elements)}
 				</span>
 				<button onclick={carregarMais} disabled={carregandoMais}>
 					{carregandoMais ? "Carregando" : "Carregar mais"}
