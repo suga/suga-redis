@@ -888,25 +888,25 @@ git add -A && git commit -m "feat: human-in-the-loop gate for llm writes"
 - Modify: `redis-desk/src-tauri/tauri.conf.json`
 - Create: `redis-desk/README.md`, `redis-desk/docs/mcp-setup.md`
 
-- [ ] **Step 1: Configurar os alvos**
+- [x] **Step 1: Configurar os alvos**
 
 `tauri.conf.json`: identificador `com.sugamele.redisdesk`, janela de 1280x800 com mínimo de 980x600, alvos `dmg` e `app` no mac, `appimage` e `deb` no linux.
 
-- [ ] **Step 2: Gerar o build do mac e abrir o app**
+- [x] **Step 2: Gerar o build do mac e abrir o app**
 
 Run: `npm run tauri build`
 Expected: `.dmg` em `src-tauri/target/release/bundle/dmg/`; abrir o app, cadastrar o Redis de teste em `127.0.0.1:6399` marcado como dev, ver a árvore, buscar um valor, editar e desfazer.
 
-- [ ] **Step 3: Escrever o `README.md` e o `docs/mcp-setup.md`**
+- [x] **Step 3: Escrever o `README.md` e o `docs/mcp-setup.md`**
 
 O de MCP traz a linha pronta para o `claude mcp add`, apontando para o binário com `--mcp`, e explica que escrita pede liberação na janela digitando o nome do host.
 
-- [ ] **Step 4: Gerar o build do linux em docker e confirmar que sai o AppImage**
+- [x] **Step 4: Gerar o build do linux em docker e confirmar que sai o AppImage**
 
 Run: `docker run --rm -v "$PWD":/app -w /app rust:1-bookworm bash -lc "apt-get update && apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev nodejs npm && npm ci && npm run tauri build"`
 Expected: AppImage gerado. Falha aqui não bloqueia o mac; registrar o que faltou.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "chore: mac and linux packaging, readme and mcp setup guide"

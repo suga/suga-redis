@@ -565,7 +565,7 @@ pub fn cmd_deny_approval(
 pub const APPROVALS_EVENT: &str = "approvals://changed";
 
 /// Identificador do app, o mesmo de `tauri.conf.json`.
-const APP_IDENTIFIER: &str = "com.marcosugamele.redis-desk";
+const APP_IDENTIFIER: &str = "com.sugamele.redisdesk";
 
 /// Variável de ambiente que reposiciona o diretório de dados. Existe para
 /// rodar uma segunda instalação lado a lado (e para os testes não
