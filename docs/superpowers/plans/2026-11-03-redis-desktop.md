@@ -568,7 +568,7 @@ git add -A && git commit -m "feat: tauri command surface with prod write confirm
 
 Barra do topo com a cor do ambiente e o rótulo carimbado: `PRODUÇÃO`, `HOMOLOGAÇÃO`, `DESENVOLVIMENTO`. Fontes Barlow Semi Condensed e Azeret Mono empacotadas localmente em `src/assets/fonts/` — o app abre sem internet.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```ts
 test('host de prod pinta a barra de vermelho e carimba PRODUÇÃO')
@@ -577,21 +577,21 @@ test('trocar de host troca a cor da janela')
 test('cadastrar host sem endereço mostra erro e não chama add_host')
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `npm run test -- host-chrome`
 Expected: FAIL — `envChrome` não existe.
 
-- [ ] **Step 3: Implementar os tokens em `app.css`, `env.ts`, `HostList.svelte` e `HostForm.svelte`**
+- [x] **Step 3: Implementar os tokens em `app.css`, `env.ts`, `HostList.svelte` e `HostForm.svelte`**
 
 Instalar `vitest`, `@testing-library/svelte`, `jsdom`. Valores exatos de cor na seção Global Constraints.
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `npm run test -- host-chrome`
 Expected: PASS, 4 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: operations-room shell with environment-colored chrome"

@@ -8,6 +8,20 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [sveltekit()],
 
+  // Vitest roda os componentes em jsdom. `conditions: ["browser"]` é o que
+  // faz o Svelte resolver para a build de navegador em vez da de servidor —
+  // sem isso os componentes montam sem DOM e nada do que o teste procura na
+  // tela existe.
+  test: {
+    environment: "jsdom",
+    globals: true,
+    setupFiles: ["./src/tests/setup.ts"],
+    include: ["src/**/*.{test,spec}.{js,ts}"],
+  },
+  resolve: {
+    conditions: ["browser"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
