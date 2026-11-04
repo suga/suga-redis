@@ -31,6 +31,16 @@ pub enum ConnError {
 
     #[error("a chave \"{0}\" não existe mais")]
     KeyGone(String),
+
+    #[error("a chave \"{key}\" é do tipo \"{kind}\", que não é editável neste produto")]
+    NotEditable { key: String, kind: String },
+
+    #[error(
+        "não foi possível confirmar se a última operação na chave \"{key}\" foi aplicada \
+         (a conexão caiu durante a escrita: {detail}) — confira o estado atual da chave antes \
+         de tentar de novo"
+    )]
+    Ambiguous { key: String, detail: String },
 }
 
 /// Resultado padrão das operações deste módulo.
@@ -170,6 +180,50 @@ impl Pool {
                     self.drop_host(&host.id);
                     let conn = self.get(host, db, password).await?;
                     operation(conn).await.map_err(|err| classify(host, err))
+                }
+                classified => Err(classified),
+            },
+        }
+    }
+
+    /// Como `with_retry`, mas sem o retry: roda `operation` exatamente uma
+    /// vez. Existe para operações NÃO idempotentes, onde reenviar o mesmo
+    /// comando depois de um erro de classe conexão pode causar dano maior
+    /// que relatar o erro — ex. `core::value::WriteOp::RemoveListItem`
+    /// (um `LSET` por índice reenviado sobre uma lista que já mudou de
+    /// tamanho marca e apaga o elemento errado) e `PushListItem` (reenviar
+    /// um `LPUSH`/`RPUSH` que na verdade já tinha sido aplicado empurra o
+    /// item duas vezes). Um erro de classe conexão (`Unreachable`) vira
+    /// `ConnError::Ambiguous`: a conexão cacheada é descartada (para que a
+    /// próxima chamada, de qualquer operação, não reuse um socket morto),
+    /// mas esta chamada específica não tenta de novo — quem chamou só sabe
+    /// que não há certeza se a operação foi aplicada, e isso é informação
+    /// mais honesta que arriscar aplicar errado ou duas vezes. `pub(crate)`
+    /// pela mesma razão de `with_retry`: `core::value` precisa chamá-la
+    /// diretamente.
+    pub(crate) async fn run_once<T, F, Fut>(
+        &self,
+        host: &Host,
+        db: u8,
+        password: Option<&str>,
+        key: &str,
+        operation: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(MultiplexedConnection) -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, redis::RedisError>>,
+    {
+        let conn = self.get(host, db, password).await?;
+
+        match operation(conn).await {
+            Ok(value) => Ok(value),
+            Err(err) => match classify(host, err) {
+                ConnError::Unreachable { detail, .. } => {
+                    self.drop_host(&host.id);
+                    Err(ConnError::Ambiguous {
+                        key: key.to_string(),
+                        detail,
+                    })
                 }
                 classified => Err(classified),
             },
@@ -578,5 +632,70 @@ mod tests {
             .unwrap();
 
         assert_ne!(id1, id2, "o pool deveria ter aberto uma conexão nova");
+    }
+
+    #[tokio::test]
+    async fn run_once_reports_ambiguous_without_retrying_a_dead_connection() {
+        // Mesma simulação de queda de rede de `ping_evicts_a_dead_cached_connection_and_retries`
+        // logo acima, mas contra `run_once`: ao contrário de `with_retry`,
+        // que se cura sozinho e tenta de novo, `run_once` existe para
+        // operações não idempotentes (ver `core::value::WriteOp::
+        // RemoveListItem`/`PushListItem`) onde reenviar o mesmo comando
+        // depois de um erro de classe conexão pode aplicar a operação
+        // errada ou duas vezes — então aqui o certo é devolver
+        // `ConnError::Ambiguous` e deixar para quem chamou decidir,
+        // nunca tentar de novo sozinho.
+        let pool = Pool::new();
+        let host = test_host("Redis de teste", TEST_PORT);
+
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let id1: i64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let killer_client =
+            redis::Client::open(format!("redis://127.0.0.1:{TEST_PORT}/0")).unwrap();
+        let mut killer = killer_client
+            .get_multiplexed_async_connection()
+            .await
+            .unwrap();
+        let _: () = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("ID")
+            .arg(id1)
+            .query_async(&mut killer)
+            .await
+            .unwrap();
+
+        let result = pool
+            .run_once(
+                &host,
+                host.db,
+                None,
+                "run-once-probe",
+                |mut conn| async move { redis::cmd("PING").query_async::<String>(&mut conn).await },
+            )
+            .await;
+
+        match result {
+            Err(ConnError::Ambiguous { key, .. }) => assert_eq!(key, "run-once-probe"),
+            other => panic!("esperava ConnError::Ambiguous, veio {other:?}"),
+        }
+
+        // Mesmo sem tentar de novo, `run_once` ainda descarta a conexão
+        // morta — a próxima chamada (de qualquer operação) não pode herdar
+        // esse socket morto.
+        let mut conn2 = pool.get(&host, host.db, None).await.unwrap();
+        let id2: i64 = redis::cmd("CLIENT")
+            .arg("ID")
+            .query_async(&mut conn2)
+            .await
+            .unwrap();
+        assert_ne!(
+            id1, id2,
+            "run_once deveria ter descartado a conexão morta mesmo sem tentar de novo"
+        );
     }
 }

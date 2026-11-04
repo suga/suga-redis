@@ -586,21 +586,35 @@ pub enum WriteOp {
 const REMOVE_LIST_SENTINEL: &str =
     "\u{0}__redis-desk:tombstone:f47ac10b-58cc-4372-a567-0e02b2c3d479__";
 
-/// Aplica `op` sobre `key`, preservando o TTL que a chave já tinha — exceto
-/// quando a própria operação é `SetTtl` ou `DeleteKey`, que decidem o TTL
-/// explicitamente. A preservação é por fora do comando Redis específico
-/// (lê o TTL antes, reaplica depois com `PEXPIRE`) em vez de depender de
-/// opções por comando (ex. `SET ... KEEPTTL`): várias escritas deste módulo
-/// substituem a chave inteira como efeito colateral (a mais notória é
-/// `SET`, que sem `KEEPTTL` apaga o TTL existente), e um wrapper único cobre
-/// todas elas sem precisar lembrar, comando a comando, qual tem esse
-/// efeito colateral e qual não tem.
+/// Aplica `op` sobre `key`. A chave mantém o TTL que já tinha, exceto quando
+/// a própria operação é `SetTtl` ou `DeleteKey`, que decidem o TTL
+/// explicitamente — mas isso não exige nenhuma lógica extra de preservação
+/// neste módulo: de todo comando Redis que as variantes de `WriteOp` usam
+/// (`HSET`, `HDEL`, `LSET`, `LPUSH`/`RPUSH`, `LREM`, `ZADD`, `ZREM`), só
+/// `SET` (usado por `SetString`) apaga o TTL existente por padrão, e
+/// `execute_op` já manda esse `SET` com `KEEPTTL`. Os demais operam sobre a
+/// estrutura de dados já existente, sem recriar a chave, e por isso nunca
+/// tocam no TTL dela — confirmado contra o Redis de teste, comando a
+/// comando, antes desta escolha (ver o relatório da task). Chegou-se antes
+/// a fazer essa preservação "por fora" (ler o TTL, escrever, reaplicar com
+/// `PEXPIRE`), mas isso abre uma janela real de dano: se a escrita for
+/// aplicada e só o `PEXPIRE` seguinte falhar, `apply_write` devolve `Err`
+/// com a chave já mudada e já sem TTL — um erro que diz "nada aconteceu"
+/// exatamente quando algo aconteceu e piorou. Depender do próprio comando
+/// Redis preservar (ou não) o TTL elimina essa janela por construção, às
+/// custas de precisar desta verificação manual uma única vez.
 ///
 /// Tipo não editável (`Set`, `Stream`, `RedisJSON` ou um tipo desconhecido)
 /// é recusado antes de qualquer tentativa de escrita — `KeyKind::editable`
 /// é quem decide. Isso vale para toda operação, incluindo `SetTtl` e
 /// `DeleteKey`: este produto trata esses tipos como somente leitura de
 /// ponta a ponta, não só o conteúdo deles.
+///
+/// `RemoveListItem` e `PushListItem` não passam pelo retry automático de
+/// `Pool::with_retry` — ver `Pool::run_once` para o motivo (reenviar um
+/// `LSET`/`LPUSH`/`RPUSH` depois de um erro de conexão pode acertar o
+/// elemento errado ou duplicar o item, se a primeira tentativa na verdade
+/// já tiver sido aplicada no servidor).
 pub async fn apply_write(
     pool: &Pool,
     host: &Host,
@@ -616,52 +630,34 @@ pub async fn apply_write(
         })
         .await?;
 
-    let key_exists = type_name != "none";
-    if key_exists {
+    if type_name != "none" {
         let kind = KeyKind::from_type_name(&type_name);
         if !kind.editable() {
-            return Err(ConnError::Protocol(format!(
-                "a chave \"{key}\" é do tipo \"{type_name}\", que não é editável neste produto"
-            )));
+            return Err(ConnError::NotEditable {
+                key: key.to_string(),
+                kind: type_name,
+            });
         }
     }
 
-    // `SetTtl`/`DeleteKey` decidem o TTL (ou a existência da chave) por
-    // conta própria — não há nada para preservar nesses casos, e tentar
-    // preservar depois de um `DeleteKey` nem faria sentido (a chave já era).
-    let preserve_ttl = !matches!(op, WriteOp::SetTtl { .. } | WriteOp::DeleteKey);
+    let is_retry_unsafe = matches!(
+        op,
+        WriteOp::RemoveListItem { .. } | WriteOp::PushListItem { .. }
+    );
 
-    let existing_ttl_ms = if preserve_ttl && key_exists {
-        let pttl: i64 = pool
-            .with_retry(host, db, pw, |mut conn| async move {
-                let pttl: i64 = redis::cmd("PTTL").arg(key).query_async(&mut conn).await?;
-                Ok(pttl)
-            })
-            .await?;
-        if pttl >= 0 { Some(pttl) } else { None }
-    } else {
-        None
-    };
-
-    pool.with_retry(host, db, pw, |mut conn| {
-        let op = op.clone();
-        async move { execute_op(&mut conn, key, &op).await }
-    })
-    .await?;
-
-    if let Some(ttl_ms) = existing_ttl_ms {
-        pool.with_retry(host, db, pw, |mut conn| async move {
-            let _: () = redis::cmd("PEXPIRE")
-                .arg(key)
-                .arg(ttl_ms)
-                .query_async(&mut conn)
-                .await?;
-            Ok(())
+    if is_retry_unsafe {
+        pool.run_once(host, db, pw, key, |mut conn| {
+            let op = op.clone();
+            async move { execute_op(&mut conn, key, &op).await }
         })
-        .await?;
+        .await
+    } else {
+        pool.with_retry(host, db, pw, |mut conn| {
+            let op = op.clone();
+            async move { execute_op(&mut conn, key, &op).await }
+        })
+        .await
     }
-
-    Ok(())
 }
 
 /// Executa o comando Redis de `op`, assumindo que o tipo da chave já foi
@@ -673,9 +669,15 @@ async fn execute_op(
 ) -> redis::RedisResult<()> {
     match op {
         WriteOp::SetString { value } => {
+            // `KEEPTTL`: sem essa opção, `SET` apaga o TTL existente da
+            // chave por padrão — é o único comando entre as variantes de
+            // `WriteOp` que faz isso (ver o comentário de `apply_write`).
+            // Sobre uma chave nova (sem TTL ainda), `KEEPTTL` não tem
+            // efeito — não há TTL para manter.
             redis::cmd("SET")
                 .arg(key)
                 .arg(value.to_raw())
+                .arg("KEEPTTL")
                 .query_async::<()>(conn)
                 .await
         }
@@ -1516,6 +1518,18 @@ mod write_tests {
 
     #[tokio::test]
     async fn editing_a_key_preserves_its_ttl() {
+        // Nome e forma vêm do brief da task ao pé da letra, mas vale
+        // registrar o que este teste PROVA de fato: que o caminho de
+        // escrita de `SetHashField` funciona de ponta a ponta sobre uma
+        // chave com TTL (continua lá depois). Não é a prova de que o
+        // módulo preserva TTL em geral — `HSET` nunca derruba TTL por
+        // conta própria no Redis, então este teste continuaria verde
+        // mesmo sem nenhuma lógica de preservação (confirmado na prática
+        // durante o self-review desta task). A prova real de que o risco
+        // descrito no brief está coberto é
+        // `set_string_preserves_ttl_even_though_set_drops_it_natively`,
+        // logo abaixo — `SET` é o único comando usado por este módulo que
+        // de fato apaga o TTL por padrão.
         let pool = Pool::new();
         let host = test_host();
         let mut conn = pool.get(&host, host.db, None).await.unwrap();
@@ -1725,6 +1739,22 @@ mod write_tests {
         assert_eq!(items, vec!["a".to_string(), "c".to_string()]);
     }
 
+    // O comportamento de "não reenviar RemoveListItem/PushListItem depois
+    // de um erro de classe conexão" (achado "Important 1" da revisão) é
+    // pinado em `core::conn::tests::run_once_reports_ambiguous_without_retrying_a_dead_connection`,
+    // não aqui. Tentei primeiro simular isso a partir de `apply_write`
+    // (matando a conexão cacheada antes de chamar `apply_write`), mas
+    // `apply_write` sempre começa com um `TYPE key` via `with_retry` — que
+    // tem o próprio retry automático e já reconecta sozinho antes de
+    // chegar em `RemoveListItem`/`PushListItem`. Por isso, matar a conexão
+    // antes de uma chamada a `apply_write` nunca alcança o caminho sem
+    // retry: a cura acontece silenciosamente no passo do `TYPE`, e
+    // `run_once` só veria uma conexão morta se ela caísse bem na janela
+    // entre o `TYPE` e a escrita — uma corrida não determinística,
+    // impossível de forçar de fora. `Pool::run_once` é testado isolado,
+    // pelo mesmo padrão que `conn::tests::ping_evicts_a_dead_cached_connection_and_retries`
+    // já usa para testar o retry de `with_retry`.
+
     #[tokio::test]
     async fn writing_a_set_is_refused() {
         let pool = Pool::new();
@@ -1756,7 +1786,13 @@ mod write_tests {
             .unwrap();
         del(&mut conn, &[key]).await;
 
-        assert!(result.is_err(), "escrever num Set deveria ser recusado");
+        match result {
+            Err(ConnError::NotEditable { key: k, kind }) => {
+                assert_eq!(k, key);
+                assert_eq!(kind, "set");
+            }
+            other => panic!("esperava ConnError::NotEditable, veio {other:?}"),
+        }
         assert_eq!(
             unchanged,
             vec!["membro".to_string()],
