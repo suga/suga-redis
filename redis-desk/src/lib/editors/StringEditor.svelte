@@ -35,6 +35,8 @@
 		untrack(() => (pareceJson(inicial) && validarJson(inicial) === null ? "realce" : "texto")),
 	);
 
+	/** Há algo a colorir? Só então o alternador faz sentido. */
+	let ehJson = $derived(pareceJson(texto));
 	let erroJson = $derived(validarJson(texto));
 	let indentado = $derived(formatarJson(texto));
 	let mudou = $derived(texto !== (dado?.text ?? ""));
@@ -45,39 +47,56 @@
 		Valor binário: editar como texto corromperia o conteúdo. Use o painel de
 		leitura para conferi-lo.
 	</p>
-{:else if modo === "realce"}
-	<div class="editor">
-		<pre class="mono realce" data-testid="json-realce">{#each realcarJson(indentado ?? texto) as token}{#if token.classe}<span
-						class={token.classe}>{token.texto}</span>{:else}{token.texto}{/if}{/each}</pre>
-
-		<div class="acoes">
-			<button type="button" onclick={() => (modo = "texto")}>Editar como texto</button>
-		</div>
-	</div>
 {:else}
 	<div class="editor">
-		<label>
-			<span>Valor</span>
-			<textarea bind:value={texto} spellcheck="false" rows="14" class="mono"></textarea>
-		</label>
+		{#if ehJson}
+			<!-- Sempre no TOPO e nos dois modos: um valor de dezenas de
+			     kilobytes rola muito, e um botão depois do conteúdo só é
+			     achado por quem já percorreu tudo. -->
+			<div class="modo" data-testid="modo-valor" role="group" aria-label="Como ver o valor">
+				<button
+					type="button"
+					class:ativo={modo === "realce"}
+					aria-pressed={modo === "realce"}
+					onclick={() => (modo = "realce")}
+				>
+					Colorido
+				</button>
+				<button
+					type="button"
+					class:ativo={modo === "texto"}
+					aria-pressed={modo === "texto"}
+					onclick={() => (modo = "texto")}
+				>
+					Editar
+				</button>
+			</div>
+		{/if}
 
-		{#if erroJson}
-			<p class="erro-json" role="alert" data-testid="json-erro">{erroJson}</p>
+		{#if modo === "realce"}
+			<pre class="mono realce" data-testid="json-realce">{#each realcarJson(indentado ?? texto) as token}{#if token.classe}<span
+						class={token.classe}>{token.texto}</span>{:else}{token.texto}{/if}{/each}</pre>
+		{:else}
+			<label>
+				<span>Valor</span>
+				<textarea bind:value={texto} spellcheck="false" rows="18" class="mono"></textarea>
+			</label>
+
+			{#if erroJson}
+				<p class="erro-json" role="alert" data-testid="json-erro">{erroJson}</p>
+			{/if}
 		{/if}
 
 		<div class="acoes">
-			{#if indentado !== null && indentado !== texto}
+			{#if modo === "texto" && indentado !== null && indentado !== texto}
 				<button type="button" onclick={() => (texto = indentado ?? texto)}>
 					Formatar JSON
 				</button>
 			{/if}
-			{#if erroJson === null && pareceJson(texto)}
-				<button type="button" onclick={() => (modo = "realce")}>Ver colorido</button>
-			{/if}
 			<button
 				type="button"
 				class="primary"
-				disabled={busy || !mudou || erroJson !== null}
+				disabled={busy || !mudou || erroJson !== null || modo === "realce"}
 				onclick={() => onSubmit({ op: "set_string", value: textBytes(texto) })}
 			>
 				Salvar
@@ -154,6 +173,35 @@
 		display: flex;
 		justify-content: flex-end;
 		gap: 0.5rem;
+	}
+
+	/* Controle segmentado: os dois estados ficam à vista o tempo todo, para
+	   a pessoa saber que o outro existe sem precisar descobrir. */
+	.modo {
+		display: flex;
+		align-self: flex-start;
+		gap: 0;
+	}
+
+	.modo button {
+		font-size: 0.88rem;
+		color: var(--text-faint);
+		border-radius: 0;
+	}
+
+	.modo button:first-child {
+		border-radius: var(--radius) 0 0 var(--radius);
+	}
+
+	.modo button:last-child {
+		border-radius: 0 var(--radius) var(--radius) 0;
+		border-left-width: 0;
+	}
+
+	.modo .ativo {
+		background: var(--panel-dark);
+		color: var(--text);
+		border-color: var(--text-faint);
 	}
 
 	.aviso {

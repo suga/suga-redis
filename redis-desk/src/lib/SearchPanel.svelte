@@ -110,8 +110,8 @@
 			<div class="velho" data-testid="indice-velho">
 				<span>
 					{resultado.index_age_secs === NEVER_SCANNED
-						? "Este banco nunca foi varrido: a busca não tem o que consultar."
-						: `O índice foi varrido ${haQuantoTempo(resultado.index_age_secs)}. O que mudou desde então não aparece aqui.`}
+						? "Este banco nunca foi varrido: a busca encontra pelo NOME da chave, mas ainda não enxerga o conteúdo dos valores."
+						: `O índice foi varrido ${haQuantoTempo(resultado.index_age_secs)}. Valores mudados desde então ainda aparecem como estavam.`}
 				</span>
 				<button onclick={varrerEBuscar} disabled={varrendo}>
 					{varrendo ? "Varrendo" : "Varrer de novo"}
@@ -121,9 +121,9 @@
 
 		{#if resultado.hits.length === 0}
 			<p class="sem-acerto" data-testid="sem-acerto">
-				Nenhuma chave com esse texto. Confira a grafia, tente um pedaço menor,
-				ou varra o banco de novo se a chave foi criada depois da última
-				varredura.
+				Nenhuma chave com esse texto. Confira a grafia ou tente um pedaço
+				menor. Os nomes das chaves são lidos do servidor agora; para procurar
+				DENTRO dos valores, varra o banco de novo.
 			</p>
 		{:else}
 			<ul>
@@ -164,9 +164,10 @@
 		</p>
 	{:else}
 		<p class="convite">
-			Procure por um pedaço de texto. A busca olha dentro de campo de hash,
-			item de lista, membro de sorted set e JSON guardado como string — não só
-			no nome da chave.
+			Procure por um pedaço de texto. O nome das chaves é lido do servidor na
+			hora; dentro dos valores — campo de hash, item de lista, membro de
+			sorted set, JSON guardado como string — a busca usa o índice local, que
+			o botão "Varrer de novo" atualiza.
 		</p>
 	{/if}
 </section>

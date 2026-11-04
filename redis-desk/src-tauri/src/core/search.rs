@@ -21,6 +21,18 @@
 //! sozinho usa índice mas casa só PALAVRAS inteiras, e procurar `arco@emp`
 //! precisa achar `marco@empresa.com`.
 //!
+//! # Nome vem do servidor, valor vem do índice
+//!
+//! Procurar por NOME não passa pelo índice: os nomes das chaves são lidos
+//! do servidor na hora, a cada busca. É o que faz `UNIDADE07` achar
+//! `vitrine:...:UNIDADE07:t1` num banco que nunca foi varrido — e varrer
+//! 50 mil chaves para montar a árvore já custa onze idas e voltas, então
+//! lê-las de novo aqui é barato perto de devolver "nenhuma chave" para
+//! uma chave que está ali.
+//!
+//! O VALOR continua vindo do índice, porque lê-lo ao vivo exigiria baixar
+//! o banco inteiro a cada letra digitada.
+//!
 //! # Caixa alta e baixa
 //!
 //! A busca ignora a caixa das letras, em todo o Unicode (`JOÃO` acha `joão`)
@@ -46,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use super::config::Host;
 use super::conn::{ConnError, Pool};
 use super::index::{Index, Result, kind_from_label, now_unix_ms};
-use super::keys::KeyKind;
+use super::keys::{KeyKind, scan_names};
 
 /// Mínimo de caracteres para o tokenizador `trigram` conseguir indexar (e
 /// portanto casar) a agulha. Abaixo disso, ver "Agulha curta" no topo.
@@ -152,7 +164,29 @@ pub async fn search(
         });
     }
 
-    let candidates = collect_candidates(index, &host.id, db, needle)?;
+    let mut candidates = collect_candidates(index, &host.id, db, needle)?;
+
+    // Os nomes vêm do servidor, não do índice (ver o topo do módulo). Uma
+    // chave que já veio do índice não entra de novo: ela traz o corpo
+    // junto, e a versão ao vivo viria sem ele.
+    let conhecidas: std::collections::HashSet<&str> =
+        candidates.iter().map(|c| c.key.as_str()).collect();
+    let ao_vivo: Vec<Candidate> = scan_names(pool, host, pw, db, |_| {})
+        .await?
+        .into_iter()
+        .filter(|nome| !conhecidas.contains(nome.as_str()))
+        .map(|key| Candidate {
+            key,
+            // O tipo e o prazo verdadeiros chegam junto com a conferência de
+            // existência, mais abaixo — uma ida e volta que já aconteceria.
+            kind: KeyKind::Unknown(String::new()),
+            ttl_ms: None,
+            body: String::new(),
+        })
+        .collect();
+    candidates.extend(ao_vivo);
+    candidates.sort_by(|a, b| a.key.cmp(&b.key));
+
     let scanned = candidates.len() as u64;
     let confirmed = confirm_text(candidates, needle);
 
@@ -166,16 +200,24 @@ pub async fn search(
         }
 
         let keys: Vec<String> = batch.iter().map(|hit| hit.key.clone()).collect();
-        let alive = exists_many(pool, host, pw, db, &keys).await?;
+        let atual = metadata_many(pool, host, pw, db, &keys).await?;
 
-        for (hit, alive) in batch.into_iter().zip(alive) {
-            if alive {
-                if hits.len() < limit {
-                    hits.push(hit);
+        for (mut hit, atual) in batch.into_iter().zip(atual) {
+            match atual {
+                Some((kind, ttl_ms)) => {
+                    if hits.len() < limit {
+                        // Tipo e prazo do SERVIDOR, não do índice: o índice
+                        // pode ser de ontem, e mostrar o prazo de ontem ao
+                        // lado de uma chave viva é pior que não mostrar.
+                        hit.kind = kind;
+                        hit.ttl_ms = ttl_ms;
+                        hits.push(hit);
+                    }
                 }
-            } else {
-                index.forget_key(&host.id, db, &hit.key)?;
-                stale_keys_removed += 1;
+                None => {
+                    index.forget_key(&host.id, db, &hit.key)?;
+                    stale_keys_removed += 1;
+                }
             }
         }
     }
@@ -387,27 +429,51 @@ fn snippet_around(text: &str, start: usize, len: usize) -> (String, usize, usize
     (snippet, prefix_len + (start - from), len)
 }
 
-/// `EXISTS` de várias chaves numa ida e volta só. Não usa o `EXISTS` de
-/// múltiplos argumentos do Redis porque aquele devolve uma CONTAGEM e aqui
-/// é preciso saber QUAIS sumiram, uma a uma.
-async fn exists_many(
+/// Tipo e prazo de várias chaves numa ida e volta só — e, de quebra, a
+/// resposta sobre existir ou não.
+///
+/// `TYPE` devolve `none` para chave que não existe, então ele serve de
+/// conferência de existência E traz o tipo atualizado no mesmo movimento.
+/// Um `EXISTS` separado responderia menos pelo mesmo preço.
+async fn metadata_many(
     pool: &Pool,
     host: &Host,
     pw: Option<&str>,
     db: u8,
     keys: &[String],
-) -> std::result::Result<Vec<bool>, ConnError> {
-    pool.with_retry(host, db, pw, |mut conn| {
-        let keys = keys.to_vec();
-        async move {
-            let mut pipe = redis::pipe();
-            for key in &keys {
-                pipe.cmd("EXISTS").arg(key);
+) -> std::result::Result<Vec<Option<(KeyKind, Option<i64>)>>, ConnError> {
+    let respostas: Vec<redis::Value> = pool
+        .with_retry(host, db, pw, |mut conn| {
+            let keys = keys.to_vec();
+            async move {
+                let mut pipe = redis::pipe();
+                for key in &keys {
+                    pipe.cmd("TYPE").arg(key);
+                    pipe.cmd("PTTL").arg(key);
+                }
+                pipe.query_async(&mut conn).await
             }
-            pipe.query_async::<Vec<bool>>(&mut conn).await
-        }
-    })
-    .await
+        })
+        .await?;
+
+    Ok(respostas
+        .chunks(2)
+        .map(|par| {
+            let type_name = redis::from_redis_value_ref::<String>(&par[0]).ok()?;
+            if type_name == "none" {
+                return None;
+            }
+            // `PTTL`: -1 é "não expira", -2 é "não existe", e qualquer coisa
+            // que não seja número vira "não expira" em vez de derrubar a
+            // busca inteira por causa de uma resposta estranha.
+            let ttl = redis::from_redis_value_ref::<i64>(&par[1]).unwrap_or(-1);
+            match ttl {
+                -2 => None,
+                -1 => Some(Some((KeyKind::from_type_name(&type_name), None))),
+                ms => Some(Some((KeyKind::from_type_name(&type_name), Some(ms)))),
+            }?
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -623,6 +689,39 @@ mod tests {
             &hit.snippet[hit.match_start..hit.match_start + hit.match_len],
             needle,
             "num acerto por nome, o trecho e o recorte precisam apontar para o nome da chave"
+        );
+    }
+
+    #[tokio::test]
+    async fn finds_by_key_name_with_no_index_at_all() {
+        // Banco só deste teste: aqui o índice fica propositalmente VAZIO, e
+        // um `rescan` de outro teste no mesmo banco encheria o dele.
+        let pool = Pool::new();
+        let host = test_host(4);
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let chave = "search_rs_test:sem_indice:UNIDADE07:t1";
+
+        del(&mut conn, &[chave]).await;
+        let _: () = redis::cmd("SET")
+            .arg(chave)
+            .arg("conteudo que nao contem a agulha")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        // NENHUMA varredura: o índice acabou de nascer.
+        let (_dir, index) = open_index();
+        let outcome = search(&index, &pool, &host, None, host.db, "UNIDADE07", 50)
+            .await
+            .unwrap();
+        del(&mut conn, &[chave]).await;
+
+        let hit = hit_for(&outcome, chave);
+        assert_eq!(hit.where_found, Where::KeyName);
+        assert_eq!(hit.kind, KeyKind::String);
+        assert_eq!(
+            outcome.index_age_secs, NEVER_SCANNED,
+            "e a resposta precisa continuar dizendo que o índice nunca foi varrido"
         );
     }
 

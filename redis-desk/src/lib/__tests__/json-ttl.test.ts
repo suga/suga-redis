@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/svelte";
+import { render, screen, within } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -105,11 +105,29 @@ test("valor JSON abre colorido, com cada tipo em sua cor", async () => {
 	}
 });
 
+test("o alternador colorido/edição vem antes do conteúdo, não depois dele", async () => {
+	const user = userEvent.setup();
+	montar(view({ value: { kind: "string", data: texto(JSON_VALIDO) } }));
+
+	const alternador = screen.getByTestId("modo-valor");
+	// Um valor de 48 kB rola muito: um botão depois do conteúdo exige
+	// percorrer tudo para ser encontrado. O alternador precisa vir antes.
+	const posicao = alternador.compareDocumentPosition(screen.getByTestId("json-realce"));
+	expect(posicao & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+	await user.click(within(alternador).getByRole("button", { name: "Editar" }));
+	expect(screen.getByLabelText("Valor")).toBeInTheDocument();
+
+	// E dá para voltar, pelo mesmo lugar.
+	await user.click(within(alternador).getByRole("button", { name: "Colorido" }));
+	expect(screen.getByTestId("json-realce")).toBeInTheDocument();
+});
+
 test("JSON quebrado mostra o erro e trava o salvar", async () => {
 	const user = userEvent.setup();
 	montar(view({ value: { kind: "string", data: texto(JSON_VALIDO) } }));
 
-	await user.click(screen.getByRole("button", { name: "Editar como texto" }));
+	await user.click(screen.getByRole("button", { name: "Editar" }));
 	const campo = screen.getByLabelText("Valor");
 	await user.clear(campo);
 	await user.type(campo, '{{"email": "ana",}}');
