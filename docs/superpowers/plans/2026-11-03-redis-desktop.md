@@ -739,7 +739,7 @@ git add -A && git commit -m "feat: search panel with highlighted snippets and in
 
 Lista por host, mais recente primeiro: quando, quem fez (você ou o Claude), a chave, o resumo, e os valores antes e depois lado a lado. Botão de voltar atrás por linha. Linha já revertida fica marcada e sem botão.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```ts
 test('mostra quem fez cada mudança, você ou o Claude')
@@ -749,19 +749,19 @@ test('linha já revertida não oferece voltar atrás de novo')
 test('histórico vazio convida a fazer a primeira mudança')
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `npm run test -- history-panel`
 Expected: FAIL.
 
-- [ ] **Step 3: Implementar o `HistoryPanel`**
+- [x] **Step 3: Implementar o `HistoryPanel`**
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `npm run test -- history-panel`
 Expected: PASS, 5 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: history panel with before/after diff and rollback"
