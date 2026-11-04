@@ -526,7 +526,31 @@ impl History {
             None => None,
         };
 
-        restore_value(pool, host, pw, entry.db, &entry.key, &snapshot).await?;
+        // Só precisamos saber o tipo criado quando não há snapshot de
+        // "antes" — ver o comentário de `restore_value`. `after_json` é
+        // best-effort (ver `write_with_backup`), então um JSON ausente ou
+        // corrompido aqui vira `None` (a checagem de tipo é pulada), não um
+        // erro que travaria a volta atrás inteira.
+        let created_kind = if snapshot.is_none() {
+            entry
+                .after_json
+                .as_deref()
+                .and_then(|json| serde_json::from_str::<ValueSnapshot>(json).ok())
+                .map(|snap| snap.kind)
+        } else {
+            None
+        };
+
+        restore_value(
+            pool,
+            host,
+            pw,
+            entry.db,
+            &entry.key,
+            &snapshot,
+            created_kind.as_deref(),
+        )
+        .await?;
         self.mark_rolled_back(entry_id)?;
 
         Ok(())
@@ -660,6 +684,33 @@ async fn current_kind(
     }
 }
 
+/// Recusa a volta atrás se `key` existir hoje com um tipo diferente de
+/// `expected_kind` — compartilhado pelos dois ramos de `restore_value`
+/// (chave que já existia antes da escrita rastreada, e chave que a escrita
+/// rastreada criou do zero): nos dois casos, apagar uma chave que mudou de
+/// tipo depois do momento capturado destruiria um dado não relacionado só
+/// para "desfazer" algo que já não é mais verdade. Se a chave não existir
+/// mais, não há nada a recusar — não há dado alheio para proteger.
+async fn ensure_type_unchanged(
+    pool: &Pool,
+    host: &Host,
+    pw: Option<&str>,
+    db: u8,
+    key: &str,
+    expected_kind: &str,
+) -> Result<()> {
+    if let Some(current) = current_kind(pool, host, pw, db, key).await?
+        && !kind_matches(&current, expected_kind)
+    {
+        return Err(HistoryError::TypeChanged {
+            key: key.to_string(),
+            expected: expected_kind.to_string(),
+            found: describe_kind(&current),
+        });
+    }
+    Ok(())
+}
+
 /// O que recriar para restaurar uma chave — já com todo byte decodificado,
 /// para que montar o `Pipeline` (`build_restore_pipeline`) nunca falhe:
 /// decodificar base64 é a única parte fallível (`before_json` corrompido),
@@ -725,22 +776,34 @@ fn build_restore_command(
 }
 
 /// Restaura `key` para o estado descrito por `snapshot` (ou apaga a chave,
-/// se `snapshot` é `None` — ela não existia antes da escrita original).
+/// se `snapshot` é `None` — ela não existia antes da escrita original, e
+/// "desfazer" é apagar o que a escrita criou).
 ///
-/// Duas checagens de segurança acontecem ANTES de qualquer escrita:
+/// `created_kind` só é usado quando `snapshot` é `None`: é o tipo que a
+/// própria escrita rastreada criou (vem de `after_json`, em `rollback`) —
+/// precisamos dele para a checagem de tipo abaixo, já que não há um
+/// `snapshot.kind` para comparar nesse ramo. Ignorado quando `snapshot` é
+/// `Some` (o tipo vem do próprio snapshot nesse caso).
 ///
-/// 1. O tipo atual da chave (se ela existir) precisa bater com o tipo do
-///    snapshot — uma chave que mudou de tipo depois do backup (plausível a
-///    partir das Tasks 15/16, quando a LLM também escreve) não pode ser
-///    apagada só para a volta atrás recriar um tipo diferente por cima. Uma
-///    rede de segurança que destrói dado para restaurar dado não é rede de
-///    segurança.
-/// 2. Se o snapshot tinha TTL, o instante de expiração (`expires_at_ms`,
-///    absoluto — não um TTL relativo recontado a partir de agora, ver o
-///    comentário de `ValueSnapshot::expires_at_ms`) precisa ainda estar no
-///    futuro. Se já passou, a chave expirou sozinha em produção entre a
-///    escrita original e a volta atrás tardia — recriá-la ressuscitaria um
-///    dado que o próprio Redis já tinha descartado.
+/// Checagens de segurança acontecem ANTES de qualquer escrita, nos dois
+/// ramos:
+///
+/// 1. O tipo atual da chave (se ela existir) precisa bater com o tipo
+///    esperado — do snapshot, se havia um valor antes, ou de `created_kind`,
+///    se a escrita criou a chave do zero. Uma chave que mudou de tipo depois
+///    do momento capturado (plausível a partir das Tasks 15/16, quando a
+///    LLM também escreve) não pode ser apagada só para a volta atrás
+///    recriar (ou simplesmente remover) um tipo diferente por cima. Uma rede
+///    de segurança que destrói dado para restaurar dado não é rede de
+///    segurança — isso vale tanto para desfazer uma edição quanto para
+///    desfazer uma criação.
+/// 2. Só no ramo de `snapshot` presente: se ele tinha TTL, o instante de
+///    expiração (`expires_at_ms`, absoluto — não um TTL relativo recontado
+///    a partir de agora, ver o comentário de `ValueSnapshot::expires_at_ms`)
+///    precisa ainda estar no futuro. Se já passou, a chave expirou sozinha
+///    em produção entre a escrita original e a volta atrás tardia —
+///    recriá-la ressuscitaria um dado que o próprio Redis já tinha
+///    descartado.
 ///
 /// Só depois dessas checagens o Redis é tocado: `DEL` seguido da recriação
 /// do tipo certo, tudo num `MULTI`/`EXEC` (`Pipeline::atomic`) para que
@@ -756,17 +819,10 @@ async fn restore_value(
     db: u8,
     key: &str,
     snapshot: &Option<ValueSnapshot>,
+    created_kind: Option<&str>,
 ) -> Result<()> {
     if let Some(snap) = snapshot {
-        if let Some(current) = current_kind(pool, host, pw, db, key).await?
-            && !kind_matches(&current, &snap.kind)
-        {
-            return Err(HistoryError::TypeChanged {
-                key: key.to_string(),
-                expected: snap.kind.clone(),
-                found: describe_kind(&current),
-            });
-        }
+        ensure_type_unchanged(pool, host, pw, db, key, &snap.kind).await?;
 
         if let Some(expires_at_ms) = snap.expires_at_ms
             && expires_at_ms <= now_unix_ms()
@@ -775,6 +831,13 @@ async fn restore_value(
                 key: key.to_string(),
             });
         }
+    } else if let Some(expected_kind) = created_kind {
+        // `created_kind` é `None` quando `after_json` não estava disponível
+        // (a releitura de "melhor esforço" em `write_with_backup` falhou) —
+        // sem saber que tipo foi criado, não há como checar com segurança, e
+        // a checagem é pulada: lacuna conhecida e documentada, não um bug
+        // silencioso novo (ver o relatório da task).
+        ensure_type_unchanged(pool, host, pw, db, key, expected_kind).await?;
     }
 
     let (command, expires_at_ms) = build_restore_command(snapshot)?;
@@ -1267,7 +1330,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Deixa o TTL curto expirar de verdade no Redis antes de desfazer.
+        // A escrita rastreada (`DeleteKey`) já apagou a chave antes deste
+        // sleep — não é o próprio Redis que a expira aqui, já não há nada
+        // para expirar. O sleep só empurra o relógio de parede para além do
+        // `expires_at_ms` (300ms) guardado no backup, para exercitar a
+        // checagem `expires_at_ms <= now` de `restore_value` isoladamente,
+        // sem depender do mecanismo de expiração do Redis.
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
 
         let result = history.rollback(&pool, &host, None, id).await;
@@ -1348,6 +1416,109 @@ mod tests {
         assert_eq!(
             current_type, "list",
             "a chave recriada por outra coisa não pode ser apagada pela volta atrás recusada"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_of_a_creation_deletes_the_key_when_the_type_still_matches() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_test:rollback_creation_matches";
+
+        // Garante que a chave não existe antes — a escrita vai criá-la do
+        // zero, então `before_json` será `None`.
+        del(&mut conn, &[key]).await;
+
+        let (_dir, history) = open_history();
+        let op = WriteOp::SetString {
+            value: text("valor-criado-do-zero"),
+        };
+        let id = history
+            .write_with_backup(&pool, &host, None, host.db, key, &op, Actor::Human)
+            .await
+            .unwrap();
+
+        let entry = history.get(id).unwrap();
+        assert!(
+            entry.before_json.is_none(),
+            "a chave não existia antes — before_json precisa ser None"
+        );
+
+        history.rollback(&pool, &host, None, id).await.unwrap();
+
+        let exists: bool = redis::cmd("EXISTS")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        assert!(
+            !exists,
+            "a volta atrás de uma criação (tipo ainda compatível) precisa apagar a chave criada"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_of_a_creation_refuses_when_the_key_was_replaced_by_a_different_type() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_test:rollback_creation_type_changed";
+
+        del(&mut conn, &[key]).await;
+
+        let (_dir, history) = open_history();
+        let op = WriteOp::SetString {
+            value: text("valor-criado-do-zero"),
+        };
+        let id = history
+            .write_with_backup(&pool, &host, None, host.db, key, &op, Actor::Human)
+            .await
+            .unwrap();
+
+        // Depois da criação rastreada (uma string), outra coisa substitui a
+        // chave por um tipo diferente (uma lista) com o mesmo nome. A volta
+        // atrás desta entrada é "apagar a string criada" — mas o que está
+        // lá agora não é a string criada, é dado de outra origem; apagar
+        // sem checar destruiria esse dado não relacionado. Este é
+        // exatamente o ramo de `restore_value` que a checagem de tipo do
+        // outro teste (`rollback_refuses_when_the_key_changed_type`) NÃO
+        // cobre: lá `before_json` tinha um valor; aqui ele é `None`.
+        let _: () = redis::cmd("DEL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("RPUSH")
+            .arg(key)
+            .arg("item-de-outro-tipo")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = history.rollback(&pool, &host, None, id).await;
+
+        let current_type: String = redis::cmd("TYPE")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let entry = history.get(id).unwrap();
+        del(&mut conn, &[key]).await;
+
+        assert!(
+            matches!(result, Err(HistoryError::TypeChanged { .. })),
+            "esperava TypeChanged, veio {result:?}"
+        );
+        assert_eq!(
+            current_type, "list",
+            "a chave substituída por outra coisa não pode ser apagada pela volta atrás recusada"
+        );
+        assert!(
+            !entry.rolled_back,
+            "uma volta atrás recusada não pode marcar a entrada como revertida"
         );
     }
 
