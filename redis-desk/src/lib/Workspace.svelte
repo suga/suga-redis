@@ -3,7 +3,10 @@
 	 * A área de trabalho de um host aberto: escolha do banco, árvore de
 	 * chaves à esquerda, painel do valor à direita.
 	 */
+	import ConfirmDialog from "$lib/ConfirmDialog.svelte";
+	import KeyEditor from "$lib/KeyEditor.svelte";
 	import KeyTree from "$lib/KeyTree.svelte";
+	import NewKeyDialog from "$lib/NewKeyDialog.svelte";
 	import ValuePanel from "$lib/ValuePanel.svelte";
 	import {
 		errorMessage,
@@ -12,10 +15,13 @@
 		onRescanProgress,
 		rescan,
 		scanStatus,
+		textBytes,
+		writeValue,
 		type Host,
 		type ScanProgress,
 		type ScanReport,
 		type TreeNode,
+		type WriteOp,
 	} from "$lib/api";
 	import { onMount, untrack } from "svelte";
 
@@ -41,6 +47,11 @@
 	let carregando = $state(false);
 	let varrendo = $state(false);
 	let erro = $state("");
+	let criando = $state(false);
+	/** Criação recusada em produção, esperando confirmação. */
+	let criacaoPendente = $state<{ key: string; op: WriteOp; summary: string } | null>(null);
+	/** Força o painel a reler a chave depois de uma escrita. */
+	let revisao = $state(0);
 
 	onMount(() => {
 		const parar = onRescanProgress((p) => (progresso = p));
@@ -100,6 +111,57 @@
 		return `há ${Math.round(horas / 24)} dias`;
 	}
 
+	/**
+	 * O Redis não guarda hash, lista ou sorted set vazios: uma chave desses
+	 * tipos só passa a existir com ao menos um elemento dentro. Por isso a
+	 * criação já entra com um elemento de partida, que a pessoa edita ou
+	 * remove em seguida — a alternativa seria uma chave que some sozinha
+	 * assim que a tela fosse recarregada.
+	 */
+	function opDeCriacao(kind: "string" | "hash" | "list" | "zset"): WriteOp {
+		switch (kind) {
+			case "string":
+				return { op: "set_string", value: textBytes("") };
+			case "hash":
+				return { op: "set_hash_field", field: "campo", value: textBytes("") };
+			case "list":
+				return { op: "push_list_item", value: textBytes(""), front: false };
+			case "zset":
+				return { op: "set_zset_member", member: textBytes("membro"), score: 0 };
+		}
+	}
+
+	async function criar(nova: { key: string; kind: "string" | "hash" | "list" | "zset" }) {
+		const op = opDeCriacao(nova.kind);
+		criando = false;
+		await aplicarCriacao(nova.key, op, false);
+	}
+
+	async function aplicarCriacao(key: string, op: WriteOp, confirmado: boolean) {
+		erro = "";
+		try {
+			const resultado = await writeValue(host.id, db, key, op, confirmado);
+			if (resultado.outcome === "needs_confirmation") {
+				criacaoPendente = { key, op, summary: resultado.summary };
+				return;
+			}
+			criacaoPendente = null;
+			await carregarArvore(host.id, db);
+			selecionada = key;
+		} catch (err) {
+			criacaoPendente = null;
+			erro = errorMessage(err);
+		}
+	}
+
+	/** Uma escrita foi aplicada: relê a chave e atualiza a árvore. */
+	async function escreveu() {
+		const chave = selecionada;
+		await carregarArvore(host.id, db);
+		selecionada = chave;
+		revisao += 1;
+	}
+
 	/** A chave sumiu entre a varredura e o clique: tira da árvore. */
 	function chaveSumiu() {
 		selecionada = null;
@@ -123,12 +185,15 @@
 				</select>
 			</label>
 
-			<input
-				class="filtro"
-				bind:value={filtro}
-				placeholder="Filtrar por nome"
-				aria-label="Filtrar chaves por nome"
-			/>
+			<div class="busca-linha">
+				<input
+					class="filtro"
+					bind:value={filtro}
+					placeholder="Filtrar por nome"
+					aria-label="Filtrar chaves por nome"
+				/>
+				<button onclick={() => (criando = true)}>Nova chave</button>
+			</div>
 
 			<div class="varredura">
 				<span class="idade">
@@ -165,19 +230,37 @@
 		{#if erro}
 			<p class="erro" role="alert">{erro}</p>
 		{:else if selecionada}
-			{#key selecionada}
+			{#key `${selecionada}#${revisao}`}
 				<ValuePanel
 					hostId={host.id}
 					{db}
 					keyName={selecionada}
 					onKeyGone={chaveSumiu}
-				/>
+				>
+					{#snippet editor(view)}
+						<KeyEditor hostId={host.id} {db} {view} onWritten={escreveu} />
+					{/snippet}
+				</ValuePanel>
 			{/key}
 		{:else}
 			<p class="aviso">Escolha uma chave na árvore.</p>
 		{/if}
 	</div>
 </div>
+
+{#if criando}
+	<NewKeyDialog onCreate={criar} onCancel={() => (criando = false)} />
+{/if}
+
+{#if criacaoPendente}
+	<ConfirmDialog
+		summary={criacaoPendente.summary}
+		onConfirm={() =>
+			criacaoPendente &&
+			aplicarCriacao(criacaoPendente.key, criacaoPendente.op, true)}
+		onCancel={() => (criacaoPendente = null)}
+	/>
+{/if}
 
 <style>
 	.trabalho {
@@ -229,6 +312,15 @@
 		padding: 0.12rem 0.45rem;
 		font-size: 0.88rem;
 		color: var(--text-dim);
+	}
+
+	.busca-linha {
+		display: flex;
+		gap: 0.4rem;
+	}
+
+	.busca-linha button {
+		white-space: nowrap;
 	}
 
 	.arvore {

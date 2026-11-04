@@ -1,0 +1,150 @@
+<script lang="ts">
+	/**
+	 * Criar chave: nome e tipo.
+	 *
+	 * Só os quatro tipos editáveis aparecem. `set`, `stream` e RedisJSON são
+	 * somente leitura neste produto, então oferecê-los aqui criaria uma
+	 * chave que a própria tela não saberia editar depois.
+	 */
+	interface NovaChave {
+		key: string;
+		kind: "string" | "hash" | "list" | "zset";
+	}
+
+	interface Props {
+		onCreate: (nova: NovaChave) => void;
+		onCancel: () => void;
+		busy?: boolean;
+	}
+
+	let { onCreate, onCancel, busy = false }: Props = $props();
+
+	const TIPOS: { value: NovaChave["kind"]; label: string }[] = [
+		{ value: "string", label: "string — um texto só" },
+		{ value: "hash", label: "hash — campos e valores" },
+		{ value: "list", label: "list — itens em ordem" },
+		{ value: "zset", label: "zset — membros com pontuação" },
+	];
+
+	let nome = $state("");
+	let tipo = $state<NovaChave["kind"]>("string");
+	let erro = $state("");
+
+	function criar(event: Event) {
+		event.preventDefault();
+		const chave = nome.trim();
+		if (!chave) {
+			erro = "Informe o nome da chave.";
+			return;
+		}
+		erro = "";
+		onCreate({ key: chave, kind: tipo });
+	}
+
+	function focar(el: HTMLElement) {
+		el.focus();
+	}
+</script>
+
+<svelte:window
+	onkeydown={(e) => {
+		if (e.key === "Escape") onCancel();
+	}}
+/>
+
+<div
+	class="fundo"
+	role="presentation"
+	onclick={(e) => {
+		if (e.target === e.currentTarget) onCancel();
+	}}
+>
+	<div class="caixa" role="dialog" aria-modal="true" aria-labelledby="nova-titulo">
+		<h2 id="nova-titulo">Nova chave</h2>
+
+		<form onsubmit={criar}>
+
+			<label>
+				<span>Nome da chave</span>
+				<input bind:value={nome} class="mono" autocomplete="off" use:focar />
+			</label>
+
+			<label>
+				<span>Tipo</span>
+				<select bind:value={tipo}>
+					{#each TIPOS as opcao (opcao.value)}
+						<option value={opcao.value}>{opcao.label}</option>
+					{/each}
+				</select>
+			</label>
+
+			{#if erro}
+				<p class="erro" role="alert">{erro}</p>
+			{/if}
+
+			<div class="acoes">
+				<button type="button" onclick={onCancel}>Cancelar</button>
+				<button type="submit" class="primary" disabled={busy}>Criar</button>
+			</div>
+		</form>
+	</div>
+</div>
+
+<style>
+	.fundo {
+		position: fixed;
+		inset: 0;
+		display: grid;
+		place-items: center;
+		padding: 1rem;
+		background: rgb(10 12 14 / 0.72);
+		z-index: 10;
+	}
+
+	.caixa {
+		width: min(28rem, 100%);
+		padding: 1rem 1.1rem 1.1rem;
+		background: var(--panel);
+		border: 1px solid var(--rule-strong);
+		border-radius: var(--radius);
+	}
+
+	form {
+		display: flex;
+		flex-direction: column;
+		gap: 0.7rem;
+	}
+
+	h2 {
+		margin: 0 0 0.7rem;
+		font-size: 1.2rem;
+		font-weight: 600;
+	}
+
+	label {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+
+	label > span {
+		color: var(--text-dim);
+		font-size: 0.9rem;
+	}
+
+	.acoes {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.5rem;
+		margin-top: 0.3rem;
+	}
+
+	.erro {
+		margin: 0;
+		padding: 0.4rem 0.6rem;
+		border: 1px solid #5e3a38;
+		border-radius: var(--radius);
+		background: #2e2326;
+		color: #e49a94;
+	}
+</style>

@@ -653,7 +653,7 @@ git add -A && git commit -m "feat: virtualized key tree and value panel"
 
 Cada tipo tem sua tela: string é área de texto com botão de formatar JSON quando o conteúdo for JSON; hash é tabela campo/valor com adicionar e remover linha; lista é tabela com índice, mover e remover; sorted set é tabela membro/pontuação ordenada. Em prod, salvar e excluir abrem o `ConfirmDialog` com o resumo vindo do `WriteOutcome::NeedsConfirmation`; um clique em "Confirmar" reenvia com `confirmed: true`.
 
-- [ ] **Step 1: Escrever os testes que falham**
+- [x] **Step 1: Escrever os testes que falham**
 
 ```ts
 test('salvar string em prod abre o confirmar com o resumo da mudança')
@@ -666,19 +666,19 @@ test('criar chave nova pede tipo e nome e recusa nome vazio')
 test('erro de conexão ao salvar mostra o nome do host e não limpa a edição')  // Review Focus 1
 ```
 
-- [ ] **Step 2: Rodar e confirmar que falham**
+- [x] **Step 2: Rodar e confirmar que falham**
 
 Run: `npm run test -- editors`
 Expected: FAIL.
 
-- [ ] **Step 3: Implementar os editores, o `ConfirmDialog` e o `NewKeyDialog`**
+- [x] **Step 3: Implementar os editores, o `ConfirmDialog` e o `NewKeyDialog`**
 
-- [ ] **Step 4: Rodar e confirmar que passam**
+- [x] **Step 4: Rodar e confirmar que passam**
 
 Run: `npm run test -- editors`
 Expected: PASS, 8 testes.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat: per-type editors with prod confirmation dialog"
