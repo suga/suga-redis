@@ -24,13 +24,24 @@
 		 * Chegam parciais e vão crescendo — a árvore não os busca.
 		 */
 		root: Branch[];
+		/**
+		 * Sobe a cada retrato da varredura. É a dependência que faz os
+		 * galhos ABERTOS serem relidos: sem ela, um galho aberto cedo
+		 * congelaria no que a trie tinha naquele instante — foi o que
+		 * aconteceu com um `fixtures` marcando 11 chaves e mostrando 1.
+		 *
+		 * Um número, e não a própria `root`: depender dela exigiria lê-la
+		 * sem usar o valor, e o compilador descarta uma leitura assim —
+		 * exatamente o bug que isto conserta.
+		 */
+		version: number;
 		selectedKey: string | null;
 		onSelect: (key: string) => void;
 		/** Filtra o que já está aberto. Vazio mostra tudo. */
 		filter: string;
 	}
 
-	let { hostId, db, root, selectedKey, onSelect, filter }: Props = $props();
+	let { hostId, db, root, version, selectedKey, onSelect, filter }: Props = $props();
 
 	/** Altura fixa de cada linha, em pixels. É o que torna a janela calculável. */
 	const ROW_HEIGHT = 26;
@@ -74,38 +85,72 @@
 		}
 	}
 
+	/** Qual (host, banco) os galhos abertos descrevem. */
+	let bancoAberto = $state("");
+
 	// Trocar de host ou de banco invalida tudo que foi aberto.
 	//
-	// As únicas dependências deste efeito são `hostId` e `db`. O resto vai
-	// dentro de `untrack` porque `carregar` LÊ `niveis` e o efeito o
-	// ESCREVE: sem isso, o efeito depende do que ele mesmo escreve e se
-	// chama em laço até o Svelte abortar.
+	// A comparação com `bancoAberto` não é economia, é CORREÇÃO: um efeito
+	// pode rodar de novo sem que a dependência tenha mudado de valor, e
+	// limpar sem conferir apagava os galhos que a pessoa tinha acabado de
+	// abrir — um `fixtures` marcando 22 chaves e mostrando uma.
 	$effect(() => {
-		const id = hostId;
-		const banco = db;
+		const chave = `${hostId}#${db}`;
 		untrack(() => {
-			void id;
-			void banco;
+			if (chave === bancoAberto) return;
+			bancoAberto = chave;
 			niveis.clear();
 			abertos.clear();
 		});
 	});
 
 	// A raiz cresce a cada retrato da varredura; os galhos abertos
-	// acompanham, para as contagens de dentro subirem junto com as de fora.
+	// acompanham, para o que está dentro subir junto com o que está fora.
 	$effect(() => {
-		void root;
-		untrack(() => {
-			for (const prefixo of abertos) carregar(prefixo);
-		});
+		// `version` é lida e USADA: é o que registra a dependência.
+		if (version >= 0) {
+			untrack(() => {
+					for (const prefixo of abertos) void carregar(prefixo);
+			});
+		}
 	});
+
+	/**
+	 * Quantos degraus de corredor seguir sozinho ao abrir um galho.
+	 *
+	 * Finito porque uma chave com dezenas de níveis existe (`a:b:c:...`), e
+	 * descer todos de uma vez encheria a tela de linhas que ninguém pediu.
+	 */
+	const MAX_CORREDOR = 12;
 
 	function alternar(branch: Branch) {
 		if (abertos.has(branch.full_prefix)) {
 			abertos.delete(branch.full_prefix);
-		} else {
-			abertos.add(branch.full_prefix);
-			carregar(branch.full_prefix);
+			return;
+		}
+		abertos.add(branch.full_prefix);
+		descer(branch.full_prefix);
+	}
+
+	/**
+	 * Abre o galho e segue descendo enquanto o caminho não se dividir.
+	 *
+	 * Um nível com um filho só não é uma escolha, é um corredor: obrigar um
+	 * clique em cada degrau faz a pessoa clicar seis vezes para chegar à
+	 * primeira decisão de verdade. Para quando houver mais de um filho,
+	 * quando chegar numa folha, ou no teto de degraus.
+	 */
+	async function descer(prefixo: string) {
+		let atual = prefixo;
+		for (let degrau = 0; degrau < MAX_CORREDOR; degrau += 1) {
+			await carregar(atual);
+			const estado = niveis.get(atual);
+			if (estado?.situacao !== "pronto" || estado.filhos.length !== 1) return;
+
+			const unico = estado.filhos[0];
+			if (unico.leaf_key !== null) return;
+			abertos.add(unico.full_prefix);
+			atual = unico.full_prefix;
 		}
 	}
 

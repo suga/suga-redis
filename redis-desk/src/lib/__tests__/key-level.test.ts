@@ -39,6 +39,7 @@ function montar(raiz: Branch[] = RAIZ) {
 			hostId: "h1",
 			db: 0,
 			root: raiz,
+			version: 0,
 			selectedKey: null,
 			onSelect: vi.fn(),
 			filter: "",
@@ -81,6 +82,7 @@ test("clicar numa folha entrega a chave inteira", async () => {
 			hostId: "h1",
 			db: 0,
 			root: [folha("solta", "")],
+			version: 0,
 			selectedKey: null,
 			onSelect,
 			filter: "",
@@ -111,4 +113,72 @@ test("erro ao abrir um galho fica no galho, sem derrubar a árvore", async () =>
 
 	expect(await screen.findByRole("alert")).toHaveTextContent("Valkey");
 	expect(screen.getByRole("button", { name: /scheduler/ })).toBeInTheDocument();
+});
+
+test("galho aberto acompanha a varredura em vez de congelar no que viu", async () => {
+	const user = userEvent.setup();
+	// Foi assim na tela: `fixtures` foi aberto quando tinha 1 chave; a
+	// varredura seguiu até 11, a contagem subiu, mas a lista continuou com 1.
+	let filhos = [folha("id=1", "catalogo:precos:")];
+	nivel.mockImplementation(async (_h, _db, prefix) =>
+		prefix === "catalogo:" ? [galho("fixtures", "catalogo:", filhos.length)] : filhos,
+	);
+
+	const { rerender } = render(KeyTree, {
+		props: {
+			hostId: "h1",
+			db: 0,
+			root: [galho("catalogo", "", 1)],
+			version: 0,
+			selectedKey: null,
+			onSelect: vi.fn(),
+			filter: "",
+		},
+	});
+
+	// Um clique só: `catalogo` tem um filho e o corredor desce sozinho.
+	await user.click(screen.getByRole("button", { name: /catalogo/ }));
+	expect(await screen.findByRole("button", { name: /id=1/ })).toBeInTheDocument();
+
+	// A varredura avança: agora são 11 chaves sob `fixtures`.
+	filhos = Array.from({ length: 11 }, (_, i) => folha(`id=${i + 1}`, "catalogo:precos:"));
+	await rerender({ root: [galho("catalogo", "", 11)], version: 1 });
+
+	await waitFor(() =>
+		expect(screen.getByRole("button", { name: /id=11/ })).toBeInTheDocument(),
+	);
+});
+
+test("um galho de um filho só não obriga a abrir degrau por degrau", async () => {
+	const user = userEvent.setup();
+	// Na tela: evento > 88123 > 77 > Goal > 80 > 0 > 4591,
+	// cada degrau com UM filho e um clique. O caminho é um só; mostrá-lo
+	// inteiro poupa seis cliques que não decidem nada.
+	arvore({
+		"goal:": [galho("88123", "goal:", 2)],
+		"evento:88123:": [galho("77", "evento:88123:", 2)],
+		"evento:88123:77:": [
+			galho("MarcaA", "evento:88123:77:", 1),
+			galho("MarcaB", "evento:88123:77:", 1),
+		],
+	});
+
+	render(KeyTree, {
+		props: {
+			hostId: "h1",
+			db: 0,
+			root: [galho("goal", "", 2)],
+			version: 0,
+			selectedKey: null,
+			onSelect: vi.fn(),
+			filter: "",
+		},
+	});
+
+	await user.click(screen.getByRole("button", { name: /goal/ }));
+
+	// Um clique desce o corredor inteiro, até onde ele se divide.
+	expect(await screen.findByRole("button", { name: /88123/ })).toBeInTheDocument();
+	expect(await screen.findByRole("button", { name: /77/ })).toBeInTheDocument();
+	expect(await screen.findByRole("button", { name: /MarcaA/ })).toBeInTheDocument();
 });

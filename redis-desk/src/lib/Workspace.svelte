@@ -52,6 +52,8 @@
 	let lendo = $state<ScanSnapshot | null>(null);
 	/** Os prefixos de primeiro nível, crescendo a cada retrato. */
 	let raiz = $state<Branch[]>([]);
+	/** Sobe a cada retrato: é o que manda a árvore reler os galhos abertos. */
+	let versaoArvore = $state(0);
 	let varrendo = $state(false);
 	let erro = $state("");
 	let criando = $state(false);
@@ -72,6 +74,7 @@
 		const pararVarredura = onRescanProgress((p) => (progresso = p));
 		const pararLeitura = onTreeProgress((retrato) => {
 			raiz = retrato.root;
+			versaoArvore += 1;
 			// `done` apaga a barra, mas a raiz fica: ela É a árvore.
 			lendo = retrato.done ? null : retrato;
 		});
@@ -265,6 +268,7 @@
 				hostId={host.id}
 				{db}
 				root={raiz}
+				version={versaoArvore}
 				selectedKey={selecionada}
 				onSelect={(key) => (selecionada = key)}
 				filter={filtro}
