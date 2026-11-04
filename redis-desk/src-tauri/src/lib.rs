@@ -64,6 +64,7 @@ pub fn run() {
             commands::cmd_list_dbs,
             commands::cmd_scan_tree,
             commands::cmd_tree_level,
+            commands::cmd_load_more_children,
             commands::cmd_rescan,
             commands::cmd_scan_status,
             commands::cmd_read_value,

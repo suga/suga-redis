@@ -83,6 +83,26 @@ pub struct KeyMeta {
     pub size_bytes: u64,
 }
 
+/// Teto de filhos DISTINTOS listados num nível.
+///
+/// Alto de propósito: os níveis de uso real — um milhar de tokens, algumas
+/// centenas de sessões — precisam sair INTEIROS, porque uma lista cortada
+/// ao lado de uma contagem grande parece defeito mesmo quando não é.
+///
+/// O teto existe para o caso em que um nível tem milhões de identificadores
+/// distintos: guardá-los todos seria a lista de chaves disfarçada de
+/// árvore. Nesse caso o nível diz quantos está mostrando de quantos — a
+/// contagem conta CHAVES e continua verdadeira.
+pub const MAX_CHILDREN: usize = 50_000;
+
+/// Um nível da árvore: os filhos e se a lista saiu inteira.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Level {
+    pub children: Vec<Branch>,
+    /// A lista bateu em `MAX_CHILDREN`: há mais filhos distintos aqui.
+    pub truncated: bool,
+}
+
 /// Teto de nós da trie de prefixos.
 ///
 /// Limita a memória no caso degenerado — um identificador distinto por
@@ -90,7 +110,11 @@ pub struct KeyMeta {
 /// inteira. Batido o teto, nós novos param de ser criados e as contagens
 /// dos que existem seguem subindo, de modo que os números na tela
 /// continuam verdadeiros mesmo com a lista incompleta.
-pub const MAX_NODES: usize = 200_000;
+///
+/// Com o teto por nível acima, este aqui é só rede de segurança: os níveis
+/// patológicos param em `MAX_CHILDREN` muito antes de o total chegar perto
+/// disto.
+pub const MAX_NODES: usize = 400_000;
 
 /// Um nó da trie, numa arena indexada por `usize`.
 ///
@@ -103,6 +127,8 @@ struct No {
     full_prefix: String,
     count: u64,
     filhos: std::collections::BTreeMap<String, usize>,
+    /// A lista de filhos deste nó bateu no teto.
+    cortado: bool,
     /// A chave que TERMINA exatamente aqui, se houver.
     terminal: Option<String>,
 }
@@ -121,6 +147,9 @@ struct No {
 pub struct KeyTrie {
     nos: Vec<No>,
     orcamento: usize,
+    /// Teto de filhos por nível. Campo, e não constante, porque um galho
+    /// pode pedir mais — ver `expand_branch`.
+    teto_filhos: usize,
     estourou: bool,
 }
 
@@ -135,6 +164,32 @@ impl KeyTrie {
         KeyTrie::com_orcamento(MAX_NODES)
     }
 
+    /// Uma trie com um teto de filhos por nível diferente do padrão.
+    pub fn com_teto_de_filhos(teto_filhos: usize) -> KeyTrie {
+        KeyTrie {
+            teto_filhos,
+            ..KeyTrie::new()
+        }
+    }
+
+    /// Esvazia a trie MANTENDO os tetos configurados.
+    ///
+    /// Usada quando a varredura recomeça (uma reconexão refaz o cursor do
+    /// zero). Trocá-la por uma trie nova perderia o teto que quem a criou
+    /// escolheu — foi assim que a paginação de um galho deixou de valer.
+    pub fn limpar(&mut self) {
+        let KeyTrie {
+            orcamento,
+            teto_filhos,
+            ..
+        } = *self;
+        *self = KeyTrie {
+            orcamento,
+            teto_filhos,
+            ..KeyTrie::new()
+        };
+    }
+
     pub fn com_orcamento(orcamento: usize) -> KeyTrie {
         KeyTrie {
             nos: vec![No {
@@ -142,9 +197,11 @@ impl KeyTrie {
                 full_prefix: String::new(),
                 count: 0,
                 filhos: std::collections::BTreeMap::new(),
+                cortado: false,
                 terminal: None,
             }],
             orcamento,
+            teto_filhos: MAX_CHILDREN,
             estourou: false,
         }
     }
@@ -175,10 +232,19 @@ impl KeyTrie {
             let proximo = match self.nos[atual].filhos.get(segmento) {
                 Some(&indice) => indice,
                 None => {
+                    // Teto deste nível: para de listar filhos novos, mas a
+                    // contagem dos ancestrais segue subindo — e o nó fica
+                    // marcado, para a tela poder dizer que a lista está
+                    // incompleta em vez de deixar o número parecer errado.
+                    if self.nos[atual].filhos.len() >= self.teto_filhos {
+                        self.nos[atual].cortado = true;
+                        return;
+                    }
                     if self.nos.len() >= self.orcamento {
                         // Sem espaço para o caminho inteiro: a contagem dos
                         // ancestrais já subiu, que é o que a tela mostra.
                         self.estourou = true;
+                        self.nos[atual].cortado = true;
                         return;
                     }
                     let indice = self.nos.len();
@@ -187,6 +253,7 @@ impl KeyTrie {
                         full_prefix: prefixo.clone(),
                         count: 0,
                         filhos: std::collections::BTreeMap::new(),
+                        cortado: false,
                         terminal: None,
                     });
                     self.nos[atual].filhos.insert(segmento.to_string(), indice);
@@ -208,7 +275,7 @@ impl KeyTrie {
     /// galho para o pai, e a chave dele entra entre os próprios filhos —
     /// senão ela ficaria inalcançável, escondida atrás do caminho que leva
     /// aos outros.
-    pub fn level(&self, prefixo: &str) -> Option<Vec<Branch>> {
+    pub fn level(&self, prefixo: &str) -> Option<Level> {
         let no = self.achar(prefixo)?;
 
         let mut filhos: Vec<Branch> = self.nos[no]
@@ -249,7 +316,45 @@ impl KeyTrie {
                 .cmp(&b.leaf_key.is_some())
                 .then_with(|| a.label.cmp(&b.label))
         });
-        Some(filhos)
+        Some(Level {
+            children: filhos,
+            truncated: self.nos[no].cortado,
+        })
+    }
+
+    /// Troca os filhos de `prefixo` pelos `filhos` informados.
+    ///
+    /// Usado pela paginação de um galho (`expand_branch`): o galho é
+    /// varrido de novo, sozinho, e a lista dele cresce. Os netos que já
+    /// estivessem abertos são descartados junto — eles serão relidos quando
+    /// a pessoa abrir de novo, e mantê-los exigiria casar duas árvores
+    /// construídas em momentos diferentes.
+    pub fn substituir_filhos(
+        &mut self,
+        prefixo: &str,
+        filhos: Vec<(String, u64, bool)>,
+        cortado: bool,
+    ) {
+        let Some(no) = self.achar(prefixo) else {
+            return;
+        };
+
+        self.nos[no].filhos.clear();
+        self.nos[no].cortado = cortado;
+        for (label, count, terminal) in filhos {
+            let indice = self.nos.len();
+            let full_prefix = format!("{prefixo}{label}{SEPARATOR}");
+            let chave = format!("{prefixo}{label}");
+            self.nos.push(No {
+                label: label.clone(),
+                full_prefix,
+                count,
+                filhos: std::collections::BTreeMap::new(),
+                cortado: false,
+                terminal: terminal.then_some(chave),
+            });
+            self.nos[no].filhos.insert(label, indice);
+        }
     }
 
     fn achar(&self, prefixo: &str) -> Option<usize> {
@@ -275,6 +380,130 @@ pub struct Branch {
     pub count: u64,
     /// Preenchido só quando este filho É uma chave, não um galho.
     pub leaf_key: Option<String>,
+}
+
+/// Onde varrer: o host, a senha dele e o banco.
+///
+/// Os três andam sempre juntos e nunca fazem sentido separados; passá-los
+/// como um só deixa a assinatura legível.
+#[derive(Clone, Copy)]
+pub struct Alvo<'a> {
+    pub host: &'a Host,
+    pub pw: Option<&'a str>,
+    pub db: u8,
+}
+
+/// Escapa os curingas do `MATCH` do Redis (`*`, `?`, `[`, `]`, `\\`).
+///
+/// Sem isso, um prefixo que contenha `*` deixa de selecionar o que está sob
+/// ele e passa a casar com qualquer coisa — devolvendo chaves de outros
+/// galhos como se fossem deste.
+fn escapar_glob(texto: &str) -> String {
+    let mut out = String::with_capacity(texto.len());
+    for ch in texto.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Varre de novo UM galho e acrescenta filhos a ele, até `limite`.
+///
+/// Existe porque nenhum dado pode ficar inalcançável. Um nível com milhões
+/// de nomes distintos não cabe na trie de uma vez, mas quem precisa ver
+/// além do teto pede mais, e esta varredura — só do prefixo, com progresso
+/// à vista — traz a próxima parte com as contagens certas.
+///
+/// É cara: o `MATCH` do `SCAN` filtra o que volta pela rede, mas o servidor
+/// percorre o espaço de chaves inteiro de todo jeito. Por isso ela acontece
+/// só quando a pessoa pede, e nunca por conta própria.
+pub async fn expand_branch(
+    pool: &Pool,
+    alvo: Alvo<'_>,
+    trie: &std::sync::Mutex<KeyTrie>,
+    prefix: &str,
+    limite: usize,
+    progress: impl Fn(ScanTick),
+) -> Result<(), ConnError> {
+    let Alvo { host, pw, db } = alvo;
+    let padrao = format!("{}*", escapar_glob(prefix));
+    let progress = &progress;
+
+    let (filhos, cortado) = pool
+        .with_retry(host, db, pw, move |mut conn| {
+            let padrao = padrao.clone();
+            async move {
+                let total_estimate: u64 = redis::cmd("DBSIZE").query_async(&mut conn).await?;
+
+                // (contagem, é a própria chave) por nome de filho.
+                let mut filhos: std::collections::BTreeMap<String, (u64, bool)> =
+                    std::collections::BTreeMap::new();
+                let mut cortado = false;
+                let mut vistas = 0u64;
+                let mut cursor = 0u64;
+
+                loop {
+                    let (next, lote): (u64, Vec<String>) = redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(&padrao)
+                        .arg("COUNT")
+                        .arg(SCAN_COUNT)
+                        .query_async(&mut conn)
+                        .await?;
+
+                    for chave in lote {
+                        let Some(resto) = chave.strip_prefix(prefix) else {
+                            continue;
+                        };
+                        vistas += 1;
+
+                        let (rotulo, terminal) = match resto.split_once(SEPARATOR) {
+                            Some((segmento, _)) => (segmento.to_string(), false),
+                            None => (resto.to_string(), true),
+                        };
+
+                        // `len` lido antes do empréstimo mutável, para o
+                        // compilador não ver os dois ao mesmo tempo.
+                        let cheio = filhos.len() >= limite;
+                        if let Some(entrada) = filhos.get_mut(&rotulo) {
+                            entrada.0 += 1;
+                            // Dois sob o mesmo nome: virou caminho.
+                            entrada.1 = false;
+                        } else if cheio {
+                            cortado = true;
+                        } else {
+                            filhos.insert(rotulo, (1, terminal));
+                        }
+                    }
+
+                    progress(ScanTick {
+                        scanned: vistas,
+                        total_estimate,
+                    });
+
+                    if next == 0 {
+                        break;
+                    }
+                    cursor = next;
+                }
+
+                Ok((filhos, cortado))
+            }
+        })
+        .await?;
+
+    trie.lock().unwrap().substituir_filhos(
+        prefix,
+        filhos
+            .into_iter()
+            .map(|(label, (count, terminal))| (label, count, terminal))
+            .collect(),
+        cortado,
+    );
+    Ok(())
 }
 
 /// Um retrato da varredura em andamento, para a tela mostrar o que já veio.
@@ -316,8 +545,9 @@ pub async fn scan_trie(
 
         // A trie recomeça a cada tentativa: uma reconexão no meio refaz o
         // cursor do zero, e misturar o que veio antes contaria chaves duas
-        // vezes.
-        *trie.lock().unwrap() = KeyTrie::new();
+        // vezes. `limpar` e não uma trie nova, para os tetos configurados
+        // sobreviverem ao recomeço.
+        trie.lock().unwrap().limpar();
 
         let mut cursor = 0u64;
         // `None` para o PRIMEIRO lote mandar retrato na hora: esperar o
@@ -368,7 +598,7 @@ fn retrato(trie: &std::sync::Mutex<KeyTrie>, total_estimate: u64, done: bool) ->
     ScanSnapshot {
         scanned: trie.keys(),
         total_estimate,
-        root: trie.level("").unwrap_or_default(),
+        root: trie.level("").map(|n| n.children).unwrap_or_default(),
         done,
     }
 }
@@ -794,6 +1024,14 @@ mod tests {
         saida
     }
 
+    fn alvo(host: &Host) -> Alvo<'_> {
+        Alvo {
+            host,
+            pw: None,
+            db: host.db,
+        }
+    }
+
     fn trie_de(chaves: &[&str]) -> KeyTrie {
         let mut trie = KeyTrie::new();
         for chave in chaves {
@@ -805,6 +1043,7 @@ mod tests {
     fn rotulos(trie: &KeyTrie, prefixo: &str) -> Vec<String> {
         trie.level(prefixo)
             .expect("nível existe")
+            .children
             .into_iter()
             .map(|b| b.label)
             .collect()
@@ -819,7 +1058,7 @@ mod tests {
             "sessao:token:x",
         ]);
 
-        let raiz = trie.level("").unwrap();
+        let raiz = trie.level("").unwrap().children;
         let api = raiz.iter().find(|b| b.label == "catalogo").unwrap();
         assert_eq!(api.count, 3);
         assert_eq!(api.full_prefix, "catalogo:");
@@ -827,7 +1066,7 @@ mod tests {
         // Abrir um galho é consulta em memória, não varredura nova.
         assert_eq!(rotulos(&trie, "catalogo:"), vec!["events", "fixtures"]);
         assert_eq!(
-            trie.level("catalogo:precos:").unwrap().len(),
+            trie.level("catalogo:precos:").unwrap().children.len(),
             2,
             "e desce quantos níveis a chave tiver"
         );
@@ -836,7 +1075,7 @@ mod tests {
     #[test]
     fn uma_chave_sozinha_vira_folha_com_o_nome_inteiro() {
         let trie = trie_de(&["a:b:c"]);
-        let folha = &trie.level("a:b:").unwrap()[0];
+        let folha = &trie.level("a:b:").unwrap().children[0];
         assert_eq!(folha.label, "c");
         assert_eq!(folha.leaf_key.as_deref(), Some("a:b:c"));
     }
@@ -846,11 +1085,11 @@ mod tests {
         // `a:b` é chave E caminho para `a:b:c`. Nenhuma das duas pode sumir.
         let trie = trie_de(&["a:b", "a:b:c"]);
 
-        let b = &trie.level("a:").unwrap()[0];
+        let b = &trie.level("a:").unwrap().children[0];
         assert_eq!(b.label, "b");
         assert_eq!(b.leaf_key, None, "tem filhos, então é galho");
 
-        let dentro = trie.level("a:b:").unwrap();
+        let dentro = trie.level("a:b:").unwrap().children;
         let chaves: Vec<Option<&str>> = dentro.iter().map(|x| x.leaf_key.as_deref()).collect();
         assert!(
             chaves.contains(&Some("a:b")),
@@ -860,26 +1099,104 @@ mod tests {
     }
 
     #[test]
-    fn o_orcamento_de_nos_para_de_crescer_e_a_contagem_continua_certa() {
-        // Um identificador distinto por chave: sem teto, a trie viraria a
-        // lista de chaves inteira.
-        let mut trie = KeyTrie::com_orcamento(50);
-        for i in 0..500 {
-            trie.inserir(&format!("pedido:{i}:item"));
+    fn um_nivel_cheio_demais_e_cortado_e_diz_que_foi() {
+        // O caso real: `pedido:tokens:` com mil UUIDs.
+        // Mostrar vinte e marcar 1.078 ao lado, calado, faz o número
+        // parecer errado quando na verdade a LISTA é que está incompleta.
+        let mut trie = KeyTrie::new();
+        for i in 0..(MAX_CHILDREN + 500) {
+            trie.inserir(&format!("tokens:{i}"));
         }
 
+        let nivel = trie.level("tokens:").unwrap();
         assert!(
-            trie.budget_exhausted(),
-            "a tela precisa saber que faltou espaço"
+            nivel.truncated,
+            "a tela precisa saber que a lista foi cortada"
         );
-        assert!(
-            trie.level("").unwrap()[0].count == 500,
-            "a contagem segue verdadeira"
-        );
-        assert!(
-            trie.level("pedido:").unwrap().len() < 500,
-            "mas a lista de filhos não cresceu sem limite"
-        );
+        assert_eq!(nivel.children.len(), MAX_CHILDREN);
+
+        // E a contagem continua verdadeira: ela conta CHAVES, não a lista.
+        let raiz = trie.level("").unwrap().children;
+        assert_eq!(raiz[0].count, (MAX_CHILDREN + 500) as u64);
+    }
+
+    #[test]
+    fn um_nivel_dentro_do_teto_lista_tudo() {
+        // Mil e setenta e oito cabem: nada de corte onde não precisa.
+        let mut trie = KeyTrie::new();
+        for i in 0..1_200 {
+            trie.inserir(&format!("tokens:{i}"));
+        }
+
+        let nivel = trie.level("tokens:").unwrap();
+        assert!(!nivel.truncated);
+        assert_eq!(nivel.children.len(), 1_200);
+    }
+
+    #[tokio::test]
+    async fn a_varredura_de_um_galho_escapa_curingas_do_nome() {
+        // `*`, `?` e `[` são curingas do MATCH. Sem escapá-los, o galho
+        // `a*b:` traria chaves de `axxb:` como se fossem dele.
+        let chaves = ["glob_rs_test:a*b:dentro", "glob_rs_test:axxb:fora"];
+        com_chaves(&chaves, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let trie = std::sync::Mutex::new(KeyTrie::new());
+            scan_trie(&pool, &host, None, host.db, &trie, |_| {})
+                .await
+                .unwrap();
+
+            expand_branch(&pool, alvo(&host), &trie, "glob_rs_test:a*b:", 50, |_| {})
+                .await
+                .unwrap();
+
+            let nivel = trie.lock().unwrap().level("glob_rs_test:a*b:").unwrap();
+            let rotulos: Vec<&str> = nivel.children.iter().map(|b| b.label.as_str()).collect();
+            assert_eq!(rotulos, vec!["dentro"], "o `*` foi tratado como curinga");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn um_galho_cortado_pode_ser_carregado_em_partes() {
+        // Nenhum dado pode ficar inalcançável: um nível que não coube de
+        // primeira é varrido de novo, só ele, e ganha os filhos que faltam.
+        let chaves: Vec<String> = (0..12).map(|i| format!("pag_rs_test:t{i:02}")).collect();
+        let refs: Vec<&str> = chaves.iter().map(|s| s.as_str()).collect();
+
+        com_chaves(&refs, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let trie = std::sync::Mutex::new(KeyTrie::com_teto_de_filhos(4));
+            scan_trie(&pool, &host, None, host.db, &trie, |_| {})
+                .await
+                .unwrap();
+
+            let primeiro = trie.lock().unwrap().level("pag_rs_test:").unwrap();
+            assert_eq!(primeiro.children.len(), 4);
+            assert!(primeiro.truncated);
+
+            // Pede mais: o galho é varrido de novo e a lista cresce.
+            expand_branch(&pool, alvo(&host), &trie, "pag_rs_test:", 8, |_| {})
+                .await
+                .unwrap();
+            let segundo = trie.lock().unwrap().level("pag_rs_test:").unwrap();
+            assert_eq!(segundo.children.len(), 8);
+            assert!(segundo.truncated, "ainda faltam quatro");
+
+            // Até acabar — e aí o aviso some.
+            expand_branch(&pool, alvo(&host), &trie, "pag_rs_test:", 50, |_| {})
+                .await
+                .unwrap();
+            let terceiro = trie.lock().unwrap().level("pag_rs_test:").unwrap();
+            assert_eq!(terceiro.children.len(), 12);
+            assert!(!terceiro.truncated, "tudo à vista, nada a avisar");
+            assert!(
+                terceiro.children.iter().all(|b| b.leaf_key.is_some()),
+                "e cada um continua sendo a chave que é"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]
@@ -905,11 +1222,11 @@ mod tests {
 
             // Uma varredura só constrói a árvore inteira: abrir qualquer
             // galho daqui em diante é consulta em memória.
-            let api = trie.level("passo_rs_test:api:").unwrap();
+            let api = trie.level("passo_rs_test:api:").unwrap().children;
             let fixtures = api.iter().find(|b| b.label == "fixtures").unwrap();
             assert_eq!(fixtures.count, 2);
             assert_eq!(
-                trie.level("passo_rs_test:auth:").unwrap()[0]
+                trie.level("passo_rs_test:auth:").unwrap().children[0]
                     .leaf_key
                     .as_deref(),
                 Some("passo_rs_test:auth:token")

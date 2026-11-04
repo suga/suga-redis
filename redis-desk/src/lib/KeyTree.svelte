@@ -13,7 +13,7 @@
 	 */
 	import { untrack } from "svelte";
 	import { SvelteMap, SvelteSet } from "svelte/reactivity";
-	import { errorMessage, treeLevel, type Branch } from "$lib/api";
+	import { errorMessage, loadMoreChildren, treeLevel, type Branch } from "$lib/api";
 	import { numero } from "$lib/formato";
 
 	interface Props {
@@ -51,7 +51,7 @@
 	/** O que se sabe de cada prefixo já pedido. */
 	type Estado =
 		| { situacao: "carregando" }
-		| { situacao: "pronto"; filhos: Branch[] }
+		| { situacao: "pronto"; filhos: Branch[]; cortado: boolean }
 		| { situacao: "ainda-nao" }
 		| { situacao: "erro"; mensagem: string };
 
@@ -73,10 +73,12 @@
 			niveis.set(prefixo, { situacao: "carregando" });
 		}
 		try {
-			const filhos = await treeLevel(hostId, db, prefixo);
+			const nivel = await treeLevel(hostId, db, prefixo);
 			niveis.set(
 				prefixo,
-				filhos === null ? { situacao: "ainda-nao" } : { situacao: "pronto", filhos },
+				nivel === null
+					? { situacao: "ainda-nao" }
+					: { situacao: "pronto", filhos: nivel.children, cortado: nivel.truncated },
 			);
 		} catch (err) {
 			// O erro fica NO GALHO: uma falha ao abrir um prefixo não pode
@@ -154,6 +156,32 @@
 		}
 	}
 
+	/** Prefixos cuja próxima leva está sendo buscada. */
+	let buscandoMais = new SvelteSet<string>();
+
+	/**
+	 * Traz a próxima leva de filhos de um galho cortado.
+	 *
+	 * Nenhum dado fica inalcançável: o nível que não coube de primeira é
+	 * varrido de novo, só ele, e a lista cresce até acabar.
+	 */
+	async function carregarMais(prefixo: string) {
+		if (buscandoMais.has(prefixo)) return;
+		buscandoMais.add(prefixo);
+		try {
+			const nivel = await loadMoreChildren(hostId, db, prefixo);
+			niveis.set(prefixo, {
+				situacao: "pronto",
+				filhos: nivel.children,
+				cortado: nivel.truncated,
+			});
+		} catch (err) {
+			niveis.set(prefixo, { situacao: "erro", mensagem: errorMessage(err) });
+		} finally {
+			buscandoMais.delete(prefixo);
+		}
+	}
+
 	interface Linha {
 		tipo: "galho" | "aviso";
 		branch?: Branch;
@@ -161,7 +189,9 @@
 		aberto: boolean;
 		/** Para as linhas de aviso: o texto e o papel na tela. */
 		texto?: string;
-		papel?: "carregando" | "erro" | "ainda-nao" | "vazio";
+		papel?: "carregando" | "erro" | "ainda-nao" | "vazio" | "cortado";
+		/** Para a linha de "cortado": o prefixo a pedir mais. */
+		prefixo?: string;
 	}
 
 	let alvo = $derived(filter.trim().toLowerCase());
@@ -200,6 +230,18 @@
 			const aberto = abertos.has(branch.full_prefix);
 			out.push({ tipo: "galho", branch, depth, aberto });
 			if (aberto) achatar(branch.full_prefix, depth + 1, out);
+		}
+
+		const estadoAtual = prefixo === "" ? null : niveis.get(prefixo);
+		if (estadoAtual?.situacao === "pronto" && estadoAtual.cortado) {
+			out.push({
+				tipo: "aviso",
+				depth,
+				aberto: false,
+				texto: `Mostrando ${numero(estadoAtual.filhos.length)} deste nível`,
+				papel: "cortado",
+				prefixo,
+			});
 		}
 
 		if (alvo && visiveis.length === 0) {
@@ -272,6 +314,22 @@
 								<span class="contagem mono">{numero(branch.count)}</span>
 							{/if}
 						</button>
+					{:else if linha.papel === "cortado" && linha.prefixo}
+						{@const alvoPrefixo = linha.prefixo}
+						<div
+							class="linha aviso aviso--cortado"
+							style="padding-left: {0.5 + linha.depth * 0.85}rem"
+							data-testid="cortado-nivel"
+						>
+							<span class="rotulo">{linha.texto}</span>
+							<button
+								class="mais"
+								disabled={buscandoMais.has(alvoPrefixo)}
+								onclick={() => carregarMais(alvoPrefixo)}
+							>
+								{buscandoMais.has(alvoPrefixo) ? "Carregando…" : "Carregar mais"}
+							</button>
+						</div>
 					{:else}
 						<p
 							class="linha aviso aviso--{linha.papel}"
@@ -364,7 +422,17 @@
 		color: #e49a94;
 	}
 
-	.aviso--ainda-nao {
+	.aviso--ainda-nao,
+	.aviso--cortado {
 		color: var(--action);
+	}
+
+	.mais {
+		margin-left: auto;
+		padding: 0 0.45rem;
+		font-size: 0.82rem;
+		color: var(--action);
+		border-color: var(--rule-strong);
+		flex: none;
 	}
 </style>

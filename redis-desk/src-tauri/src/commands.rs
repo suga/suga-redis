@@ -30,7 +30,9 @@ use crate::core::config::{ConfigError, Env, Host, HostStore};
 use crate::core::conn::{ConnError, Pool};
 use crate::core::history::{Actor, History, HistoryEntry, HistoryError};
 use crate::core::index::{Index, IndexError, ScanProgress, ScanReport};
-use crate::core::keys::{Branch, KeyTrie, ScanSnapshot, scan_trie};
+use crate::core::keys::{
+    Alvo, KeyTrie, Level, MAX_CHILDREN, ScanSnapshot, expand_branch, scan_trie,
+};
 use crate::core::search::{SearchOutcome, search as search_index};
 use crate::core::value::{
     ValueLimit, ValueView, WriteOp, op_summary, read_value as read_value_from_redis,
@@ -60,6 +62,9 @@ pub const RESCAN_PROGRESS_EVENT: &str = "rescan://progress";
 
 /// Retratos da varredura da árvore, enquanto ela corre.
 pub const TREE_PROGRESS_EVENT: &str = "tree://progress";
+
+/// Andamento da varredura de um galho só (`load_more_children`).
+pub const BRANCH_PROGRESS_EVENT: &str = "branch://progress";
 
 /// Erro de qualquer comando. Existe para dar à interface um DISCRIMINANTE
 /// estável (`kind`) ao lado da frase em português (`message`): a tela
@@ -270,12 +275,63 @@ pub async fn scan_tree(
     Ok(())
 }
 
+/// Carrega mais filhos de um galho cuja lista saiu incompleta.
+///
+/// Varre de novo só aquele prefixo e acrescenta outra leva à lista. É a
+/// resposta para "o nível tem milhões de nomes": em vez de esconder o que
+/// não coube, a pessoa pede mais e recebe mais, com as contagens certas.
+///
+/// Cara de propósito — o servidor percorre o espaço de chaves inteiro
+/// mesmo com `MATCH` —, por isso só acontece quando pedida.
+pub async fn load_more_children(
+    state: &AppState,
+    host_id: &str,
+    db: u8,
+    prefix: &str,
+    progress: impl Fn(crate::core::keys::ScanTick),
+) -> Result<Level> {
+    let (host, pw) = state.host_and_password(host_id)?;
+
+    let trie = state
+        .trees
+        .lock()
+        .unwrap()
+        .get(&(host_id.to_string(), db))
+        .cloned()
+        .ok_or_else(|| CommandError::UnknownHost(host_id.to_string()))?;
+
+    // Quantos já estão à vista, mais uma leva.
+    let atual = trie
+        .lock()
+        .unwrap()
+        .level(prefix)
+        .map(|n| n.children.len())
+        .unwrap_or(0);
+
+    expand_branch(
+        &state.pool,
+        Alvo {
+            host: &host,
+            pw: pw.as_deref(),
+            db,
+        },
+        &trie,
+        prefix,
+        atual + MAX_CHILDREN,
+        progress,
+    )
+    .await?;
+
+    let nivel = trie.lock().unwrap().level(prefix);
+    nivel.ok_or_else(|| CommandError::UnknownHost(prefix.to_string()))
+}
+
 /// Os filhos de um prefixo, lidos da árvore em memória.
 ///
 /// `None` quando este (host, banco) ainda não começou a ser varrido, ou
 /// quando a varredura ainda não chegou neste prefixo. Nunca vai ao
 /// servidor: é essa consulta em memória que torna abrir um galho imediato.
-pub fn tree_level(state: &AppState, host_id: &str, db: u8, prefix: &str) -> Option<Vec<Branch>> {
+pub fn tree_level(state: &AppState, host_id: &str, db: u8, prefix: &str) -> Option<Level> {
     // A trava do mapa é solta antes da trava da árvore, para a varredura —
     // que escreve na árvore a cada lote — não ficar presa atrás desta
     // leitura.
@@ -519,12 +575,26 @@ pub async fn cmd_scan_tree(
 }
 
 #[tauri::command]
+pub async fn cmd_load_more_children(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    host_id: String,
+    db: u8,
+    prefix: String,
+) -> Result<Level> {
+    load_more_children(&state, &host_id, db, &prefix, move |tick| {
+        let _ = app.emit(BRANCH_PROGRESS_EVENT, tick);
+    })
+    .await
+}
+
+#[tauri::command]
 pub fn cmd_tree_level(
     state: tauri::State<'_, AppState>,
     host_id: String,
     db: u8,
     prefix: String,
-) -> Option<Vec<Branch>> {
+) -> Option<Level> {
     tree_level(&state, &host_id, db, &prefix)
 }
 
@@ -732,7 +802,6 @@ fn vigiar_pedidos(app: tauri::AppHandle) {
 mod tests {
     use super::*;
     use crate::core::config::{Env, Host};
-    use crate::core::keys::Branch;
     use crate::core::value::{Bytes, WriteOp};
     use redis::aio::MultiplexedConnection;
 
@@ -810,7 +879,8 @@ mod tests {
         // Durante a varredura (retrato com `done: false`), abrir um galho
         // já precisa responder — é a promessa inteira deste desenho: ver e
         // explorar sem esperar o banco acabar de ser lido.
-        let durante: std::sync::Mutex<Option<Vec<Branch>>> = std::sync::Mutex::new(None);
+        let durante: std::sync::Mutex<Option<crate::core::keys::Level>> =
+            std::sync::Mutex::new(None);
         scan_tree(&state, &host_id, TEST_DB, |retrato| {
             if !retrato.done && durante.lock().unwrap().is_none() {
                 *durante.lock().unwrap() = tree_level(&state, &host_id, TEST_DB, "");
@@ -828,9 +898,9 @@ mod tests {
             .unwrap()
             .expect("o nível já tinha que responder no meio da varredura");
         assert!(
-            raiz.iter().any(|b| b.label == "andamento_rs_test"),
+            raiz.children.iter().any(|b| b.label == "andamento_rs_test"),
             "veio {:?}",
-            raiz.iter().map(|b| &b.label).collect::<Vec<_>>()
+            raiz.children.iter().map(|b| &b.label).collect::<Vec<_>>()
         );
     }
 

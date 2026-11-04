@@ -67,6 +67,13 @@ export interface Branch {
 	leaf_key: string | null;
 }
 
+/** Um nível da árvore: os filhos e se a lista saiu inteira. */
+export interface Level {
+	children: Branch[];
+	/** Há mais filhos distintos aqui do que o teto permite guardar. */
+	truncated: boolean;
+}
+
 /** Um retrato da varredura em andamento. */
 export interface ScanSnapshot {
 	scanned: number;
@@ -321,8 +328,22 @@ export function treeLevel(
 	hostId: string,
 	db: number,
 	prefix: string,
-): Promise<Branch[] | null> {
+): Promise<Level | null> {
 	return invoke("cmd_tree_level", { hostId, db, prefix });
+}
+
+/**
+ * Carrega mais filhos de um galho cuja lista saiu incompleta.
+ *
+ * Varre de novo só aquele prefixo — caro, porque o servidor percorre o
+ * espaço de chaves inteiro mesmo com `MATCH`. Por isso só quando pedido.
+ */
+export function loadMoreChildren(
+	hostId: string,
+	db: number,
+	prefix: string,
+): Promise<Level> {
+	return invoke("cmd_load_more_children", { hostId, db, prefix });
 }
 
 /** Acompanha a varredura que monta a árvore. Chame o retorno para parar. */

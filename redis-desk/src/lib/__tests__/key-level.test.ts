@@ -4,14 +4,15 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("$lib/api", async (importOriginal) => {
 	const real = await importOriginal<typeof import("$lib/api")>();
-	return { ...real, treeLevel: vi.fn() };
+	return { ...real, treeLevel: vi.fn(), loadMoreChildren: vi.fn() };
 });
 
-import { treeLevel } from "$lib/api";
+import { loadMoreChildren, treeLevel } from "$lib/api";
 import KeyTree from "$lib/KeyTree.svelte";
 import type { Branch } from "$lib/api";
 
 const nivel = vi.mocked(treeLevel);
+const mais = vi.mocked(loadMoreChildren);
 
 function galho(label: string, prefixoPai: string, count: number): Branch {
 	return { label, full_prefix: `${prefixoPai}${label}:`, count, leaf_key: null };
@@ -27,8 +28,12 @@ function folha(label: string, prefixoPai: string): Branch {
 }
 
 /** Cada prefixo responde com os seus filhos, como a trie em memória faria. */
-function arvore(mapa: Record<string, Branch[]>) {
-	nivel.mockImplementation(async (_h, _db, prefix) => mapa[prefix] ?? null);
+function arvore(mapa: Record<string, Branch[]>, cortados: string[] = []) {
+	nivel.mockImplementation(async (_h, _db, prefix) =>
+		mapa[prefix]
+			? { children: mapa[prefix], truncated: cortados.includes(prefix) }
+			: null,
+	);
 }
 
 const RAIZ: Branch[] = [galho("catalogo", "", 24), galho("scheduler", "", 3_479_578)];
@@ -120,9 +125,13 @@ test("galho aberto acompanha a varredura em vez de congelar no que viu", async (
 	// Foi assim na tela: `fixtures` foi aberto quando tinha 1 chave; a
 	// varredura seguiu até 11, a contagem subiu, mas a lista continuou com 1.
 	let filhos = [folha("id=1", "catalogo:precos:")];
-	nivel.mockImplementation(async (_h, _db, prefix) =>
-		prefix === "catalogo:" ? [galho("fixtures", "catalogo:", filhos.length)] : filhos,
-	);
+	nivel.mockImplementation(async (_h, _db, prefix) => ({
+		children:
+			prefix === "catalogo:"
+				? [galho("fixtures", "catalogo:", filhos.length)]
+				: filhos,
+		truncated: false,
+	}));
 
 	const { rerender } = render(KeyTree, {
 		props: {
@@ -181,4 +190,40 @@ test("um galho de um filho só não obriga a abrir degrau por degrau", async () 
 	expect(await screen.findByRole("button", { name: /88123/ })).toBeInTheDocument();
 	expect(await screen.findByRole("button", { name: /77/ })).toBeInTheDocument();
 	expect(await screen.findByRole("button", { name: /MarcaA/ })).toBeInTheDocument();
+});
+
+test("nível cortado diz quantos está mostrando, em vez de só parecer errado", async () => {
+	const user = userEvent.setup();
+	const muitos = Array.from({ length: 20 }, (_, i) => folha(`t${i}`, "pedido:"));
+	arvore({ "pedido:": muitos }, ["pedido:"]);
+
+	render(KeyTree, {
+		props: {
+			hostId: "h1",
+			db: 0,
+			root: [galho("pedido", "", 1_200)],
+			version: 0,
+			selectedKey: null,
+			onSelect: vi.fn(),
+			filter: "",
+		},
+	});
+
+	await user.click(screen.getByRole("button", { name: /pedido/ }));
+	const aviso = await screen.findByTestId("cortado-nivel");
+	expect(aviso).toHaveTextContent("Mostrando 20");
+
+	// E o que falta é alcançável: um clique traz a próxima leva.
+	mais.mockResolvedValue({
+		children: Array.from({ length: 45 }, (_, i) => folha(`t${i}`, "pedido:")),
+		truncated: false,
+	});
+	await user.click(within(aviso).getByRole("button", { name: "Carregar mais" }));
+
+	expect(mais).toHaveBeenCalledWith("h1", 0, "pedido:");
+	await waitFor(() =>
+		expect(screen.getByRole("button", { name: /t44/ })).toBeInTheDocument(),
+	);
+	// Chegou ao fim: nada mais a avisar.
+	expect(screen.queryByTestId("cortado-nivel")).not.toBeInTheDocument();
 });
