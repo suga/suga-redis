@@ -105,29 +105,35 @@ test("valor JSON abre colorido, com cada tipo em sua cor", async () => {
 	}
 });
 
-test("o alternador colorido/edição vem antes do conteúdo, não depois dele", async () => {
+test("dá para editar com as cores ligadas, no mesmo campo", async () => {
 	const user = userEvent.setup();
 	montar(view({ value: { kind: "string", data: texto(JSON_VALIDO) } }));
 
-	const alternador = screen.getByTestId("modo-valor");
-	// Um valor de 48 kB rola muito: um botão depois do conteúdo exige
-	// percorrer tudo para ser encontrado. O alternador precisa vir antes.
-	const posicao = alternador.compareDocumentPosition(screen.getByTestId("json-realce"));
-	expect(posicao & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+	// Um campo só: o texto é editável E colorido ao mesmo tempo.
+	const campo = screen.getByLabelText("Valor");
+	const realce = screen.getByTestId("json-realce");
+	expect(campo.tagName).toBe("TEXTAREA");
 
-	await user.click(within(alternador).getByRole("button", { name: "Editar" }));
-	expect(screen.getByLabelText("Valor")).toBeInTheDocument();
+	await user.clear(campo);
+	await user.type(campo, '{{"ativo": false}}');
 
-	// E dá para voltar, pelo mesmo lugar.
-	await user.click(within(alternador).getByRole("button", { name: "Colorido" }));
-	expect(screen.getByTestId("json-realce")).toBeInTheDocument();
+	// A camada de cor acompanha o que foi digitado agora.
+	expect(realce).toHaveTextContent('"ativo"');
+	const papeis = [...realce.querySelectorAll("span")].flatMap((s) => [...s.classList]);
+	expect(papeis).toContain("chave");
+	expect(papeis).toContain("booleano");
+});
+
+test("a camada de cor não é lida duas vezes por leitor de tela", () => {
+	montar(view({ value: { kind: "string", data: texto(JSON_VALIDO) } }));
+	// O texto já está no textarea; a camada é só pintura.
+	expect(screen.getByTestId("json-realce")).toHaveAttribute("aria-hidden", "true");
 });
 
 test("JSON quebrado mostra o erro e trava o salvar", async () => {
 	const user = userEvent.setup();
 	montar(view({ value: { kind: "string", data: texto(JSON_VALIDO) } }));
 
-	await user.click(screen.getByRole("button", { name: "Editar" }));
 	const campo = screen.getByLabelText("Valor");
 	await user.clear(campo);
 	await user.type(campo, '{{"email": "ana",}}');
@@ -185,4 +191,40 @@ test("o validador acha a posição em vários jeitos de quebrar", () => {
 	// e não reclama do que está certo
 	expect(validarJson('{"a": [1, 2.5e3, true, null], "b": {"c": "d"}}')).toBeNull();
 	expect(validarJson("nao e json")).toBeNull();
+});
+
+// ------------------------------ valor cortado: o risco de perder dado
+
+test("valor cortado não deixa salvar, e explica por quê", async () => {
+	const user = userEvent.setup();
+	// 112 kB no servidor, 64 kB na tela: foi o caso real que revelou isto.
+	montar(
+		view({
+			value: { kind: "string", data: texto("so os primeiros bytes") },
+			total_elements: 114_800,
+			truncated: true,
+		}),
+	);
+
+	const campo = screen.getByLabelText("Valor");
+	await user.type(campo, " mexido");
+
+	// Salvar aqui gravaria o pedaço por cima do valor inteiro.
+	expect(screen.getByRole("button", { name: "Salvar" })).toBeDisabled();
+	expect(screen.getByTestId("cortado")).toHaveTextContent(/carregar o valor inteiro/i);
+	expect(escrito).not.toHaveBeenCalled();
+});
+
+test("valor cortado não é acusado de JSON inválido", () => {
+	// O começo de um JSON grande nunca fecha; acusar sintaxe aqui seria
+	// culpar o conteúdo por um corte que foi nosso.
+	montar(
+		view({
+			value: { kind: "string", data: texto('{"a": 1, "b": "come') },
+			total_elements: 114_800,
+			truncated: true,
+		}),
+	);
+
+	expect(screen.queryByTestId("json-erro")).not.toBeInTheDocument();
 });

@@ -212,3 +212,40 @@ test("ttl aparece em contagem regressiva e some quando a chave não expira", asy
 	await vi.waitFor(() => expect(screen.getByTestId("kind")).toBeInTheDocument());
 	expect(screen.queryByTestId("ttl")).not.toBeInTheDocument();
 });
+
+test("carregar mais emenda as páginas de uma string, em vez de reler o começo", async () => {
+	const user = userEvent.setup();
+	// Um valor de 30 bytes que chega em duas páginas de 15.
+	const comeco = "AAAAAAAAAAAAAAA";
+	const fim = "BBBBBBBBBBBBBBB";
+	lidos.mockResolvedValue(
+		view({
+			key: "grande:valor",
+			kind: "string",
+			value: { kind: "string", data: texto(comeco) },
+			total_elements: 30,
+			truncated: true,
+		}),
+	);
+	maisLidos.mockResolvedValue(
+		view({
+			key: "grande:valor",
+			kind: "string",
+			value: { kind: "string", data: texto(fim) },
+			total_elements: 30,
+			truncated: false,
+		}),
+	);
+
+	render(ValuePanel, { props: { hostId: "h1", db: 0, keyName: "grande:valor" } });
+
+	expect(await screen.findByTestId("truncado")).toHaveTextContent("Mostrando 15 de 30");
+	await user.click(screen.getByRole("button", { name: "Carregar mais" }));
+
+	// A próxima página começa onde a primeira parou, contada em BYTES.
+	expect(maisLidos).toHaveBeenCalledWith("h1", 0, "grande:valor", 15);
+	// E o painel passa a mostrar o valor inteiro, não só a última fatia.
+	await waitFor(() =>
+		expect(screen.getByText(comeco + fim, { exact: false })).toBeInTheDocument(),
+	);
+});

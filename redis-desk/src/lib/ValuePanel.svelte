@@ -16,6 +16,7 @@
 		isEditable,
 		readValue,
 		readValueMore,
+		type Bytes,
 		type Value,
 		type ValueView,
 	} from "$lib/api";
@@ -37,24 +38,49 @@
 	let carregandoMais = $state(false);
 	let erro = $state("");
 
-	/** Quantos elementos do valor já estão na tela. */
+	/**
+	 * Quanto do valor já está na tela, na unidade em que o backend conta.
+	 *
+	 * Para uma coleção são elementos. Para uma string são BYTES — é o que o
+	 * `total_elements` dela traz (o `STRLEN`), e é o que o backend espera de
+	 * volta como `offset` ao pedir a página seguinte. Contar "1" aqui, como
+	 * se a string fosse um elemento só, fazia o pedido seguinte voltar para
+	 * o byte 1 e reler sempre o mesmo começo: um valor de 112 kB nunca
+	 * passava dos primeiros 64 kB.
+	 */
 	function contar(value: Value): number {
 		switch (value.kind) {
 			case "string":
+				return bytesDe(value.data.text ?? "");
 			case "read_only_text":
-				return 1;
+				return bytesDe(value.data);
 			default:
 				return value.data.length;
 		}
+	}
+
+	/** Tamanho em bytes de UTF-8 — não em unidades UTF-16, como `length`. */
+	function bytesDe(texto: string): number {
+		return new TextEncoder().encode(texto).length;
 	}
 
 	/** Emenda a fatia nova no fim da que já está na tela, do mesmo tipo. */
 	function emendar(atual: Value, novo: Value): Value {
 		if (atual.kind !== novo.kind) return novo;
 		switch (atual.kind) {
+			// Uma string grande chega em pedaços e precisa ser COLADA. Trocar
+			// pelo pedaço novo deixaria na tela só o fim do valor — e salvar
+			// a partir dali apagaria tudo que veio antes.
 			case "string":
+				return {
+					kind: "string",
+					data: {
+						...(novo.data as Bytes),
+						text: (atual.data.text ?? "") + ((novo.data as Bytes).text ?? ""),
+					},
+				};
 			case "read_only_text":
-				return novo;
+				return { kind: "read_only_text", data: atual.data + (novo.data as string) };
 			default:
 				return {
 					kind: atual.kind,

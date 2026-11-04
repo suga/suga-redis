@@ -1,6 +1,25 @@
 <script lang="ts">
+	/**
+	 * Editor de valor do tipo `string`, colorido ENQUANTO se edita.
+	 *
+	 * O truque é uma sobreposição: um `<textarea>` de verdade por cima, com
+	 * o texto transparente e só o cursor visível, e por baixo um `<pre>` com
+	 * os mesmos caracteres pintados por tipo. Quem digita mexe no textarea;
+	 * quem enxerga lê a camada de baixo.
+	 *
+	 * Isso exige que as duas camadas desenhem o texto EXATAMENTE igual —
+	 * mesma fonte, tamanho, entrelinha, preenchimento, largura de borda e
+	 * regra de quebra. Qualquer diferença aparece como cursor fora do lugar,
+	 * e é por isso que essas propriedades moram numa regra só, compartilhada
+	 * pelas duas.
+	 *
+	 * A alternativa seria um editor de código de verdade (CodeMirror e
+	 * afins): algumas centenas de kilobytes para colorir quatro tipos de
+	 * token num campo.
+	 */
 	import { untrack } from "svelte";
 	import { formatarJson, pareceJson, realcarJson, validarJson } from "$lib/json";
+	import { numero } from "$lib/formato";
 	import { textBytes, type ValueView, type WriteOp } from "$lib/api";
 
 	interface Props {
@@ -11,35 +30,61 @@
 
 	let { view, onSubmit, busy = false }: Props = $props();
 
+	/**
+	 * Acima disto o texto deixa de ser colorido enquanto se edita.
+	 *
+	 * Cada tecla redesenha a camada de cor, e num valor grande demais isso
+	 * passa a ser sentido na digitação. Entre colorir e manter o campo
+	 * respondendo, o campo ganha: ler sem cor incomoda, digitar com atraso
+	 * inviabiliza.
+	 */
+	const TETO_REALCE_BYTES = 256 * 1024;
+
 	let dado = $derived(view.value.kind === "string" ? view.value.data : null);
 
 	/**
 	 * Valor que não é UTF-8 não entra num campo de texto: o que voltasse de
-	 * lá já não seriam os mesmos bytes. A chave continua legível no painel,
-	 * só não editável por aqui.
+	 * lá já não seriam os mesmos bytes.
 	 */
 	let binario = $derived(dado !== null && dado.text === null);
 
-	const inicial = untrack(() =>
-		view.value.kind === "string" ? (view.value.data.text ?? "") : "",
+	/**
+	 * O valor na tela é só um pedaço do que está no servidor.
+	 *
+	 * Enquanto for assim, salvar é PROIBIDO: gravaria o pedaço por cima do
+	 * inteiro e apagaria o resto sem aviso. Foi exatamente o que quase
+	 * aconteceu com um valor de 112 kB do qual só 64 kB tinham chegado.
+	 */
+	let cortado = $derived(view.truncated);
+
+	let texto = $state(
+		untrack(() => (view.value.kind === "string" ? (view.value.data.text ?? "") : "")),
 	);
-	let texto = $state(inicial);
 
 	/**
-	 * Um valor JSON abre para LER, colorido, porque é assim que se confere
-	 * um valor de produção; editar é um passo deliberado a partir dali. Um
-	 * valor que não é JSON abre direto no campo de texto: não há nada a
-	 * colorir, e um clique a mais só atrapalharia.
+	 * Num valor cortado a validação fica calada: o começo de um JSON grande
+	 * nunca fecha, e acusar erro de sintaxe seria culpar o conteúdo por um
+	 * corte que foi nosso.
 	 */
-	let modo = $state<"realce" | "texto">(
-		untrack(() => (pareceJson(inicial) && validarJson(inicial) === null ? "realce" : "texto")),
-	);
-
-	/** Há algo a colorir? Só então o alternador faz sentido. */
-	let ehJson = $derived(pareceJson(texto));
-	let erroJson = $derived(validarJson(texto));
-	let indentado = $derived(formatarJson(texto));
+	let erroJson = $derived(cortado ? null : validarJson(texto));
+	let indentado = $derived(cortado ? null : formatarJson(texto));
 	let mudou = $derived(texto !== (dado?.text ?? ""));
+	let colorir = $derived(pareceJson(texto) && texto.length <= TETO_REALCE_BYTES);
+
+	/**
+	 * O `\n` no fim existe para as duas camadas terminarem na mesma altura:
+	 * o textarea reserva uma linha depois da última quebra, o `<pre>` não.
+	 */
+	let tokens = $derived(colorir ? realcarJson(`${texto}\n`) : []);
+
+	let camada = $state<HTMLPreElement | null>(null);
+
+	/** A camada de baixo acompanha a rolagem da de cima. */
+	function rolar(evento: Event & { currentTarget: HTMLTextAreaElement }) {
+		if (!camada) return;
+		camada.scrollTop = evento.currentTarget.scrollTop;
+		camada.scrollLeft = evento.currentTarget.scrollLeft;
+	}
 </script>
 
 {#if binario}
@@ -49,46 +94,45 @@
 	</p>
 {:else}
 	<div class="editor">
-		{#if ehJson}
-			<!-- Sempre no TOPO e nos dois modos: um valor de dezenas de
-			     kilobytes rola muito, e um botão depois do conteúdo só é
-			     achado por quem já percorreu tudo. -->
-			<div class="modo" data-testid="modo-valor" role="group" aria-label="Como ver o valor">
-				<button
-					type="button"
-					class:ativo={modo === "realce"}
-					aria-pressed={modo === "realce"}
-					onclick={() => (modo = "realce")}
-				>
-					Colorido
-				</button>
-				<button
-					type="button"
-					class:ativo={modo === "texto"}
-					aria-pressed={modo === "texto"}
-					onclick={() => (modo = "texto")}
-				>
-					Editar
-				</button>
-			</div>
-		{/if}
+		<label for="valor-chave">Valor</label>
 
-		{#if modo === "realce"}
-			<pre class="mono realce" data-testid="json-realce">{#each realcarJson(indentado ?? texto) as token}{#if token.classe}<span
-						class={token.classe}>{token.texto}</span>{:else}{token.texto}{/if}{/each}</pre>
-		{:else}
-			<label>
-				<span>Valor</span>
-				<textarea bind:value={texto} spellcheck="false" rows="18" class="mono"></textarea>
-			</label>
-
-			{#if erroJson}
-				<p class="erro-json" role="alert" data-testid="json-erro">{erroJson}</p>
+		<div class="campo" class:colorido={colorir}>
+			{#if colorir}
+				<pre
+					class="camada"
+					bind:this={camada}
+					aria-hidden="true"
+					data-testid="json-realce">{#each tokens as token}{#if token.classe}<span
+								class={token.classe}>{token.texto}</span>{:else}{token.texto}{/if}{/each}</pre>
 			{/if}
+			<textarea
+				id="valor-chave"
+				bind:value={texto}
+				onscroll={rolar}
+				spellcheck="false"
+				autocapitalize="off"
+				wrap="off"
+				rows="18"
+			></textarea>
+		</div>
+
+		{#if cortado}
+			<p class="cortado" role="alert" data-testid="cortado">
+				Mostrando só o começo deste valor ({numero(view.total_elements)} bytes no
+				total). Para editar sem perder o resto, use “Carregar mais” até carregar
+				o valor inteiro.
+			</p>
+		{:else if erroJson}
+			<p class="erro-json" role="alert" data-testid="json-erro">{erroJson}</p>
+		{:else if pareceJson(texto) && !colorir}
+			<p class="aviso">
+				Valor grande demais para colorir enquanto se digita. O conteúdo e a
+				validação continuam valendo.
+			</p>
 		{/if}
 
 		<div class="acoes">
-			{#if modo === "texto" && indentado !== null && indentado !== texto}
+			{#if indentado !== null && indentado !== texto}
 				<button type="button" onclick={() => (texto = indentado ?? texto)}>
 					Formatar JSON
 				</button>
@@ -96,7 +140,7 @@
 			<button
 				type="button"
 				class="primary"
-				disabled={busy || !mudou || erroJson !== null || modo === "realce"}
+				disabled={busy || !mudou || cortado || erroJson !== null}
 				onclick={() => onSubmit({ op: "set_string", value: textBytes(texto) })}
 			>
 				Salvar
@@ -109,62 +153,85 @@
 	.editor {
 		display: flex;
 		flex-direction: column;
-		gap: 0.6rem;
-	}
-
-	label {
-		display: flex;
-		flex-direction: column;
 		gap: 0.25rem;
 	}
 
-	label > span {
+	label {
 		color: var(--text-dim);
 		font-size: 0.9rem;
 	}
 
-	textarea,
-	.realce {
-		font-family: var(--mono);
-		font-size: 0.92em;
-		color: var(--text);
-		background: var(--panel-dark);
+	.campo {
+		position: relative;
+		display: grid;
+	}
+
+	/*
+	 * A regra compartilhada: TUDO que decide onde cada caractere cai mora
+	 * aqui, uma vez, para as duas camadas. Separar qualquer uma destas
+	 * linhas entre `.camada` e `textarea` desalinha o cursor do texto.
+	 */
+	.camada,
+	.campo textarea {
+		grid-area: 1 / 1;
+		margin: 0;
+		padding: 0.55rem 0.65rem;
 		border: 1px solid var(--rule-strong);
 		border-radius: var(--radius);
-		padding: 0.55rem 0.65rem;
-		width: 100%;
-	}
-
-	textarea {
-		resize: vertical;
-	}
-
-	.realce {
-		margin: 0;
-		max-height: 32rem;
-		overflow: auto;
+		font-family: var(--mono);
+		font-size: 0.92em;
+		line-height: 1.5;
+		tab-size: 2;
 		white-space: pre;
+		overflow: auto;
+		word-break: normal;
+		overflow-wrap: normal;
+	}
+
+	.camada {
+		background: var(--panel-dark);
+		color: var(--text);
+		pointer-events: none;
+		border-color: transparent;
+	}
+
+	.campo textarea {
+		background: transparent;
+		color: var(--text);
+		resize: vertical;
+		min-height: 12rem;
+	}
+
+	/* Com a camada de cor atrás, o texto do textarea some e fica só o
+	   cursor — e a seleção, que o navegador desenha por cima de todo jeito. */
+	.colorido textarea {
+		color: transparent;
+		caret-color: var(--text);
+	}
+
+	.colorido textarea::selection {
+		background: rgb(242 163 60 / 0.3);
 	}
 
 	/* Cada tipo com a sua cor, todas conferidas contra o fundo do painel.
 	   A chave puxa para o âmbar da ação porque é por ela que se procura. */
-	.realce .chave {
+	.camada :global(.chave) {
 		color: #f2a33c;
 	}
 
-	.realce .texto {
+	.camada :global(.texto) {
 		color: #9ecf8a;
 	}
 
-	.realce .numero {
+	.camada :global(.numero) {
 		color: #7fb6e8;
 	}
 
-	.realce .booleano {
+	.camada :global(.booleano) {
 		color: #d08fd0;
 	}
 
-	.realce .nulo {
+	.camada :global(.nulo) {
 		color: var(--text-faint);
 		font-style: italic;
 	}
@@ -173,42 +240,16 @@
 		display: flex;
 		justify-content: flex-end;
 		gap: 0.5rem;
-	}
-
-	/* Controle segmentado: os dois estados ficam à vista o tempo todo, para
-	   a pessoa saber que o outro existe sem precisar descobrir. */
-	.modo {
-		display: flex;
-		align-self: flex-start;
-		gap: 0;
-	}
-
-	.modo button {
-		font-size: 0.88rem;
-		color: var(--text-faint);
-		border-radius: 0;
-	}
-
-	.modo button:first-child {
-		border-radius: var(--radius) 0 0 var(--radius);
-	}
-
-	.modo button:last-child {
-		border-radius: 0 var(--radius) var(--radius) 0;
-		border-left-width: 0;
-	}
-
-	.modo .ativo {
-		background: var(--panel-dark);
-		color: var(--text);
-		border-color: var(--text-faint);
+		margin-top: 0.35rem;
 	}
 
 	.aviso {
 		margin: 0;
 		color: var(--text-faint);
+		font-size: 0.9rem;
 	}
 
+	.cortado,
 	.erro-json {
 		margin: 0;
 		padding: 0.4rem 0.6rem;

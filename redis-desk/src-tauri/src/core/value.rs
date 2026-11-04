@@ -215,9 +215,15 @@ async fn read_details(
 
     let (value, total_elements, shown, element_truncated) = match &kind {
         KeyKind::String => {
-            let bytes = read_string(conn, key, limit.max_bytes).await?;
+            let (bytes, entregues) = read_string(conn, key, limit.offset, limit.max_bytes).await?;
             let truncated = bytes.truncated;
-            (Value::Str(bytes), 1, 1, truncated)
+            // Numa string, a unidade de contagem é o BYTE, não o elemento:
+            // `total_elements` é o tamanho inteiro e `shown` é o pedaço
+            // entregue agora. É isso que faz `offset + shown < total` — a
+            // conta que decide se ainda falta carregar — significar a mesma
+            // coisa aqui e numa coleção.
+            let total: u64 = redis::cmd("STRLEN").arg(key).query_async(conn).await?;
+            (Value::Str(bytes), total, entregues, truncated)
         }
         KeyKind::Hash => {
             let (page, total) = read_hash(conn, key, limit).await?;
@@ -318,16 +324,24 @@ fn truncate_text(raw: &str, max_bytes: usize) -> (String, bool) {
 /// vieram (`prefix.len()`), não do tamanho do texto decodificado: os dois só
 /// coincidem quando o valor inteiro já veio (ver o comentário no branch de
 /// `Err` guardado abaixo).
+/// Lê um pedaço da string a partir de `offset`, em bytes.
+///
+/// O `offset` existe porque uma string pode ser maior que a janela de
+/// leitura: sem ele, um valor de 112 kB jamais mostraria além dos primeiros
+/// 64 kB, e quem editasse esse pedaço e salvasse gravaria o pedaço por cima
+/// do inteiro. Com ele, a tela emenda as páginas até `truncated` virar
+/// falso, e só então a edição é segura.
 async fn read_string(
     conn: &mut MultiplexedConnection,
     key: &str,
+    offset: usize,
     max_bytes: usize,
-) -> redis::RedisResult<Bytes> {
+) -> redis::RedisResult<(Bytes, usize)> {
     let fetch_len = max_bytes + UTF8_SLACK;
     let prefix: Vec<u8> = redis::cmd("GETRANGE")
         .arg(key)
-        .arg(0)
-        .arg(fetch_len as isize - 1)
+        .arg(offset)
+        .arg((offset + fetch_len) as isize - 1)
         .query_async(conn)
         .await?;
 
@@ -338,11 +352,17 @@ async fn read_string(
     let truncated = prefix.len() > max_bytes;
 
     match std::str::from_utf8(&prefix) {
-        Ok(full_text) => Ok(Bytes {
-            text: Some(char_boundary_prefix(full_text, max_bytes).to_string()),
-            base64: None,
-            truncated,
-        }),
+        Ok(full_text) => {
+            let mostrado = char_boundary_prefix(full_text, max_bytes);
+            Ok((
+                Bytes {
+                    text: Some(mostrado.to_string()),
+                    base64: None,
+                    truncated,
+                },
+                mostrado.len(),
+            ))
+        }
         Err(err) if err.valid_up_to() >= max_bytes.min(prefix.len()) => {
             // O byte inválido está só na folga de `UTF8_SLACK` além de
             // `max_bytes` (ou depois) — o valor é, na verdade, UTF-8 válido
@@ -351,21 +371,28 @@ async fn read_string(
             // será exibido.
             let valid = std::str::from_utf8(&prefix[..err.valid_up_to()])
                 .expect("prefixo já validado por from_utf8 acima");
-            Ok(Bytes {
-                text: Some(char_boundary_prefix(valid, max_bytes).to_string()),
-                base64: None,
-                truncated,
-            })
+            let mostrado = char_boundary_prefix(valid, max_bytes);
+            Ok((
+                Bytes {
+                    text: Some(mostrado.to_string()),
+                    base64: None,
+                    truncated,
+                },
+                mostrado.len(),
+            ))
         }
         Err(_) => {
             // Byte inválido dentro da região que de fato mostraríamos —
             // valor binário de verdade, não um artefato do corte.
             let limited = &prefix[..max_bytes.min(prefix.len())];
-            Ok(Bytes {
-                text: None,
-                base64: Some(BASE64.encode(limited)),
-                truncated,
-            })
+            Ok((
+                Bytes {
+                    text: None,
+                    base64: Some(BASE64.encode(limited)),
+                    truncated,
+                },
+                limited.len(),
+            ))
         }
     }
 }
@@ -1141,6 +1168,83 @@ mod tests {
             ConnError::KeyGone(ref name) => assert_eq!(name, key),
             other => panic!("esperava ConnError::KeyGone, veio {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_huge_string_can_be_read_whole_page_by_page() {
+        // O caso que motivou isto: um valor de 112 kB em produção, do qual
+        // só os primeiros 64 kB chegavam — e nenhuma página seguinte, por
+        // mais que se pedisse. Editar e salvar aquilo gravaria o pedaço por
+        // cima do inteiro.
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "value_rs_test:string_em_paginas";
+
+        // Padrão não repetitivo, para um erro de deslocamento aparecer como
+        // conteúdo errado em vez de passar despercebido.
+        let inteiro: String = (0..40_000)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg(&inteiro)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        const PAGINA: usize = 10_000;
+        let mut montado = String::new();
+        let mut total_informado: Option<u64> = None;
+        loop {
+            let view = read_value(
+                &pool,
+                &host,
+                None,
+                host.db,
+                key,
+                ValueLimit {
+                    offset: montado.len(),
+                    max_bytes: PAGINA,
+                    max_elements: 10,
+                },
+            )
+            .await
+            .unwrap();
+
+            let Value::Str(bytes) = &view.value else {
+                panic!("esperava uma string, veio {:?}", view.value)
+            };
+            // O tamanho total não pode variar entre as páginas.
+            assert_eq!(
+                *total_informado.get_or_insert(view.total_elements),
+                view.total_elements
+            );
+            montado.push_str(bytes.text.as_deref().expect("texto UTF-8"));
+
+            if !view.truncated {
+                break;
+            }
+            assert!(
+                montado.len() <= inteiro.len(),
+                "as páginas não podem passar do valor"
+            );
+        }
+
+        let _: () = redis::cmd("DEL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            montado, inteiro,
+            "as páginas emendadas têm que dar o valor original"
+        );
+        assert_eq!(
+            total_informado,
+            Some(inteiro.len() as u64),
+            "e o total informado precisa ser o tamanho em bytes, para a tela saber quanto falta"
+        );
     }
 
     #[tokio::test]
