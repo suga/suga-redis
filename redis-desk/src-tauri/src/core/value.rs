@@ -1563,6 +1563,59 @@ mod write_tests {
     }
 
     #[tokio::test]
+    async fn set_string_preserves_ttl_even_though_set_drops_it_natively() {
+        // `editing_a_key_preserves_its_ttl` acima usa `SetHashField`, mas
+        // `HSET` nunca derruba o TTL por conta própria — esse teste passaria
+        // mesmo sem nenhuma lógica de preservação. O risco real que o
+        // módulo existe para evitar é outro: `SET` (`WriteOp::SetString`)
+        // substitui a chave inteira e, sem `KEEPTTL`, apaga o TTL existente
+        // por padrão no próprio Redis. Este teste exercita exatamente esse
+        // caminho.
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "value_rs_write_test:set_string_preserves_ttl";
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("valor-antigo")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let _: () = redis::cmd("EXPIRE")
+            .arg(key)
+            .arg(100)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let result = apply_write(
+            &pool,
+            &host,
+            None,
+            host.db,
+            key,
+            &WriteOp::SetString {
+                value: text("valor-novo"),
+            },
+        )
+        .await;
+
+        let pttl: i64 = redis::cmd("PTTL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        result.unwrap();
+        assert!(
+            pttl > 90_000 && pttl <= 100_000,
+            "esperava PTTL perto de 100s (100000ms) preservado mesmo após SET, veio {pttl}ms"
+        );
+    }
+
+    #[tokio::test]
     async fn set_ttl_none_makes_the_key_persistent() {
         let pool = Pool::new();
         let host = test_host();
