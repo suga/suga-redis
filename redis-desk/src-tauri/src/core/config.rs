@@ -185,7 +185,9 @@ impl HostStore {
     fn ensure_entry(&self, id: &str) -> Result<()> {
         if !self.keyring_entries.borrow().contains_key(id) {
             let entry = keyring::Entry::new(KEYRING_SERVICE, id)?;
-            self.keyring_entries.borrow_mut().insert(id.to_string(), entry);
+            self.keyring_entries
+                .borrow_mut()
+                .insert(id.to_string(), entry);
         }
         Ok(())
     }

@@ -114,6 +114,18 @@ pub enum HistoryError {
     ExpiredBeforeRollback { key: String },
 }
 
+/// Mapeia o erro da abertura compartilhada (`core::sqlite::open_shared`) para
+/// as variantes já existentes de `HistoryError` — ela já tinha `Io` e `Sql`
+/// com o mesmo sentido, então não precisa de uma variante nova.
+impl From<super::sqlite::OpenError> for HistoryError {
+    fn from(err: super::sqlite::OpenError) -> HistoryError {
+        match err {
+            super::sqlite::OpenError::Io(err) => HistoryError::Io(err),
+            super::sqlite::OpenError::Sql(err) => HistoryError::Sql(err),
+        }
+    }
+}
+
 /// Resultado padrão das operações deste módulo.
 pub type Result<T> = std::result::Result<T, HistoryError>;
 
@@ -354,16 +366,7 @@ impl History {
     /// de busca (Task 7) e, a partir da Task 15, com o processo do servidor
     /// MCP, então nunca pode ser aberto sem essas duas pragmas.
     pub fn open(db_path: &Path) -> Result<History> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let conn = Connection::open(db_path)?;
-        // `journal_mode` sempre devolve uma linha com o modo resultante —
-        // ao contrário da maioria das PRAGMAs, não dá para gravar com
-        // `pragma_update` puro.
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
-        conn.pragma_update(None, "busy_timeout", 5000i64)?;
+        let conn = super::sqlite::open_shared(db_path)?;
         conn.execute_batch(SCHEMA)?;
 
         Ok(History {
