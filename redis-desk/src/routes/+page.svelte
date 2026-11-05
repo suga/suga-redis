@@ -109,6 +109,13 @@
 				onSelect={(host, motivo) => {
 					aberto = host;
 					falhaConexao = motivo ?? null;
+					// Sem `motivo`, o `conectar` da coluna de hosts acabou de
+					// dar certo: a falha que a área de trabalho tinha
+					// reportado antes já não vale, e guardá-la aqui é um
+					// "falhou" esperando para ressuscitar — basta que alguém
+					// acrescente uma segunda dependência ao efeito que a lê
+					// em `HostList.svelte`.
+					if (!motivo) falhaExterna = null;
 					editando = null;
 				}}
 				onNew={() => (editando = { host: null })}
@@ -121,6 +128,7 @@
 					if (aberto?.id === host.id) {
 						aberto = null;
 						falhaConexao = null;
+						falhaExterna = null;
 					}
 				}}
 			/>
