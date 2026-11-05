@@ -130,7 +130,10 @@ test("a camada de cor não é lida duas vezes por leitor de tela", () => {
 	expect(screen.getByTestId("json-realce")).toHaveAttribute("aria-hidden", "true");
 });
 
-test("JSON quebrado mostra o erro e trava o salvar", async () => {
+test("JSON quebrado mostra o erro sem tirar o salvar da pessoa", async () => {
+	// O aviso existe para ajudar, não para prender: uma string do Redis não
+	// é obrigada a ser JSON, e travar o botão tiraria justamente o jeito de
+	// CONSERTAR um valor quebrado pela tela.
 	const user = userEvent.setup();
 	montar(view({ value: { kind: "string", data: texto(JSON_VALIDO) } }));
 
@@ -140,8 +143,7 @@ test("JSON quebrado mostra o erro e trava o salvar", async () => {
 
 	const aviso = await screen.findByTestId("json-erro");
 	expect(aviso).toHaveTextContent(/posição|linha/i);
-	expect(screen.getByRole("button", { name: "Salvar" })).toBeDisabled();
-	expect(escrito).not.toHaveBeenCalled();
+	expect(screen.getByRole("button", { name: "Salvar" })).toBeEnabled();
 });
 
 test("texto que não é JSON salva normalmente, sem validação atrapalhar", async () => {
@@ -227,4 +229,51 @@ test("valor cortado não é acusado de JSON inválido", () => {
 	);
 
 	expect(screen.queryByTestId("json-erro")).not.toBeInTheDocument();
+});
+
+test("carregar mais não pode deixar o editor preso na primeira página", async () => {
+	// O caso real: 106 kB no servidor, 64 kB na tela. A pessoa clica
+	// "Carregar mais", o valor inteiro chega — e o campo precisa passar a
+	// mostrar o valor inteiro. Ficar com o pedaço velho depois que
+	// `truncated` virou falso destrava o Salvar sobre um texto incompleto,
+	// e grava o pedaço por cima do todo.
+	const pedaco = '[{"a": 1}, {"b": "cort';
+	const inteiro = '[{"a": 1}, {"b": "cortado"}]';
+
+	const { rerender } = montar(
+		view({
+			value: { kind: "string", data: texto(pedaco) },
+			total_elements: 106_831,
+			truncated: true,
+		}),
+	);
+
+	await rerender({
+		hostId: "h1",
+		db: 0,
+		view: view({
+			value: { kind: "string", data: texto(inteiro) },
+			total_elements: 106_831,
+			truncated: false,
+		}),
+		onWritten: vi.fn(),
+	});
+
+	expect(screen.getByLabelText("Valor")).toHaveValue(inteiro);
+	expect(screen.queryByTestId("json-erro")).not.toBeInTheDocument();
+});
+
+test("JSON inválido avisa, mas não impede editar nem salvar", async () => {
+	// Uma string no Redis não é obrigada a ser JSON válido. Avisar ajuda;
+	// bloquear tira da pessoa o único jeito de CONSERTAR o valor pela tela.
+	const user = userEvent.setup();
+	montar(
+		view({ value: { kind: "string", data: texto('{"a": 1,}') }, total_elements: 9 }),
+	);
+
+	const campo = screen.getByLabelText("Valor");
+	await user.type(campo, " ");
+
+	expect(screen.getByTestId("json-erro")).toBeInTheDocument();
+	expect(screen.getByRole("button", { name: "Salvar" })).toBeEnabled();
 });

@@ -48,18 +48,57 @@
 	 */
 	let binario = $derived(dado !== null && dado.text === null);
 
+	/** O texto que o servidor entregou nesta leitura. */
+	let servidor = $derived(dado?.text ?? "");
+
+	let texto = $state(
+		untrack(() => (view.value.kind === "string" ? (view.value.data.text ?? "") : "")),
+	);
+
+	/** Em cima de qual texto do servidor o campo foi montado. */
+	let base = $state(
+		untrack(() => (view.value.kind === "string" ? (view.value.data.text ?? "") : "")),
+	);
+
 	/**
-	 * O valor na tela é só um pedaço do que está no servidor.
+	 * O que está no campo desceu de uma leitura INCOMPLETA.
+	 *
+	 * Não é o mesmo que `view.truncated`: "Carregar mais" traz o resto do
+	 * valor e apaga o `truncated`, mas o campo continua com o pedaço antigo
+	 * — `$state` vindo de prop captura só o valor inicial. Enquanto essa
+	 * diferença existir, salvar gravaria o pedaço por cima do inteiro.
+	 */
+	let baseCortada = $state(untrack(() => view.truncated));
+
+	/**
+	 * Adota o texto novo quando o servidor entrega mais do mesmo valor.
+	 *
+	 * Só adota se o campo estiver INTOCADO: o que a pessoa digitou é a
+	 * única cópia daquele trabalho, e substituí-lo por causa de uma
+	 * paginação perderia a edição dela. Se ela já mexeu, o texto fica — e
+	 * `baseCortada` fica junto, porque a edição dela descende do pedaço.
+	 */
+	$effect(() => {
+		const entregue = servidor;
+		const cortadoAgora = view.truncated;
+		untrack(() => {
+			if (entregue === base) return;
+			if (texto === base) {
+				texto = entregue;
+				baseCortada = cortadoAgora;
+			}
+			base = entregue;
+		});
+	});
+
+	/**
+	 * O que está na tela é só um pedaço do que está no servidor.
 	 *
 	 * Enquanto for assim, salvar é PROIBIDO: gravaria o pedaço por cima do
 	 * inteiro e apagaria o resto sem aviso. Foi exatamente o que quase
 	 * aconteceu com um valor de 112 kB do qual só 64 kB tinham chegado.
 	 */
-	let cortado = $derived(view.truncated);
-
-	let texto = $state(
-		untrack(() => (view.value.kind === "string" ? (view.value.data.text ?? "") : "")),
-	);
+	let cortado = $derived(view.truncated || baseCortada);
 
 	/**
 	 * Num valor cortado a validação fica calada: o começo de um JSON grande
@@ -68,7 +107,7 @@
 	 */
 	let erroJson = $derived(cortado ? null : validarJson(texto));
 	let indentado = $derived(cortado ? null : formatarJson(texto));
-	let mudou = $derived(texto !== (dado?.text ?? ""));
+	let mudou = $derived(texto !== servidor);
 	let colorir = $derived(pareceJson(texto) && texto.length <= TETO_REALCE_BYTES);
 
 	/**
@@ -123,7 +162,10 @@
 				o valor inteiro.
 			</p>
 		{:else if erroJson}
-			<p class="erro-json" role="alert" data-testid="json-erro">{erroJson}</p>
+			<p class="erro-json" role="alert" data-testid="json-erro">
+				{erroJson} Uma string no Redis não precisa ser JSON — dá para salvar assim
+				mesmo.
+			</p>
 		{:else if pareceJson(texto) && !colorir}
 			<p class="aviso">
 				Valor grande demais para colorir enquanto se digita. O conteúdo e a
@@ -140,7 +182,7 @@
 			<button
 				type="button"
 				class="primary"
-				disabled={busy || !mudou || cortado || erroJson !== null}
+				disabled={busy || !mudou || cortado}
 				onclick={() => onSubmit({ op: "set_string", value: textBytes(texto) })}
 			>
 				Salvar

@@ -1950,4 +1950,48 @@ mod write_tests {
         );
         assert_eq!(summary, "Apagar o campo \"email\" de session:user:4471");
     }
+
+    /// Uma string maior que a página precisa chegar à tela MARCADA como
+    /// cortada. Sem isso, o editor valida o começo de um JSON grande como
+    /// se fosse o valor inteiro e acusa erro de sintaxe no ponto exato do
+    /// corte — culpando o conteúdo por um corte que foi nosso.
+    #[tokio::test]
+    async fn a_string_past_the_page_says_it_was_cut() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+
+        let key = "value_rs_test:cortada:json_grande";
+        del(&mut conn, &[key]).await;
+
+        let mut grande = String::from("[");
+        while grande.len() < 112 * 1024 {
+            grande.push_str(r#"{"id":"c760a2fd-b987-4503-8a57-8e8f5b71d7ac","of":"category"},"#);
+        }
+        grande.push_str(r#"{"id":"fim"}]"#);
+
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg(&grande)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let limite = ValueLimit {
+            offset: 0,
+            max_bytes: 64 * 1024,
+            max_elements: 200,
+        };
+        let view = read_value(&pool, &host, None, host.db, key, limite)
+            .await
+            .unwrap();
+
+        del(&mut conn, &[key]).await;
+
+        assert!(
+            view.truncated,
+            "um valor de {} bytes lido em paginas de 64 kB precisa se declarar cortado",
+            grande.len()
+        );
+    }
 }
