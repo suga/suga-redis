@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { beforeEach, expect, test, vi } from "vitest";
 
 // `Workspace` monta `KeyTree` de qualquer jeito (coluna da esquerda), então
@@ -20,9 +21,9 @@ vi.mock("$lib/api", () => ({
 	loadMoreChildren: vi.fn(),
 }));
 
-import { scanTree } from "$lib/api";
+import { onTreeProgress, scanTree } from "$lib/api";
 import Workspace from "$lib/Workspace.svelte";
-import type { Host } from "$lib/api";
+import type { Host, TreeProgress } from "$lib/api";
 
 const varreu = vi.mocked(scanTree);
 
@@ -85,4 +86,50 @@ test("uma varredura que não alcança o host avisa quem abriu", async () => {
 			expect.stringContaining("não foi possível conectar ao host"),
 		),
 	);
+});
+
+test("um retrato de outro host não entra na árvore deste", async () => {
+	let entregar: ((retrato: TreeProgress) => void) | null = null;
+	vi.mocked(onTreeProgress).mockImplementation(async (handler) => {
+		entregar = handler;
+		return () => {};
+	});
+
+	render(Workspace, { props: { host: host(), falhaConexao: null } });
+	await waitFor(() => expect(entregar).not.toBeNull());
+
+	function retrato(partes: Partial<TreeProgress>): TreeProgress {
+		return {
+			host_id: "h1",
+			db: 0,
+			scanned: 1,
+			total_estimate: 1,
+			root: [],
+			done: false,
+			...partes,
+		};
+	}
+
+	const galho = {
+		label: "producao",
+		full_prefix: "producao:",
+		count: 9,
+		leaf_key: null,
+	};
+
+	// A varredura do host A segue correndo no Rust depois do `disconnect`
+	// e continua emitindo. O host B, aberto em seguida, não pode receber as
+	// chaves dela.
+	entregar!(retrato({ host_id: "outro-host", root: [galho] }));
+	await tick();
+	expect(screen.queryByText("producao")).not.toBeInTheDocument();
+
+	// Nem o mesmo host em outro banco.
+	entregar!(retrato({ db: 5, root: [galho] }));
+	await tick();
+	expect(screen.queryByText("producao")).not.toBeInTheDocument();
+
+	// E o retrato do par aberto entra normalmente.
+	entregar!(retrato({ root: [galho] }));
+	expect(await screen.findByText("producao")).toBeInTheDocument();
 });

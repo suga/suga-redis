@@ -100,6 +100,20 @@
 	 */
 	let geracaoIndice = 0;
 	/**
+	 * O mesmo para a varredura da árvore, com contador PRÓPRIO: "Varrer de
+	 * novo" sobe `geracaoIndice` sem mexer na árvore, e usar um contador só
+	 * faria um clique no botão descartar a falha de uma varredura que ainda
+	 * é a do banco aberto.
+	 */
+	let geracaoArvore = 0;
+	/**
+	 * A varredura automática — a que parte sozinha a cada troca de banco —
+	 * está em voo. Desliga o seletor de banco, do mesmo jeito que `varrendo`
+	 * já desligava na varredura manual: sem isso a corrida continuava aberta
+	 * no caminho comum, fechada só no raro.
+	 */
+	let abrindo = $state(false);
+	/**
 	 * Falha ao listar os bancos — distinta de `bancos.length === 0`, que
 	 * também é a resposta legítima de um host sem nenhum banco populado.
 	 * Sem isto, o seletor ficava pelado nos dois casos.
@@ -132,6 +146,13 @@
 	onMount(() => {
 		const pararVarredura = onRescanProgress((p) => (progresso = p));
 		const pararLeitura = onTreeProgress((retrato) => {
+			// O evento é global e a varredura do Rust não morre com a tela:
+			// desconectar um host no meio da varredura dele e abrir outro
+			// em seguida fazia os retratos do primeiro — que continuam
+			// chegando — plantarem as chaves dele na árvore do segundo. O
+			// desmonte do `{#key}` cobre fechar a área de trabalho, não
+			// trocar de host enquanto algo ainda corre.
+			if (retrato.host_id !== host.id || retrato.db !== db) return;
 			raiz = retrato.root;
 			versaoArvore += 1;
 			// `done` apaga a barra, mas a raiz fica: ela É a árvore.
@@ -169,6 +190,8 @@
 		lendo = { scanned: 0, total_estimate: 0, root: [], done: false };
 
 		const minhaGeracao = ++geracaoIndice;
+		const minhaVarredura = ++geracaoArvore;
+		abrindo = true;
 		scanStatus(hostId, banco)
 			.then((r) => {
 				// Uma troca de banco mais nova já partiu: esta resposta é de
@@ -188,6 +211,12 @@
 		try {
 			await scanTree(hostId, banco);
 		} catch (err) {
+			// Mesma régua da pergunta de índice logo acima: uma varredura
+			// mais nova já partiu (troca de banco) ou a conexão já foi
+			// sabida como falha, e esta resposta atrasada não pode trocar o
+			// que está na tela por um motivo de um banco que já não é o
+			// aberto.
+			if (minhaVarredura !== geracaoArvore) return;
 			erro = errorMessage(err);
 			// A varredura é a primeira coisa que este host faz depois de
 			// aberto: se ela não alcançou o servidor, a linha do host na
@@ -198,7 +227,12 @@
 			// de contar a mesma queda.
 			onFalhaDeConexao?.(erro);
 		} finally {
-			lendo = null;
+			// Também sob a geração: limpar `lendo` de uma varredura velha
+			// apagaria a barra de progresso da varredura nova.
+			if (minhaVarredura === geracaoArvore) {
+				abrindo = false;
+				lendo = null;
+			}
 		}
 	}
 
@@ -215,6 +249,8 @@
 			erroIndice = "";
 			perguntandoIndice = false;
 			geracaoIndice += 1; // descarta qualquer pergunta de índice em voo
+			geracaoArvore += 1; // e qualquer varredura que ainda esteja correndo
+			abrindo = false;
 			selecionada = null;
 			raiz = [];
 			lendo = null;
@@ -253,11 +289,12 @@
 		const minhaGeracao = ++geracaoIndice;
 		try {
 			const novoRelatorio = await rescan(host.id, db);
-			// O seletor de banco não se desliga durante a varredura (ver nota
-			// de design logo acima do markup) — a pessoa pode trocar de
-			// banco com isto ainda em voo. Se trocou, `abrirBanco` já subiu
-			// `geracaoIndice` de novo, e este resultado, de um banco que já
-			// não é o aberto, não pode aterrissar.
+			// O seletor desliga durante a varredura (ver a nota de design
+			// logo acima do markup), mas o estado da tela ainda pode mudar
+			// por outros caminhos enquanto isto corre — uma falha de
+			// conexão sabida, por exemplo, que sobe `geracaoIndice`. Este
+			// resultado, de uma pergunta que já não é a atual, não pode
+			// aterrissar.
 			if (minhaGeracao !== geracaoIndice) return;
 			relatorio = novoRelatorio;
 		} catch (err) {
@@ -326,20 +363,22 @@
 	<div class="coluna">
 		<div class="controles">
 			<!--
-				Nota de design: o seletor desliga enquanto `varrendo` é
-				verdadeiro, junto com o botão. `progresso` (do evento global
+				Nota de design: o seletor desliga enquanto QUALQUER varredura
+				corre — a manual (`varrendo`) e a automática que parte a cada
+				troca de banco (`abrindo`). `progresso` (do evento global
 				`onRescanProgress`, sem `host_id`/`db` no payload) e o próprio
 				`varrendo` não carregam geração nenhuma — não dá para
 				descartar uma resposta atrasada que não se sabe de qual banco
 				é. Desligar o controle fecha essa classe inteira, em vez de
 				só escondê-la. O que ainda pode correr depois de uma troca de
-				banco — a pergunta de índice do `scanStatus` — continua
-				protegido por `geracaoIndice`, que compara a geração da
-				resposta contra a atual antes de escrever `relatorio`/`erro`.
+				banco — a pergunta de índice do `scanStatus` e a varredura da
+				árvore — continua protegido por `geracaoIndice` e
+				`geracaoArvore`, que comparam a geração da resposta contra a
+				atual antes de escrever qualquer coisa na tela.
 			-->
 			<label class="banco">
 				<span>Banco</span>
-				<select bind:value={db} disabled={varrendo}>
+				<select bind:value={db} disabled={varrendo || abrindo}>
 					{#if bancos.length === 0}
 						<option value={db}>{db}</option>
 					{:else}

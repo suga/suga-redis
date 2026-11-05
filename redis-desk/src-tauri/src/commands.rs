@@ -65,6 +65,26 @@ pub const RESCAN_PROGRESS_EVENT: &str = "rescan://progress";
 /// Retratos da varredura da árvore, enquanto ela corre.
 pub const TREE_PROGRESS_EVENT: &str = "tree://progress";
 
+/// Um retrato de varredura ENDEREÇADO ao (host, banco) que o produziu.
+///
+/// O evento do Tauri é global: quem escuta recebe tudo, de qualquer
+/// varredura. Sem o endereço, desconectar o host A no meio da varredura
+/// dele e abrir o host B em seguida fazia os retratos de A — que continuam
+/// chegando, porque a varredura segue correndo sobre o `Arc` da trie dela —
+/// repovoarem a árvore de B. Num produto cujo dispositivo de segurança
+/// central é nunca confundir um host de produção com um de
+/// desenvolvimento, esse é o tipo errado de erro.
+///
+/// `flatten` porque o retrato continua chegando achatado na tela, do mesmo
+/// jeito que ela já lia: o endereço é um acréscimo, não um envelope novo.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TreeProgress {
+    pub host_id: String,
+    pub db: u8,
+    #[serde(flatten)]
+    pub snapshot: ScanSnapshot,
+}
+
 /// Andamento da varredura de um galho só (`load_more_children`).
 pub const BRANCH_PROGRESS_EVENT: &str = "branch://progress";
 
@@ -788,10 +808,18 @@ pub async fn cmd_scan_tree(
     host_id: String,
     db: u8,
 ) -> Result<()> {
+    let alvo = host_id.clone();
     scan_tree(&state, &host_id, db, move |retrato| {
         // Um retrato perdido só atrasa o que a tela mostra; nunca pode
         // derrubar a varredura que já está em andamento.
-        let _ = app.emit(TREE_PROGRESS_EVENT, retrato);
+        let _ = app.emit(
+            TREE_PROGRESS_EVENT,
+            TreeProgress {
+                host_id: alvo.clone(),
+                db,
+                snapshot: retrato,
+            },
+        );
     })
     .await
 }
@@ -1415,5 +1443,31 @@ mod tests {
             "a entrada mais na frente precisa ser a SEGUNDA falha, veio {:?}",
             entries[0].detail
         );
+    }
+
+    #[test]
+    fn a_tree_snapshot_says_which_host_and_database_it_came_from() {
+        let payload = TreeProgress {
+            host_id: "h1".to_string(),
+            db: 7,
+            snapshot: ScanSnapshot {
+                scanned: 3,
+                total_estimate: 10,
+                root: Vec::new(),
+                done: false,
+            },
+        };
+
+        let json = serde_json::to_value(&payload).unwrap();
+
+        // Sem o endereçamento, um retrato de uma varredura que continua
+        // correndo depois de um `disconnect` repovoa a árvore do PRÓXIMO
+        // host aberto — num produto cujo dispositivo de segurança central é
+        // nunca confundir produção com desenvolvimento.
+        assert_eq!(json["host_id"], "h1");
+        assert_eq!(json["db"], 7);
+        // E o retrato continua achatado no mesmo nível, como a tela já lia.
+        assert_eq!(json["scanned"], 3);
+        assert_eq!(json["done"], false);
     }
 }

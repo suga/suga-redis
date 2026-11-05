@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { tick } from "svelte";
 import { beforeEach, expect, test, vi } from "vitest";
 
 // Mesmo mínimo de mock que `workspace-conn.test.ts`: `Workspace` monta
@@ -17,13 +18,14 @@ vi.mock("$lib/api", () => ({
 	loadMoreChildren: vi.fn(),
 }));
 
-import { listDbs, rescan, scanStatus } from "$lib/api";
+import { listDbs, rescan, scanStatus, scanTree } from "$lib/api";
 import Workspace from "$lib/Workspace.svelte";
 import type { Host } from "$lib/api";
 
 const bancos = vi.mocked(listDbs);
 const indice = vi.mocked(scanStatus);
 const varredura = vi.mocked(rescan);
+const arvore = vi.mocked(scanTree);
 
 /** Uma promessa controlável de fora — para simular uma resposta que demora. */
 function promessaControlavel<T>() {
@@ -54,6 +56,7 @@ beforeEach(() => {
 	vi.clearAllMocks();
 	bancos.mockImplementation(async () => []);
 	indice.mockImplementation(async () => null);
+	arvore.mockImplementation(async () => undefined);
 });
 
 test("mostra o erro quando a lista de bancos falha, em vez de um seletor pelado", async () => {
@@ -296,4 +299,53 @@ test("o seletor de banco desliga durante a varredura manual e volta a ligar depo
 	});
 
 	await waitFor(() => expect(seletor).toBeEnabled());
+});
+
+test("o seletor de banco desliga durante a varredura automática também", async () => {
+	bancos.mockImplementation(async () => [
+		[0, 10],
+		[1, 20],
+	]);
+	const emVoo = promessaControlavel<undefined>();
+	arvore.mockImplementation(() => emVoo.promessa);
+
+	render(Workspace, { props: { host: host(), falhaConexao: null } });
+
+	// A varredura automática — a que acontece a cada troca de banco, sem
+	// ninguém clicar em nada — é a comum; a manual é a rara. Deixar o
+	// seletor ligado só nela mantinha aberta a corrida que a manual já
+	// tinha fechado.
+	const seletor = await screen.findByRole("combobox");
+	await waitFor(() => expect(seletor).toBeDisabled());
+
+	emVoo.resolve(undefined);
+	await waitFor(() => expect(seletor).toBeEnabled());
+});
+
+test("a falha de uma varredura antiga não aterrissa sobre o estado novo", async () => {
+	const emVoo = promessaControlavel<undefined>();
+	arvore.mockImplementation(() => emVoo.promessa);
+
+	const { rerender } = render(Workspace, {
+		props: { host: host(), falhaConexao: null },
+	});
+	await waitFor(() => expect(arvore).toHaveBeenCalledTimes(1));
+
+	// Uma nova tentativa de conexão ao MESMO host falhou enquanto a
+	// varredura anterior ainda corria: a tela já está mostrando esse
+	// motivo.
+	await rerender({ falhaConexao: "não foi possível alcançar o host" });
+	expect(await screen.findByRole("alert")).toHaveTextContent(
+		"não foi possível alcançar o host",
+	);
+
+	emVoo.reject(new Error("erro da varredura que já não interessa"));
+	await tick();
+	await tick();
+
+	// A resposta atrasada não pode trocar a mensagem que está na tela: era
+	// o mesmo defeito já corrigido para a varredura manual e para a
+	// pergunta de índice, deixado aberto no caminho automático.
+	expect(screen.getByRole("alert")).toHaveTextContent("não foi possível alcançar o host");
+	expect(screen.queryByTestId("lendo")).not.toBeInTheDocument();
 });

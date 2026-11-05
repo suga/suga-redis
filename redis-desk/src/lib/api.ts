@@ -83,6 +83,16 @@ export interface ScanSnapshot {
 	done: boolean;
 }
 
+/**
+ * O mesmo retrato, dizendo de que (host, banco) ele veio. É o que deixa a
+ * tela descartar um retrato que não é do par aberto, em vez de plantar as
+ * chaves de um host na árvore de outro.
+ */
+export interface TreeProgress extends ScanSnapshot {
+	host_id: string;
+	db: number;
+}
+
 // ------------------------------------------------------------------ valor
 
 /**
@@ -346,11 +356,18 @@ export function loadMoreChildren(
 	return invoke("cmd_load_more_children", { hostId, db, prefix });
 }
 
-/** Acompanha a varredura que monta a árvore. Chame o retorno para parar. */
+/**
+ * Acompanha a varredura que monta a árvore. Chame o retorno para parar.
+ *
+ * O evento é global: quem escuta recebe o retrato de QUALQUER varredura em
+ * andamento, inclusive a de um host do qual já se desconectou (ela segue
+ * correndo no Rust sobre a trie dela). Por isso o retrato vem endereçado —
+ * cabe a quem escuta descartar o que não é do par aberto.
+ */
 export function onTreeProgress(
-	handler: (retrato: ScanSnapshot) => void,
+	handler: (retrato: TreeProgress) => void,
 ): Promise<UnlistenFn> {
-	return listen<ScanSnapshot>("tree://progress", (event) => handler(event.payload));
+	return listen<TreeProgress>("tree://progress", (event) => handler(event.payload));
 }
 
 /** Refaz o índice de busca. Acompanhe o andamento com `onRescanProgress`. */
