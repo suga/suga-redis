@@ -60,6 +60,8 @@ pub fn run() {
             commands::cmd_add_host,
             commands::cmd_update_host,
             commands::cmd_remove_host,
+            commands::cmd_connect,
+            commands::cmd_disconnect,
             commands::cmd_test_host,
             commands::cmd_list_dbs,
             commands::cmd_scan_tree,

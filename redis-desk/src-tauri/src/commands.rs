@@ -300,6 +300,45 @@ pub fn remove_host(state: &AppState, host_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Conecta de verdade ao host: abre (ou reaproveita) o socket do `Pool` e
+/// mede o tempo de ida e volta de um `PING`.
+///
+/// Reusa `pool.ping` — a mesma chamada de `test_host` — porque abrir a
+/// conexão JÁ É o teste: não há um "conectar de mentira" que valha a pena
+/// fazer antes. O que muda é o momento: antes desta função, o botão
+/// "Conectar" só montava a área de trabalho, e a conexão nascia escondida
+/// dentro da primeira varredura — ninguém via o host falhar antes de pedir
+/// as chaves.
+pub async fn connect(state: &AppState, host_id: &str) -> Result<u64> {
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "connect", host_id, Some(&host), None, async {
+                let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
+                Ok(elapsed.as_millis() as u64)
+            })
+            .await
+        }
+        Err(err) => registrar(state, "connect", host_id, None, None, async { Err(err) }).await,
+    }
+}
+
+/// Desconecta de verdade do host: derruba o socket cacheado no `Pool` e
+/// esquece a árvore de prefixos de TODOS os bancos dele.
+///
+/// A segunda parte não é opcional: sem ela, `tree_level` continuaria
+/// respondendo do cache em memória depois que o socket já caiu, e a tela
+/// mostraria as chaves de um host que a pessoa já tinha deixado.
+pub fn disconnect(state: &AppState, host_id: &str) -> Result<()> {
+    let (host, _pw) = state.host_and_password(host_id)?;
+    state.pool.drop_host(&host);
+    state
+        .trees
+        .lock()
+        .unwrap()
+        .retain(|(id, _db), _tree| id != host_id);
+    Ok(())
+}
+
 /// Testa a conexão com o host, devolvendo o tempo de resposta em
 /// milissegundos.
 pub async fn test_host(state: &AppState, host_id: &str) -> Result<u64> {
@@ -720,6 +759,16 @@ pub fn cmd_remove_host(state: tauri::State<'_, AppState>, host_id: String) -> Re
 }
 
 #[tauri::command]
+pub async fn cmd_connect(state: tauri::State<'_, AppState>, host_id: String) -> Result<u64> {
+    connect(&state, &host_id).await
+}
+
+#[tauri::command]
+pub fn cmd_disconnect(state: tauri::State<'_, AppState>, host_id: String) -> Result<()> {
+    disconnect(&state, &host_id)
+}
+
+#[tauri::command]
 pub async fn cmd_test_host(state: tauri::State<'_, AppState>, host_id: String) -> Result<u64> {
     test_host(&state, &host_id).await
 }
@@ -986,6 +1035,10 @@ mod tests {
     /// Banco só destes testes (0–9 já são usados pelos testes do núcleo).
     const TEST_DB: u8 = 10;
 
+    /// Banco só dos testes de `connect`/`disconnect` (0–12 e 15 já estão
+    /// tomados por outros testes).
+    const CONNECT_TEST_DB: u8 = 13;
+
     fn host_spec(env: Env) -> Host {
         Host {
             // `add_host` gera o id; o que vier aqui é descartado.
@@ -1039,6 +1092,60 @@ mod tests {
 
     async fn del(conn: &mut MultiplexedConnection, key: &str) {
         let _: () = redis::cmd("DEL").arg(key).query_async(conn).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_answers_with_the_ping_time() {
+        let (_dir, state) = test_state();
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+
+        let elapsed_ms = connect(&state, &host_id).await.unwrap();
+
+        // `u64` nunca é negativo, mas um PING local que levasse segundos
+        // seria sinal de que isto não está medindo o que diz medir.
+        assert!(
+            elapsed_ms < 5_000,
+            "um PING num Redis local não devia levar {elapsed_ms}ms"
+        );
+
+        let logged = logs(&state)
+            .into_iter()
+            .any(|entry| entry.kind == LogKind::Connection && entry.operation == "connect");
+        assert!(
+            logged,
+            "conectar precisa deixar uma entrada de conexão no anel de log"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_forgets_the_tree_of_every_database_of_that_host() {
+        let (_dir, state) = test_state();
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+
+        scan_tree(&state, &host_id, CONNECT_TEST_DB, |_| {})
+            .await
+            .unwrap();
+        assert!(
+            tree_level(&state, &host_id, CONNECT_TEST_DB, "").is_some(),
+            "a varredura precisava ter deixado a árvore em cache antes do teste valer"
+        );
+
+        disconnect(&state, &host_id).unwrap();
+
+        assert!(
+            tree_level(&state, &host_id, CONNECT_TEST_DB, "").is_none(),
+            "desconectar precisa esquecer a árvore cacheada — senão a tela continuaria \
+             mostrando as chaves de um host que a pessoa já deixou"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnecting_a_host_that_was_never_connected_is_not_an_error() {
+        let (_dir, state) = test_state();
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+
+        disconnect(&state, &host_id)
+            .expect("desconectar um host que nunca chegou a conectar não pode falhar");
     }
 
     #[tokio::test]
