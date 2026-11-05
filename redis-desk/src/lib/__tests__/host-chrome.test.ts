@@ -104,6 +104,7 @@ function montarLista(env: Env = "prod") {
 		props: {
 			hosts: [alvo],
 			selectedId: null,
+			falhaExterna: null,
 			onSelect,
 			onNew: vi.fn(),
 			onEdit: vi.fn(),

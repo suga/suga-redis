@@ -27,6 +27,28 @@
 		hosts: Host[];
 		selectedId: string | null;
 		/**
+		 * Uma falha de conexão observada FORA desta lista — na prática, pela
+		 * área de trabalho, quando uma operação no host aberto não alcançou
+		 * o servidor.
+		 *
+		 * Existe porque o estado desta coluna era escrito uma vez, no
+		 * clique, e nunca mais: o pool derrubava um socket morto, a nova
+		 * tentativa falhava, a área de trabalho dizia "não foi possível
+		 * conectar" e a linha do host continuava afirmando "conectado · 12
+		 * ms" a duas colunas de distância. Uma tela, duas afirmações
+		 * contrárias sobre o mesmo banco de produção.
+		 *
+		 * Escolhido contra um `PING` periódico: um relógio batendo em todo
+		 * host cadastrado paga rede o tempo todo para descobrir o que a
+		 * próxima operação descobriria de graça, e num host serverless que
+		 * leva 5679 ms para responder um `PING` o custo não é teórico. A
+		 * mentira que importa é a que fica na tela DEPOIS de uma falha
+		 * visível, e essa o caminho de volta apaga sem perguntar nada a
+		 * ninguém. Enquanto nenhuma operação falhar, "conectado" continua
+		 * sendo o que o pool sabe — e é o que esta coluna promete dizer.
+		 */
+		falhaExterna: { hostId: string; motivo: string } | null;
+		/**
 		 * `falhaConexao` carrega o motivo quando quem chamou já sabe, por ter
 		 * acabado de tentar `connect`, que a conexão falhou — para a casca
 		 * repassar ao `Workspace` e ele nem tentar varrer. Ausente (clique no
@@ -41,12 +63,27 @@
 		onDisconnected: (host: Host) => void;
 	}
 
-	let { hosts, selectedId, onSelect, onNew, onEdit, onChanged, onDisconnected }: Props =
-		$props();
+	let {
+		hosts,
+		selectedId,
+		falhaExterna,
+		onSelect,
+		onNew,
+		onEdit,
+		onChanged,
+		onDisconnected,
+	}: Props = $props();
 
 	/** Resultado do último teste por host: a latência, ou a falha. */
 	let testes = $state<Record<string, { ms: number } | { erro: string }>>({});
 	let testando = $state<string | null>(null);
+	/**
+	 * Falha ao REMOVER, por host. Slot próprio, e não o de `testes`: a
+	 * remoção escrevia o erro dela no resultado do botão Testar, que ficava
+	 * escondido justamente no estado "conectado" — uma remoção que falhava
+	 * não deixava rastro nenhum na tela.
+	 */
+	let errosRemocao = $state<Record<string, string>>({});
 
 	/** Estado de conexão por host. Ausente = nunca mexeram neste host ainda. */
 	let estados = $state<Record<string, EstadoConexao>>({});
@@ -58,6 +95,21 @@
 	function estadoDe(hostId: string): EstadoConexao {
 		return estados[hostId] ?? { tipo: "desligado" };
 	}
+
+	/**
+	 * Uma falha vinda de fora derruba o "conectado" do host a que ela se
+	 * refere — e só dele.
+	 *
+	 * Idempotente de propósito: um efeito pode re-disparar (ver Svelte 5 em
+	 * `docs/CONTEXTO.md`), e escrever o mesmo estado duas vezes não muda
+	 * nada. `falhaExterna` é o único valor lido aqui, então escrever
+	 * `estados` não realimenta o efeito.
+	 */
+	$effect(() => {
+		const falha = falhaExterna;
+		if (!falha) return;
+		estados[falha.hostId] = { tipo: "falhou", motivo: falha.motivo };
+	});
 
 	/**
 	 * Conecta de verdade e só então abre o workspace — nos dois desfechos.
@@ -112,11 +164,12 @@
 	}
 
 	async function remover(host: Host) {
+		errosRemocao[host.id] = "";
 		try {
 			await removeHost(host.id);
 			onChanged();
 		} catch (err) {
-			testes[host.id] = { erro: errorMessage(err) };
+			errosRemocao[host.id] = errorMessage(err);
 		}
 	}
 </script>
@@ -133,6 +186,7 @@
 		<ul>
 			{#each hosts as host (host.id)}
 				{@const resultado = testes[host.id]}
+				{@const erroRemocao = errosRemocao[host.id]}
 				{@const chrome = envChrome(host.env)}
 				{@const estado = estadoDe(host.id)}
 				<li
@@ -142,7 +196,15 @@
 					data-env={host.env}
 				>
 					<div class="cabeca">
-						<button class="abrir" onclick={() => onSelect(host)}>
+						<!-- Clicar no nome conecta, igual ao botão: montar a área de
+						     trabalho sem conectar deixava a árvore aparecer (o
+						     `scan_tree` abre o socket por conta própria, lá no Rust)
+						     com a linha dizendo "nunca conectado" ao lado. Num banco
+						     vazio isso vira "Nenhuma chave neste banco" debaixo de
+						     "nunca conectado" — a conclusão errada que originou este
+						     trabalho. É barato: com o socket já no pool, `connect` é
+						     um PING. -->
+						<button class="abrir" onclick={() => conectar(host)}>
 							{host.name}
 						</button>
 						<span class="flag" data-testid="flag-ambiente">{chrome.label}</span>
@@ -190,18 +252,27 @@
 						{:else if estado.tipo === "conectando"}
 							conectando…
 						{:else if estado.tipo === "conectado"}
-							conectado · {estado.ms} ms
+							conectado · {estado.ms} ms · banco {host.db}
 						{:else}
 							{estado.motivo}
 						{/if}
 					</p>
 
-					{#if estado.tipo === "desligado"}
-						{#if resultado && "ms" in resultado}
-							<p class="resultado mono">Respondeu em {resultado.ms} ms</p>
-						{:else if resultado}
-							<p class="resultado falha" role="alert">{resultado.erro}</p>
-						{/if}
+					<!-- Sem condição de estado: escondido fora de "desligado", o
+					     botão Testar virava um rótulo que pisca e não responde
+					     nada — e o pior caso era o estado "falhou", justo quando
+					     se pergunta "mas dá para alcançar?". Testar responde outra
+					     pergunta que a linha de estado, e as duas cabem juntas. -->
+					{#if resultado && "ms" in resultado}
+						<p class="resultado mono">Respondeu em {resultado.ms} ms</p>
+					{:else if resultado}
+						<p class="resultado falha" role="alert">{resultado.erro}</p>
+					{/if}
+
+					{#if erroRemocao}
+						<p class="resultado falha" role="alert" data-testid="erro-remocao">
+							{erroRemocao}
+						</p>
 					{/if}
 				</li>
 			{/each}

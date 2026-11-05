@@ -66,3 +66,23 @@ test("sem falha conhecida, abre o banco e varre normalmente", async () => {
 
 	await waitFor(() => expect(varreu).toHaveBeenCalledWith("h1", 0));
 });
+
+test("uma varredura que não alcança o host avisa quem abriu", async () => {
+	// Um `Error`, e não o objeto cru do Tauri: o mock de `errorMessage`
+	// neste arquivo é `String(err)`, que de um objeto devolveria
+	// "[object Object]" e esconderia o que está sendo verificado.
+	varreu.mockRejectedValueOnce(new Error("não foi possível conectar ao host"));
+	const avisou = vi.fn();
+
+	render(Workspace, {
+		props: { host: host(), falhaConexao: null, onFalhaDeConexao: avisou },
+	});
+
+	// A casca repassa isto à coluna de hosts, para a linha parar de dizer
+	// "conectado" enquanto esta tela mostra o contrário.
+	await waitFor(() =>
+		expect(avisou).toHaveBeenCalledWith(
+			expect.stringContaining("não foi possível conectar ao host"),
+		),
+	);
+});

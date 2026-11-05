@@ -47,9 +47,20 @@
 		 * `db` mais abaixo.
 		 */
 		falhaConexao: string | null;
+		/**
+		 * Avisa quem abriu este host que uma operação não alcançou o
+		 * servidor. É o caminho de volta do estado de conexão: sem ele a
+		 * linha do host continuava dizendo "conectado · 12 ms" enquanto
+		 * esta área de trabalho mostrava "não foi possível conectar" —
+		 * duas afirmações contrárias sobre o mesmo banco, na mesma tela.
+		 *
+		 * Opcional: quem monta o `Workspace` fora da casca (os testes) não
+		 * precisa se importar com a coluna de hosts.
+		 */
+		onFalhaDeConexao?: (motivo: string) => void;
 	}
 
-	let { host, falhaConexao }: Props = $props();
+	let { host, falhaConexao, onFalhaDeConexao }: Props = $props();
 
 	/** Largura da coluna de chaves antes de qualquer arrasto — o mínimo que a coluna já tinha. */
 	const LARGURA_CHAVES_PADRAO = 256; // 16rem
@@ -178,6 +189,14 @@
 			await scanTree(hostId, banco);
 		} catch (err) {
 			erro = errorMessage(err);
+			// A varredura é a primeira coisa que este host faz depois de
+			// aberto: se ela não alcançou o servidor, a linha do host na
+			// coluna ao lado não pode seguir dizendo "conectado". O
+			// `erroBancos` não avisa ninguém por fora de propósito — ele
+			// tem slot visível aqui mesmo, chega em paralelo com este, e
+			// dois avisos fariam a linha do host alternar entre dois jeitos
+			// de contar a mesma queda.
+			onFalhaDeConexao?.(erro);
 		} finally {
 			lendo = null;
 		}

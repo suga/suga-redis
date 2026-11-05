@@ -28,6 +28,13 @@
 	let aberto = $state<Host | null>(null);
 	/** Motivo de uma falha de `connect` já sabida para o host aberto — repassado ao `Workspace`. */
 	let falhaConexao = $state<string | null>(null);
+	/**
+	 * O caminho de volta: uma falha que a área de trabalho encontrou no host
+	 * aberto, devolvida à coluna de hosts para a linha dele parar de dizer
+	 * "conectado". Sem isto o estado era escrito no clique e nunca mais
+	 * revisto — ver o comentário de `falhaExterna` em `HostList.svelte`.
+	 */
+	let falhaExterna = $state<{ hostId: string; motivo: string } | null>(null);
 	let erro = $state("");
 	/** `null` = nenhum formulário; `{ host: null }` = cadastro novo. */
 	let editando = $state<{ host: Host | null } | null>(null);
@@ -89,6 +96,7 @@
 			<HostList
 				{hosts}
 				selectedId={aberto?.id ?? null}
+				{falhaExterna}
 				onSelect={(host, motivo) => {
 					aberto = host;
 					falhaConexao = motivo ?? null;
@@ -129,8 +137,14 @@
 					/>
 				{/key}
 			{:else if aberto}
-				{#key aberto.id}
-					<Workspace host={aberto} {falhaConexao} />
+				{@const hostAberto = aberto}
+				{#key hostAberto.id}
+					<Workspace
+						host={hostAberto}
+						{falhaConexao}
+						onFalhaDeConexao={(motivo) =>
+							(falhaExterna = { hostId: hostAberto.id, motivo })}
+					/>
 				{/key}
 			{:else}
 				<!-- A marca só aparece aqui, onde não há nada competindo com ela.

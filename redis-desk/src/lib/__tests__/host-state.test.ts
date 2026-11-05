@@ -13,12 +13,14 @@ vi.mock("$lib/api", async (importOriginal) => {
 	};
 });
 
-import { connect, disconnect } from "$lib/api";
+import { connect, disconnect, removeHost, testHost } from "$lib/api";
 import HostList from "$lib/HostList.svelte";
 import type { Host } from "$lib/api";
 
 const conectou = vi.mocked(connect);
 const desconectou = vi.mocked(disconnect);
+const testou = vi.mocked(testHost);
+const removeu = vi.mocked(removeHost);
 
 function host(partes: Partial<Host> = {}): Host {
 	return {
@@ -34,21 +36,26 @@ function host(partes: Partial<Host> = {}): Host {
 	};
 }
 
-function montar(hosts: Host[] = [host()]) {
+function montar(
+	hosts: Host[] = [host()],
+	falhaExterna: { hostId: string; motivo: string } | null = null,
+) {
 	const onSelect = vi.fn();
 	const onDisconnected = vi.fn();
+	const onChanged = vi.fn();
 	render(HostList, {
 		props: {
 			hosts,
 			selectedId: null,
+			falhaExterna,
 			onSelect,
 			onNew: vi.fn(),
 			onEdit: vi.fn(),
-			onChanged: vi.fn(),
+			onChanged,
 			onDisconnected,
 		},
 	});
-	return { onSelect, onDisconnected };
+	return { onSelect, onDisconnected, onChanged };
 }
 
 beforeEach(() => {
@@ -205,4 +212,132 @@ test("não usa vermelho nem caixa alta no estado", async () => {
 	// Nenhuma sequência de duas ou mais maiúsculas seguidas — caixa alta é
 	// reservada à flag do ambiente.
 	expect(estado.textContent).not.toMatch(/[A-ZÀ-Ú]{2,}/);
+});
+
+test("conectado diz também em que banco", async () => {
+	const user = userEvent.setup();
+	conectou.mockResolvedValueOnce(12);
+	montar([host({ db: 3 })]);
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+
+	// O banco é o que distingue um host de cluster/serverless (onde só o 0
+	// existe) de um host comum — ver `ConnError::ClusterSingleDb`.
+	expect(await screen.findByTestId("estado-conexao")).toHaveTextContent(
+		"conectado · 12 ms · banco 3",
+	);
+});
+
+test("clicar no nome do host também conecta, em vez de abrir sem conexão", async () => {
+	const user = userEvent.setup();
+	conectou.mockResolvedValueOnce(7);
+	const alvo = host();
+	const { onSelect } = montar([alvo]);
+
+	await user.click(screen.getByRole("button", { name: alvo.name }));
+
+	// Sem isto a árvore aparecia com a linha do host dizendo "nunca
+	// conectado" ao lado — e, num banco vazio, "Nenhuma chave neste banco"
+	// debaixo de "nunca conectado" faz concluir que a conexão não aconteceu.
+	expect(conectou).toHaveBeenCalledWith("h1");
+	expect(onSelect).toHaveBeenCalledWith(alvo);
+	expect(await screen.findByTestId("estado-conexao")).toHaveTextContent("conectado · 7 ms");
+});
+
+test("uma falha vista pela área de trabalho derruba o 'conectado' da linha", async () => {
+	const user = userEvent.setup();
+	conectou.mockResolvedValueOnce(12);
+	const { rerender } = render(HostList, {
+		props: {
+			hosts: [host()],
+			selectedId: "h1",
+			falhaExterna: null,
+			onSelect: vi.fn(),
+			onNew: vi.fn(),
+			onEdit: vi.fn(),
+			onChanged: vi.fn(),
+			onDisconnected: vi.fn(),
+		},
+	});
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	expect(await screen.findByTestId("estado-conexao")).toHaveTextContent("conectado");
+
+	// O pool derrubou o socket morto e a nova tentativa falhou: a área de
+	// trabalho já diz isso. A linha do host não pode seguir afirmando
+	// "conectado" sobre o mesmo banco, duas colunas ao lado.
+	await rerender({
+		falhaExterna: { hostId: "h1", motivo: "não foi possível alcançar o host" },
+	});
+
+	expect(await screen.findByTestId("estado-conexao")).toHaveTextContent(
+		"não foi possível alcançar o host",
+	);
+	expect(screen.getByRole("button", { name: "Conectar" })).toBeInTheDocument();
+});
+
+test("uma falha de outro host não mexe na linha deste", async () => {
+	const user = userEvent.setup();
+	conectou.mockResolvedValueOnce(12);
+	const { rerender } = render(HostList, {
+		props: {
+			hosts: [host()],
+			selectedId: "h1",
+			falhaExterna: null,
+			onSelect: vi.fn(),
+			onNew: vi.fn(),
+			onEdit: vi.fn(),
+			onChanged: vi.fn(),
+			onDisconnected: vi.fn(),
+		},
+	});
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	await screen.findByTestId("estado-conexao");
+
+	await rerender({ falhaExterna: { hostId: "outro", motivo: "caiu" } });
+
+	expect(screen.getByTestId("estado-conexao")).toHaveTextContent("conectado · 12 ms");
+});
+
+test("o resultado do Testar aparece mesmo com o host conectado", async () => {
+	const user = userEvent.setup();
+	conectou.mockResolvedValueOnce(12);
+	testou.mockResolvedValueOnce(5);
+	montar();
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	await user.click(await screen.findByRole("button", { name: "Testar" }));
+
+	// Escondido fora do estado "desligado", o botão virava um nada que pisca
+	// o rótulo — e o pior caso era "falhou", justo quando se pergunta "dá
+	// para alcançar?".
+	expect(await screen.findByText(/Respondeu em 5 ms/)).toBeInTheDocument();
+});
+
+test("o resultado do Testar aparece mesmo com o host em falha", async () => {
+	const user = userEvent.setup();
+	conectou.mockRejectedValueOnce({ kind: "unreachable", message: "host fora do ar" });
+	testou.mockRejectedValueOnce({ kind: "unreachable", message: "continua fora do ar" });
+	montar();
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	await user.click(await screen.findByRole("button", { name: "Testar" }));
+
+	expect(await screen.findByText("continua fora do ar")).toBeInTheDocument();
+});
+
+test("uma remoção que falha tem lugar próprio na tela", async () => {
+	const user = userEvent.setup();
+	conectou.mockResolvedValueOnce(12);
+	removeu.mockRejectedValueOnce({ kind: "io", message: "não deu para remover" });
+	const { onChanged } = montar();
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	await user.click(await screen.findByRole("button", { name: "Remover" }));
+
+	// Antes a falha era escrita no slot do botão Testar, que ficava
+	// escondido justamente em "conectado": a remoção falhava em silêncio.
+	expect(await screen.findByTestId("erro-remocao")).toHaveTextContent("não deu para remover");
+	expect(onChanged).not.toHaveBeenCalled();
 });
