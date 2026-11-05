@@ -134,10 +134,23 @@ pub struct HostInfo {
     pub tls: bool,
 }
 
+/// Uma resposta de ferramenta MCP precisa ser um objeto: o cliente valida
+/// `structuredContent` como registro e recusa um array na raiz. Por isso as
+/// listagens vão embrulhadas num campo com nome, e não cruas.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct HostsResult {
+    pub hosts: Vec<HostInfo>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DatabaseInfo {
     pub db: u8,
     pub keys: u64,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct DatabasesResult {
+    pub databases: Vec<DatabaseInfo>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -191,6 +204,11 @@ pub struct PrefixSummary {
     pub bytes: u64,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct PrefixesResult {
+    pub prefixes: Vec<PrefixSummary>,
+}
+
 // ------------------------------------------------------- o servidor
 
 #[derive(Clone)]
@@ -226,10 +244,10 @@ impl Tools {
     #[tool(
         description = "Lista os hosts Redis cadastrados, com id, nome, ambiente e endereço. Comece por aqui: todas as outras ferramentas pedem o id de um host."
     )]
-    pub async fn list_hosts(&self) -> Result<Json<Vec<HostInfo>>, ErrorData> {
+    pub async fn list_hosts(&self) -> Result<Json<HostsResult>, ErrorData> {
         let hosts = self.state.hosts.lock().unwrap().list();
-        Ok(Json(
-            hosts
+        Ok(Json(HostsResult {
+            hosts: hosts
                 .into_iter()
                 .map(|host| HostInfo {
                     id: host.id,
@@ -246,7 +264,7 @@ impl Tools {
                     tls: host.tls,
                 })
                 .collect(),
-        ))
+        }))
     }
 
     /// Bancos com ao menos uma chave.
@@ -256,16 +274,16 @@ impl Tools {
     pub async fn list_databases(
         &self,
         Parameters(args): Parameters<HostArgs>,
-    ) -> Result<Json<Vec<DatabaseInfo>>, ErrorData> {
+    ) -> Result<Json<DatabasesResult>, ErrorData> {
         let sizes = crate::commands::list_dbs(&self.state, &args.host_id)
             .await
             .map_err(erro)?;
-        Ok(Json(
-            sizes
+        Ok(Json(DatabasesResult {
+            databases: sizes
                 .into_iter()
                 .map(|(db, keys)| DatabaseInfo { db, keys })
                 .collect(),
-        ))
+        }))
     }
 
     /// Busca um texto dentro dos valores e dos nomes das chaves.
@@ -419,7 +437,7 @@ impl Tools {
     pub async fn summarize_prefixes(
         &self,
         Parameters(args): Parameters<SummarizeArgs>,
-    ) -> Result<Json<Vec<PrefixSummary>>, ErrorData> {
+    ) -> Result<Json<PrefixesResult>, ErrorData> {
         let metas = self.sob_prefixo(&args.host_id, args.db, "").await?;
         let profundidade = args.depth.max(1);
 
@@ -448,7 +466,7 @@ impl Tools {
         // Do maior para o menor: quem pergunta a forma de um banco quer ver
         // primeiro o que ocupa mais espaço nele.
         resumo.sort_by(|a, b| b.keys.cmp(&a.keys).then_with(|| a.prefix.cmp(&b.prefix)));
-        Ok(Json(resumo))
+        Ok(Json(PrefixesResult { prefixes: resumo }))
     }
 
     // ------------------------------------------------- escrita
@@ -692,7 +710,7 @@ mod tests {
     async fn list_hosts_never_returns_a_password() {
         let (_dir, tools, _id) = montar();
 
-        let hosts = tools.list_hosts().await.unwrap().0;
+        let hosts = tools.list_hosts().await.unwrap().0.hosts;
 
         assert_eq!(hosts.len(), 1);
         let bruto = serde_json::to_string(&hosts).unwrap();
@@ -899,5 +917,54 @@ mod tests {
 
         del(&mut conn, &[key]).await;
         assert!(!segunda.scanned_first);
+    }
+
+    /// A resposta de uma ferramenta MCP precisa ser um OBJETO. Um array na
+    /// raiz é recusado pelo cliente na validação de esquema
+    /// (`structuredContent`), e a ferramenta fica inutilizável por quem a
+    /// chama — foi o que aconteceu com `list_hosts`, `list_databases` e
+    /// `summarize_prefixes`, descobertos juntos ao investigar um host de
+    /// produção que a tela mostrava vazio.
+    #[tokio::test]
+    async fn every_listing_answers_with_an_object_not_an_array() {
+        let (_dir, tools, host_id) = montar();
+
+        let hosts = serde_json::to_value(tools.list_hosts().await.unwrap().0).unwrap();
+        assert!(
+            hosts.is_object(),
+            "list_hosts precisa responder objeto, veio {hosts}"
+        );
+
+        let bancos = serde_json::to_value(
+            tools
+                .list_databases(Parameters(HostArgs {
+                    host_id: host_id.clone(),
+                }))
+                .await
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        assert!(
+            bancos.is_object(),
+            "list_databases precisa responder objeto, veio {bancos}"
+        );
+
+        let resumo = serde_json::to_value(
+            tools
+                .summarize_prefixes(Parameters(SummarizeArgs {
+                    host_id,
+                    db: TEST_DB,
+                    depth: 1,
+                }))
+                .await
+                .unwrap()
+                .0,
+        )
+        .unwrap();
+        assert!(
+            resumo.is_object(),
+            "summarize_prefixes precisa responder objeto, veio {resumo}"
+        );
     }
 }
