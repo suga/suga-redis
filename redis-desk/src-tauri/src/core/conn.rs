@@ -5,13 +5,13 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncConnectionConfig, Client};
 
 use super::config::Host;
-use super::log::{LogEntry, LogKind, LogRing};
+use super::log::{LogEntry, LogKind, LogRing, now_ms};
 
 /// Tempo máximo de espera para abrir uma conexão ou receber uma resposta do
 /// Redis.
@@ -396,16 +396,6 @@ impl Pool {
             Vec::new()
         })
     }
-}
-
-/// Epoch em milissegundos, para preencher `LogEntry::at_ms` — o anel em si
-/// não lê o relógio (ver o comentário de módulo de `core::log`), então quem
-/// empurra uma entrada precisa calcular isso.
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("relógio do sistema antes de 1970")
-        .as_millis() as u64
 }
 
 /// Monta a URL de conexão a partir do host: `rediss://` quando `tls`,

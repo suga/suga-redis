@@ -73,6 +73,7 @@ pub fn run() {
             commands::cmd_list_history,
             commands::cmd_rollback,
             commands::cmd_search,
+            commands::cmd_logs,
             commands::cmd_pending_approvals,
             commands::cmd_resolve_approval,
             commands::cmd_deny_approval,

@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +90,17 @@ impl Default for LogRing {
     fn default() -> LogRing {
         LogRing::new()
     }
+}
+
+/// Epoch em milissegundos, para preencher `LogEntry::at_ms` — ver o
+/// comentário do módulo. Mora aqui, e não duplicado em cada chamador
+/// (`core::conn`, `commands`), porque os dois precisam exatamente do mesmo
+/// cálculo e da mesma mensagem de pânico.
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("relógio do sistema antes de 1970")
+        .as_millis() as u64
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -34,7 +34,7 @@ use crate::core::index::{Index, IndexError, ScanProgress, ScanReport};
 use crate::core::keys::{
     Alvo, KeyTrie, Level, MAX_CHILDREN, ScanSnapshot, expand_branch, scan_trie,
 };
-use crate::core::log::{LogEntry, LogKind, LogRing, SLOW_MS};
+use crate::core::log::{LogEntry, LogKind, LogRing, SLOW_MS, now_ms};
 use crate::core::search::{SearchOutcome, search as search_index};
 use crate::core::value::{
     ValueLimit, ValueView, WriteOp, op_summary, read_value as read_value_from_redis,
@@ -227,10 +227,11 @@ impl AppState {
 /// rápido — um comando saudável não deixa rastro.
 ///
 /// `host` é o host JÁ RESOLVIDO quando existe; `None` quando nem isso deu
-/// certo (ex.: `host_id` que não está mais cadastrado) — nesse caso o campo
-/// `LogEntry::host` fica em branco, porque não há nome de host para mostrar;
-/// a mensagem do erro (`detail`) já cita o id, então nenhuma informação se
-/// perde.
+/// certo (ex.: `host_id` que não está mais cadastrado). `host_id` é o
+/// identificador cru que todo chamador já tinha em mãos — usado como nome
+/// de exibição SÓ nesse caso de `None`, para `LogEntry::host` continuar
+/// identificando qual host falhou mesmo sem um `Host` resolvido, em vez de
+/// ficar em branco bem no caso em que mais importa mostrar algo.
 ///
 /// Todo comando que fala com o núcleo passa por aqui, cada um decidindo
 /// sozinho, no `match` de `host_and_password`, se chama com `Some` ou
@@ -238,6 +239,7 @@ impl AppState {
 async fn registrar<T>(
     state: &AppState,
     operation: &str,
+    host_id: &str,
     host: Option<&Host>,
     db: Option<u8>,
     fut: impl std::future::Future<Output = Result<T>>,
@@ -245,7 +247,9 @@ async fn registrar<T>(
     let start = Instant::now();
     let result = fut.await;
     let duration_ms = start.elapsed().as_millis() as u64;
-    let host_name = host.map(|h| h.name.clone()).unwrap_or_default();
+    let host_name = host
+        .map(|h| h.name.clone())
+        .unwrap_or_else(|| host_id.to_string());
 
     match &result {
         Err(err) => state.logs.push(LogEntry {
@@ -270,15 +274,6 @@ async fn registrar<T>(
     }
 
     result
-}
-
-/// Epoch em milissegundos para `LogEntry::at_ms` — ver o comentário
-/// equivalente em `core::conn`; o anel em si não lê o relógio.
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("relógio do sistema antes de 1970")
-        .as_millis() as u64
 }
 
 // ---------------------------------------------------------------- hosts
@@ -310,13 +305,13 @@ pub fn remove_host(state: &AppState, host_id: &str) -> Result<()> {
 pub async fn test_host(state: &AppState, host_id: &str) -> Result<u64> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "test_host", Some(&host), None, async {
+            registrar(state, "test_host", host_id, Some(&host), None, async {
                 let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
                 Ok(elapsed.as_millis() as u64)
             })
             .await
         }
-        Err(err) => registrar(state, "test_host", None, None, async { Err(err) }).await,
+        Err(err) => registrar(state, "test_host", host_id, None, None, async { Err(err) }).await,
     }
 }
 
@@ -324,12 +319,12 @@ pub async fn test_host(state: &AppState, host_id: &str) -> Result<u64> {
 pub async fn list_dbs(state: &AppState, host_id: &str) -> Result<Vec<(u8, u64)>> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "list_dbs", Some(&host), None, async {
+            registrar(state, "list_dbs", host_id, Some(&host), None, async {
                 Ok(state.pool.db_sizes(&host, pw.as_deref()).await?)
             })
             .await
         }
-        Err(err) => registrar(state, "list_dbs", None, None, async { Err(err) }).await,
+        Err(err) => registrar(state, "list_dbs", host_id, None, None, async { Err(err) }).await,
     }
 }
 
@@ -351,7 +346,7 @@ pub async fn scan_tree(
 ) -> Result<()> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "scan_tree", Some(&host), Some(db), async {
+            registrar(state, "scan_tree", host_id, Some(&host), Some(db), async {
                 let trie = Arc::new(Mutex::new(KeyTrie::new()));
                 state
                     .trees
@@ -364,7 +359,12 @@ pub async fn scan_tree(
             })
             .await
         }
-        Err(err) => registrar(state, "scan_tree", None, Some(db), async { Err(err) }).await,
+        Err(err) => {
+            registrar(state, "scan_tree", host_id, None, Some(db), async {
+                Err(err)
+            })
+            .await
+        }
     }
 }
 
@@ -385,46 +385,58 @@ pub async fn load_more_children(
 ) -> Result<Level> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "load_more_children", Some(&host), Some(db), async {
-                let trie = state
-                    .trees
-                    .lock()
-                    .unwrap()
-                    .get(&(host_id.to_string(), db))
-                    .cloned()
-                    .ok_or_else(|| CommandError::UnknownHost(host_id.to_string()))?;
+            registrar(
+                state,
+                "load_more_children",
+                host_id,
+                Some(&host),
+                Some(db),
+                async {
+                    let trie = state
+                        .trees
+                        .lock()
+                        .unwrap()
+                        .get(&(host_id.to_string(), db))
+                        .cloned()
+                        .ok_or_else(|| CommandError::UnknownHost(host_id.to_string()))?;
 
-                // Quantos já estão à vista, mais uma leva.
-                let atual = trie
-                    .lock()
-                    .unwrap()
-                    .level(prefix)
-                    .map(|n| n.children.len())
-                    .unwrap_or(0);
+                    // Quantos já estão à vista, mais uma leva.
+                    let atual = trie
+                        .lock()
+                        .unwrap()
+                        .level(prefix)
+                        .map(|n| n.children.len())
+                        .unwrap_or(0);
 
-                expand_branch(
-                    &state.pool,
-                    Alvo {
-                        host: &host,
-                        pw: pw.as_deref(),
-                        db,
-                    },
-                    &trie,
-                    prefix,
-                    atual + MAX_CHILDREN,
-                    progress,
-                )
-                .await?;
+                    expand_branch(
+                        &state.pool,
+                        Alvo {
+                            host: &host,
+                            pw: pw.as_deref(),
+                            db,
+                        },
+                        &trie,
+                        prefix,
+                        atual + MAX_CHILDREN,
+                        progress,
+                    )
+                    .await?;
 
-                let nivel = trie.lock().unwrap().level(prefix);
-                nivel.ok_or_else(|| CommandError::UnknownHost(prefix.to_string()))
-            })
+                    let nivel = trie.lock().unwrap().level(prefix);
+                    nivel.ok_or_else(|| CommandError::UnknownHost(prefix.to_string()))
+                },
+            )
             .await
         }
         Err(err) => {
-            registrar(state, "load_more_children", None, Some(db), async {
-                Err(err)
-            })
+            registrar(
+                state,
+                "load_more_children",
+                host_id,
+                None,
+                Some(db),
+                async { Err(err) },
+            )
             .await
         }
     }
@@ -458,7 +470,7 @@ pub async fn rescan(
 ) -> Result<ScanReport> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "rescan", Some(&host), Some(db), async {
+            registrar(state, "rescan", host_id, Some(&host), Some(db), async {
                 Ok(state
                     .index
                     .rescan(&state.pool, &host, pw.as_deref(), db, progress)
@@ -466,7 +478,7 @@ pub async fn rescan(
             })
             .await
         }
-        Err(err) => registrar(state, "rescan", None, Some(db), async { Err(err) }).await,
+        Err(err) => registrar(state, "rescan", host_id, None, Some(db), async { Err(err) }).await,
     }
 }
 
@@ -491,7 +503,7 @@ pub async fn read_value_more(
 ) -> Result<ValueView> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "read_value", Some(&host), Some(db), async {
+            registrar(state, "read_value", host_id, Some(&host), Some(db), async {
                 let limit = ValueLimit {
                     offset,
                     max_bytes: PAGE_BYTES,
@@ -504,7 +516,12 @@ pub async fn read_value_more(
             })
             .await
         }
-        Err(err) => registrar(state, "read_value", None, Some(db), async { Err(err) }).await,
+        Err(err) => {
+            registrar(state, "read_value", host_id, None, Some(db), async {
+                Err(err)
+            })
+            .await
+        }
     }
 }
 
@@ -522,40 +539,52 @@ pub async fn write_value(
 ) -> Result<WriteOutcome> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "write_value", Some(&host), Some(db), async {
-                if needs_confirmation(host.env, confirmed) {
-                    return Ok(WriteOutcome::NeedsConfirmation {
-                        summary: op_summary(key, &op),
-                    });
-                }
+            registrar(
+                state,
+                "write_value",
+                host_id,
+                Some(&host),
+                Some(db),
+                async {
+                    if needs_confirmation(host.env, confirmed) {
+                        return Ok(WriteOutcome::NeedsConfirmation {
+                            summary: op_summary(key, &op),
+                        });
+                    }
 
-                let entry_id = state
-                    .history
-                    .write_with_backup(
-                        &state.pool,
-                        &host,
-                        pw.as_deref(),
-                        db,
-                        key,
-                        &op,
-                        Actor::Human,
-                    )
-                    .await?;
+                    let entry_id = state
+                        .history
+                        .write_with_backup(
+                            &state.pool,
+                            &host,
+                            pw.as_deref(),
+                            db,
+                            key,
+                            &op,
+                            Actor::Human,
+                        )
+                        .await?;
 
-                // O índice sabia desta chave com o valor ANTIGO. Apagar a
-                // linha é o conserto honesto e barato: a busca para de
-                // devolver um texto que não está mais lá, e a próxima
-                // varredura reindexa a chave com o valor novo. Reindexar só
-                // esta chave aqui exigiria relê-la do Redis — custo de uma
-                // ida e volta a mais em toda escrita, para adiantar o que a
-                // varredura faz de qualquer jeito.
-                state.index.forget_key(host_id, db, key)?;
+                    // O índice sabia desta chave com o valor ANTIGO. Apagar a
+                    // linha é o conserto honesto e barato: a busca para de
+                    // devolver um texto que não está mais lá, e a próxima
+                    // varredura reindexa a chave com o valor novo. Reindexar só
+                    // esta chave aqui exigiria relê-la do Redis — custo de uma
+                    // ida e volta a mais em toda escrita, para adiantar o que a
+                    // varredura faz de qualquer jeito.
+                    state.index.forget_key(host_id, db, key)?;
 
-                Ok(WriteOutcome::Applied { entry_id })
+                    Ok(WriteOutcome::Applied { entry_id })
+                },
+            )
+            .await
+        }
+        Err(err) => {
+            registrar(state, "write_value", host_id, None, Some(db), async {
+                Err(err)
             })
             .await
         }
-        Err(err) => registrar(state, "write_value", None, Some(db), async { Err(err) }).await,
     }
 }
 
@@ -602,7 +631,7 @@ pub async fn search(
 ) -> Result<SearchOutcome> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "search", Some(&host), Some(db), async {
+            registrar(state, "search", host_id, Some(&host), Some(db), async {
                 Ok(search_index(
                     &state.index,
                     &state.pool,
@@ -616,7 +645,7 @@ pub async fn search(
             })
             .await
         }
-        Err(err) => registrar(state, "search", None, Some(db), async { Err(err) }).await,
+        Err(err) => registrar(state, "search", host_id, None, Some(db), async { Err(err) }).await,
     }
 }
 
@@ -1233,6 +1262,11 @@ mod tests {
                 .is_some_and(|d| d.contains("não está cadastrado")),
             "o detail precisa ser a mensagem já classificada do erro, veio {:?}",
             falha.detail
+        );
+        assert_eq!(
+            falha.host, "host-que-nao-existe",
+            "sem um Host resolvido, o host_id precisa aparecer no lugar do nome — \
+             em branco seria indistinguível de dado faltando na tela"
         );
     }
 
