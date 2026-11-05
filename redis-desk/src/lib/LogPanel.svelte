@@ -16,35 +16,71 @@
 	import { errorMessage, logs, type LogEntry } from "$lib/api";
 	import { onMount } from "svelte";
 
+	/**
+	 * De quanto em quanto tempo a lista se relê sozinha.
+	 *
+	 * Lida só com o anel em memória: uma trava e uma cópia de no máximo
+	 * 1000 entradas, sem rede e sem disco. Barato o bastante para pagar
+	 * enquanto a aba estiver aberta, e só enquanto estiver. Três segundos é
+	 * o mesmo intervalo que a fila de aprovações já usa em `+page.svelte`.
+	 */
+	const INTERVALO_MS = 3000;
+
 	let entradas = $state<LogEntry[]>([]);
 	// Começa true: o instante antes do onMount resolver é "ainda não lido",
 	// não "lido e vazio" — os dois não podem parecer a mesma tela por
 	// coincidência de tempo.
 	let carregando = $state(true);
 	let erro = $state("");
+	/** Quando a lista na tela foi lida. `0` = nunca. */
+	let lidoEm = $state(0);
 
 	async function carregar() {
 		carregando = true;
-		erro = "";
 		try {
 			entradas = await logs();
+			erro = "";
+			lidoEm = Date.now();
 		} catch (err) {
-			entradas = [];
+			// A lista que já está na tela NÃO é apagada: uma releitura que
+			// falha não desfaz o que foi lido antes, e apagar deixaria a
+			// aba em branco justamente quando algo está dando errado.
 			erro = `Não foi possível ler o log: ${errorMessage(err)}`;
 		} finally {
 			carregando = false;
 		}
 	}
 
-	// Recarrega sempre que a aba é montada — inclusive quando a pessoa volta
-	// para ela depois de olhar outra, já que o componente é desmontado e
-	// remontado pela troca de aba em Workspace.svelte.
+	// Lê ao montar — inclusive quando a pessoa volta para esta aba depois de
+	// olhar outra, já que a troca de aba em Workspace.svelte desmonta e
+	// remonta o componente — e relê sozinha enquanto estiver aberta.
+	//
+	// Sem a releitura, ficar olhando esta aba durante uma varredura ou uma
+	// queda de conexão mostrava uma lista congelada, sem nada na tela
+	// dizendo que estava congelada: quem acompanha um host de produção se
+	// comportando mal concluiria que nada está sendo registrado. O botão
+	// "Atualizar" continua existindo ao lado da hora da última leitura,
+	// para quem quiser perguntar agora e para que a tela diga, em palavras,
+	// de quando é o que está vendo.
 	onMount(() => {
 		carregar();
+		const relogio = setInterval(carregar, INTERVALO_MS);
+		return () => clearInterval(relogio);
 	});
 
 	function hora(ms: number): string {
-		return new Date(ms).toLocaleTimeString("pt-BR", { hour12: false });
+		const quando = new Date(ms);
+		const relogio = quando.toLocaleTimeString("pt-BR", { hour12: false });
+		// Este é um aplicativo de mesa que fica dias aberto: sem a data, a
+		// entrada de segunda-feira se lê como "agora há pouco".
+		if (quando.toDateString() === new Date().toDateString()) {
+			return relogio;
+		}
+		const dia = quando.toLocaleDateString("pt-BR", {
+			day: "2-digit",
+			month: "2-digit",
+		});
+		return `${dia} ${relogio}`;
 	}
 
 	function duracao(ms: number): string {
@@ -60,15 +96,33 @@
 </script>
 
 <section>
+	<div class="topo">
+		<!-- A hora da última leitura é parte da honestidade da aba: sem ela, a
+		     lista na tela não diz de quando é — e uma lista parada parece
+		     uma lista vazia de acontecimentos. -->
+		<p class="aviso">
+			{#if lidoEm > 0}
+				Atualizado às {hora(lidoEm)}
+			{:else if carregando}
+				Lendo o log…
+			{:else}
+				Nenhuma leitura concluída
+			{/if}
+		</p>
+		<button onclick={carregar} disabled={carregando}>Atualizar</button>
+	</div>
+
 	{#if erro}
 		<p class="erro" role="alert">{erro}</p>
-	{:else if carregando && entradas.length === 0}
-		<p class="aviso">Lendo o log…</p>
-	{:else if entradas.length === 0}
-		<p class="vazio" data-testid="vazio">
-			Nenhum evento registrado ainda. Conexões, falhas e operações lentas de
-			qualquer host aparecem aqui assim que acontecerem.
-		</p>
+	{/if}
+
+	{#if entradas.length === 0}
+		{#if lidoEm > 0 && !erro}
+			<p class="vazio" data-testid="vazio">
+				Nenhum evento registrado ainda. Conexões, falhas e operações lentas de
+				qualquer host aparecem aqui assim que acontecerem.
+			</p>
+		{/if}
 	{:else}
 		<ul>
 			<!-- Chave pelo índice, de propósito. Qualquer chave montada com o
@@ -110,6 +164,21 @@
 <style>
 	section {
 		min-width: 0;
+	}
+
+	.topo {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 0.6rem;
+		margin-bottom: 0.7rem;
+	}
+
+	.topo button {
+		padding: 0.12rem 0.45rem;
+		font-size: 0.88rem;
+		color: var(--text-dim);
+		white-space: nowrap;
 	}
 
 	ul {
@@ -194,8 +263,12 @@
 		color: var(--text-faint);
 	}
 
+	.aviso {
+		font-size: 0.88rem;
+	}
+
 	.erro {
-		margin: 0;
+		margin: 0 0 0.7rem;
 		padding: 0.4rem 0.6rem;
 		border: 1px solid #5e3a38;
 		border-radius: var(--radius);

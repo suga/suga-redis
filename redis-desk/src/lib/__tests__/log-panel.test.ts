@@ -1,5 +1,6 @@
 import { render, screen, within } from "@testing-library/svelte";
-import { beforeEach, expect, test, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 vi.mock("$lib/api", async (importOriginal) => {
 	const real = await importOriginal<typeof import("$lib/api")>();
@@ -35,6 +36,10 @@ function montar() {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+});
+
+afterEach(() => {
+	vi.useRealTimers();
 });
 
 test("mostra a mais recente em cima, com hora, host, operação e duração", async () => {
@@ -152,4 +157,59 @@ test("avisa quando não conseguiu ler o log", async () => {
 	expect(erro).toHaveTextContent(/não foi possível ler o log/i);
 	expect(screen.queryByTestId("vazio")).not.toBeInTheDocument();
 	expect(screen.queryByTestId("entrada")).not.toBeInTheDocument();
+});
+
+test("uma entrada de outro dia mostra a data, não só a hora", async () => {
+	const ontem = Date.now() - 36 * 60 * 60 * 1000;
+	const agora = Date.now();
+	leu.mockResolvedValue([entrada({ at_ms: agora }), entrada({ at_ms: ontem })]);
+	montar();
+
+	const linhas = await screen.findAllByTestId("entrada");
+	const dia = (ms: number) =>
+		new Date(ms).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" });
+
+	// Num aplicativo de mesa que fica dias aberto, só a hora faz a entrada
+	// de segunda-feira parecer de agora há pouco.
+	expect(linhas[1]).toHaveTextContent(dia(ontem));
+	expect(linhas[0]).not.toHaveTextContent(dia(agora));
+});
+
+test("o botão Atualizar relê o log", async () => {
+	const user = userEvent.setup();
+	leu.mockResolvedValue([]);
+	montar();
+	await screen.findByTestId("vazio");
+
+	await user.click(screen.getByRole("button", { name: "Atualizar" }));
+
+	expect(leu).toHaveBeenCalledTimes(2);
+});
+
+test("relê o log sozinho enquanto a aba fica aberta", async () => {
+	vi.useFakeTimers();
+	leu.mockResolvedValue([]);
+	montar();
+	await vi.advanceTimersByTimeAsync(0);
+	expect(leu).toHaveBeenCalledTimes(1);
+
+	// Uma lista congelada, sem nada na tela dizendo que está congelada, faz
+	// quem assiste a um host de produção concluir que nada está sendo
+	// registrado.
+	await vi.advanceTimersByTimeAsync(3000);
+	expect(leu).toHaveBeenCalledTimes(2);
+});
+
+test("uma falha na releitura não apaga o que já estava na tela", async () => {
+	vi.useFakeTimers();
+	leu.mockResolvedValueOnce([entrada({ detail: "conexão recusada" })]);
+	montar();
+	await vi.advanceTimersByTimeAsync(0);
+	expect(await screen.findByTestId("entrada")).toBeInTheDocument();
+
+	leu.mockRejectedValueOnce(new Error("falha ao ler"));
+	await vi.advanceTimersByTimeAsync(3000);
+
+	expect(screen.getByRole("alert")).toHaveTextContent(/não foi possível ler o log/i);
+	expect(screen.getByTestId("entrada")).toBeInTheDocument();
 });
