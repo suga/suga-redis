@@ -458,3 +458,37 @@ export function onApprovalsChanged(
 ): Promise<UnlistenFn> {
 	return listen<number>("approvals://changed", (event) => handler(event.payload));
 }
+
+// ------------------------------------------------------------------- log
+
+export type LogKind = "connection" | "failure" | "slow";
+
+/**
+ * Uma linha do log em memória: uma conexão indo ou vindo, uma falha, ou uma
+ * operação lenta. `host` nunca vem vazio — quando o id não é reconhecido, a
+ * fachada grava o próprio id como rótulo.
+ */
+export interface LogEntry {
+	at_ms: number;
+	kind: LogKind;
+	host: string;
+	db: number | null;
+	operation: string;
+	duration_ms: number | null;
+	detail: string | null;
+}
+
+/** O log inteiro, do mais novo para o mais velho. */
+export function logs(): Promise<LogEntry[]> {
+	return invoke("cmd_logs");
+}
+
+/** Conecta de verdade e devolve o tempo do PING em milissegundos. */
+export function connect(hostId: string): Promise<number> {
+	return invoke("cmd_connect", { hostId });
+}
+
+/** Encerra a conexão com o host. */
+export function disconnect(hostId: string): Promise<void> {
+	return invoke("cmd_disconnect", { hostId });
+}
