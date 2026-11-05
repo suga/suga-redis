@@ -15,3 +15,44 @@ if (!("ResizeObserver" in globalThis)) {
 		disconnect() {}
 	} as unknown as typeof ResizeObserver;
 }
+
+/**
+ * O Node 22+ já define `globalThis.localStorage` — um `getter` nativo que
+ * fica inerte sem `--localstorage-file` e, por existir antes, impede o
+ * jsdom de instalar o dele. Sem isso, qualquer `localStorage.getItem`
+ * explode com "Cannot read properties of undefined". Um `Storage` de
+ * verdade, em memória, é o equivalente honesto no teste.
+ */
+class ArmazenamentoEmMemoria implements Storage {
+	#dados = new Map<string, string>();
+
+	get length() {
+		return this.#dados.size;
+	}
+
+	clear(): void {
+		this.#dados.clear();
+	}
+
+	getItem(chave: string): string | null {
+		return this.#dados.get(chave) ?? null;
+	}
+
+	key(indice: number): string | null {
+		return Array.from(this.#dados.keys())[indice] ?? null;
+	}
+
+	removeItem(chave: string): void {
+		this.#dados.delete(chave);
+	}
+
+	setItem(chave: string, valor: string): void {
+		this.#dados.set(chave, String(valor));
+	}
+}
+
+Object.defineProperty(globalThis, "localStorage", {
+	value: new ArmazenamentoEmMemoria(),
+	configurable: true,
+	writable: true,
+});

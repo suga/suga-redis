@@ -4,6 +4,7 @@
 	 * chaves à esquerda, painel do valor à direita.
 	 */
 	import ConfirmDialog from "$lib/ConfirmDialog.svelte";
+	import Divisor from "$lib/Divisor.svelte";
 	import KeyEditor from "$lib/KeyEditor.svelte";
 	import KeyTree from "$lib/KeyTree.svelte";
 	import HistoryPanel from "$lib/HistoryPanel.svelte";
@@ -49,6 +50,10 @@
 	}
 
 	let { host, falhaConexao }: Props = $props();
+
+	/** Largura da coluna de chaves antes de qualquer arrasto — o mínimo que a coluna já tinha. */
+	const LARGURA_CHAVES_PADRAO = 256; // 16rem
+	let larguraChaves = $state(LARGURA_CHAVES_PADRAO);
 
 	/**
 	 * O banco parte do que o host traz cadastrado e passa a ser escolha da
@@ -227,7 +232,7 @@
 	}
 </script>
 
-<div class="trabalho">
+<div class="trabalho" style="--largura-chaves: {larguraChaves}px">
 	<div class="coluna">
 		<div class="controles">
 			<label class="banco">
@@ -306,6 +311,12 @@
 		</div>
 	</div>
 
+	<Divisor
+		chave="largura:chaves"
+		inicial={LARGURA_CHAVES_PADRAO}
+		onLargura={(px) => (larguraChaves = px)}
+	/>
+
 	<div class="painel">
 		<nav class="abas">
 			{#each ABAS as item (item.id)}
@@ -373,9 +384,15 @@
 <style>
 	.trabalho {
 		display: grid;
-		grid-template-columns: minmax(16rem, 24rem) 1fr;
+		/* A variável vem do `Divisor`: ele é quem mede o arrasto e lembra a
+		   largura entre sessões. O valor fixo aqui só cobre o instante
+		   antes da alça montar. */
+		grid-template-columns: var(--largura-chaves, 16rem) 1fr;
 		height: 100%;
 		min-height: 0;
+		/* Ancora o `Divisor`, que se posiciona sozinho em cima da borda
+		   entre as colunas sem ocupar uma faixa própria na grade. */
+		position: relative;
 	}
 
 	.coluna {
@@ -523,6 +540,11 @@
 		.coluna {
 			border-right: none;
 			border-bottom: 1px solid var(--rule);
+		}
+
+		/* Sem colunas lado a lado, não há borda para a alça marcar. */
+		.trabalho :global(.divisor) {
+			display: none;
 		}
 	}
 </style>

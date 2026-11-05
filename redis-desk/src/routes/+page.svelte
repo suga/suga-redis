@@ -6,6 +6,7 @@
 	 */
 	import { onMount } from "svelte";
 	import ApprovalDialog from "$lib/ApprovalDialog.svelte";
+	import Divisor from "$lib/Divisor.svelte";
 	import EnvBand from "$lib/EnvBand.svelte";
 	import HostForm from "$lib/HostForm.svelte";
 	import HostList from "$lib/HostList.svelte";
@@ -18,6 +19,10 @@
 		type ApprovalRequest,
 		type Host,
 	} from "$lib/api";
+
+	/** Largura da coluna de hosts antes de qualquer arrasto — o mínimo que a coluna já tinha. */
+	const LARGURA_HOSTS_PADRAO = 224; // 14rem
+	let larguraHosts = $state(LARGURA_HOSTS_PADRAO);
 
 	let hosts = $state<Host[]>([]);
 	let aberto = $state<Host | null>(null);
@@ -79,7 +84,7 @@
 <div class="app">
 	<EnvBand host={aberto} />
 
-	<div class="corpo">
+	<div class="corpo" style="--largura-hosts: {larguraHosts}px">
 		<aside>
 			<HostList
 				{hosts}
@@ -103,6 +108,12 @@
 				}}
 			/>
 		</aside>
+
+		<Divisor
+			chave="largura:hosts"
+			inicial={LARGURA_HOSTS_PADRAO}
+			onLargura={(px) => (larguraHosts = px)}
+		/>
 
 		<main>
 			{#if erro}
@@ -149,9 +160,15 @@
 
 	.corpo {
 		display: grid;
-		grid-template-columns: minmax(14rem, 20rem) 1fr;
+		/* A variável vem do `Divisor`: ele é quem mede o arrasto e lembra a
+		   largura entre sessões. O valor fixo aqui só cobre o instante
+		   antes da alça montar. */
+		grid-template-columns: var(--largura-hosts, 14rem) 1fr;
 		flex: 1;
 		min-height: 0;
+		/* Ancora o `Divisor`, que se posiciona sozinho em cima da borda
+		   entre as colunas sem ocupar uma faixa própria na grade. */
+		position: relative;
 	}
 
 	aside {
@@ -211,6 +228,11 @@
 		.corpo {
 			grid-template-columns: 1fr;
 			grid-template-rows: auto 1fr;
+		}
+
+		/* Sem colunas lado a lado, não há borda para a alça marcar. */
+		.corpo :global(.divisor) {
+			display: none;
 		}
 	}
 </style>
