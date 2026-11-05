@@ -62,8 +62,14 @@
 
 	let { host, falhaConexao, onFalhaDeConexao }: Props = $props();
 
-	/** Largura da coluna de chaves antes de qualquer arrasto — o mínimo que a coluna já tinha. */
-	const LARGURA_CHAVES_PADRAO = 256; // 16rem
+	/**
+	 * Largura da coluna de chaves antes de qualquer arrasto — o TETO que a
+	 * coluna tinha antes de virar arrastável (`minmax(16rem, 24rem)`), e
+	 * não o piso. Ver a mesma nota em `+page.svelte`: nome de chave longo
+	 * fazia o `minmax` assentar no topo, e partir do piso estreitaria a
+	 * coluna justamente para quem nunca arrastou nada.
+	 */
+	const LARGURA_CHAVES_PADRAO = 384; // 24rem
 	let larguraChaves = $state(LARGURA_CHAVES_PADRAO);
 
 	/**
@@ -538,7 +544,7 @@
 		/* A variável vem do `Divisor`: ele é quem mede o arrasto e lembra a
 		   largura entre sessões. O valor fixo aqui só cobre o instante
 		   antes da alça montar. */
-		grid-template-columns: var(--largura-chaves, 16rem) 1fr;
+		grid-template-columns: var(--largura-chaves, 24rem) 1fr;
 		height: 100%;
 		min-height: 0;
 		/* Ancora o `Divisor`, que se posiciona sozinho em cima da borda

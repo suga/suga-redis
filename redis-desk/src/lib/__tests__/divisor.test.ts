@@ -204,3 +204,38 @@ test("não aplica largura guardada em janela estreita", async () => {
 
 	await waitFor(() => expect(onLargura).toHaveBeenCalledWith(220));
 });
+
+test("o teto é metade do painel que contém a alça, não da janela", async () => {
+	window.innerWidth = 2000; // metade da janela seria 1000
+	const onLargura = vi.fn();
+	const { container } = render(Divisor, {
+		props: { chave: "largura:container", inicial: 240, onLargura },
+	});
+	// O jsdom não faz layout: o pai mede 0 e a alça cai na janela. Este
+	// valor é o que um navegador de verdade informaria.
+	Object.defineProperty(container, "clientWidth", { value: 600, configurable: true });
+	await waitFor(() => expect(onLargura).toHaveBeenCalledWith(240));
+	onLargura.mockClear();
+
+	arrastar(100, 1000); // pediria 240 + 900 = 1140
+
+	// A alça das chaves vive DENTRO do painel da direita. Medindo a janela,
+	// com a coluna de hosts no máximo, ela deixava o painel do valor
+	// espremido a quase nada.
+	expect(onLargura).toHaveBeenLastCalledWith(300);
+});
+
+test("o teto anunciado acompanha a janela, em vez de ficar no primeiro valor", async () => {
+	window.innerWidth = 1200;
+	render(Divisor, {
+		props: { chave: "largura:teto-anunciado", inicial: 240, onLargura: vi.fn() },
+	});
+	await waitFor(() => expect(alca()).toHaveAttribute("aria-valuemax", "600"));
+
+	window.innerWidth = 800;
+	window.dispatchEvent(new Event("resize"));
+
+	// Quem navega por teclado lê este número para saber até onde dá para
+	// ir; congelado no valor da montagem, ele vira uma promessa falsa.
+	await waitFor(() => expect(alca()).toHaveAttribute("aria-valuemax", "400"));
+});

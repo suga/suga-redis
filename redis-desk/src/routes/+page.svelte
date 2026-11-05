@@ -20,8 +20,17 @@
 		type Host,
 	} from "$lib/api";
 
-	/** Largura da coluna de hosts antes de qualquer arrasto — o mínimo que a coluna já tinha. */
-	const LARGURA_HOSTS_PADRAO = 224; // 14rem
+	/**
+	 * Largura da coluna de hosts antes de qualquer arrasto.
+	 *
+	 * É o TETO que a coluna tinha antes de virar arrastável
+	 * (`minmax(14rem, 20rem)`), não o piso: com endereço de host longo — o
+	 * caso normal num cluster gerenciado — o `minmax` assentava no topo, e
+	 * partir do piso entregaria a quem abre o app pela primeira vez uma
+	 * coluna ~30% mais estreita do que a de antes deste trabalho, cuja
+	 * motivação declarada era que endereço e nome de chave vivem cortados.
+	 */
+	const LARGURA_HOSTS_PADRAO = 320; // 20rem
 	let larguraHosts = $state(LARGURA_HOSTS_PADRAO);
 
 	let hosts = $state<Host[]>([]);
@@ -177,7 +186,7 @@
 		/* A variável vem do `Divisor`: ele é quem mede o arrasto e lembra a
 		   largura entre sessões. O valor fixo aqui só cobre o instante
 		   antes da alça montar. */
-		grid-template-columns: var(--largura-hosts, 14rem) 1fr;
+		grid-template-columns: var(--largura-hosts, 20rem) 1fr;
 		flex: 1;
 		min-height: 0;
 		/* Ancora o `Divisor`, que se posiciona sozinho em cima da borda

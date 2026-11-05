@@ -27,11 +27,34 @@
 	/** O passo de um toque de seta — pensado para quem não usa mouse. */
 	const PASSO = 16;
 
-	/** Teto da largura: metade da janela, recalculado a cada movimento —
-	 * nunca uma coluna maior que a própria tela. */
+	/** A própria alça, para medir o espaço que ela divide. */
+	let elemento: HTMLDivElement | undefined = $state();
+
+	/**
+	 * Teto da largura: metade do contêiner que a alça divide, recalculado a
+	 * cada movimento — nunca uma coluna maior que a metade do espaço que ela
+	 * tem para repartir.
+	 *
+	 * O contêiner, e não a janela: a alça das chaves vive DENTRO do painel
+	 * da direita, e medir a janela dava a ela o mesmo teto da alça dos
+	 * hosts. Com a coluna de hosts no máximo, isso deixava o painel do
+	 * valor espremido a quase nada.
+	 */
 	function teto(): number {
-		return window.innerWidth / 2;
+		const painel = elemento?.parentElement?.clientWidth ?? 0;
+		// Antes de montar (a largura inicial é lida aí) e num ambiente sem
+		// layout, o pai mede 0: a janela é a melhor referência disponível, e
+		// é a que valia antes desta medida existir.
+		return (painel > 0 ? painel : window.innerWidth) / 2;
 	}
+
+	/**
+	 * O teto corrente, anunciado a quem navega por teclado. É estado, e não
+	 * uma chamada direta no markup: `aria-valuemax={teto()}` era avaliado
+	 * uma vez e nunca mais, prometendo a quem lê um limite que já não era o
+	 * de agora.
+	 */
+	let maximo = $state(0);
 
 	function dentroDosLimites(valor: number, limite: number): boolean {
 		return Number.isFinite(valor) && valor >= min && valor <= limite;
@@ -47,13 +70,26 @@
 	let largura = $state(larguraInicial());
 
 	onMount(() => {
-		// Devolve a largura já sabida (guardada ou inicial) assim que a
-		// alça nasce, para quem a usa pintar a grade com ela desde já.
-		onLargura(largura);
+		// Agora o elemento existe e o contêiner pode ser medido: a largura
+		// inicial foi validada antes disso, contra a janela. Reaplicar
+		// devolve a largura já sabida (guardada ou inicial) a quem usa a
+		// alça, já limitada pelo espaço real.
+		maximo = teto();
+		aplicar(largura);
+
+		// A janela muda de tamanho e o teto muda com ela — inclusive o que
+		// está anunciado na alça.
+		const aoRedimensionar = () => {
+			maximo = teto();
+			aplicar(largura);
+		};
+		window.addEventListener("resize", aoRedimensionar);
+		return () => window.removeEventListener("resize", aoRedimensionar);
 	});
 
 	function aplicar(px: number) {
-		const limitada = Math.min(Math.max(px, min), teto());
+		maximo = teto();
+		const limitada = Math.min(Math.max(px, min), maximo);
 		largura = limitada;
 		onLargura(limitada);
 		return limitada;
@@ -121,6 +157,7 @@
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div
+	bind:this={elemento}
 	class="divisor"
 	style="left: {largura}px"
 	role="separator"
@@ -128,7 +165,7 @@
 	aria-label="Redimensionar coluna"
 	aria-valuenow={largura}
 	aria-valuemin={min}
-	aria-valuemax={teto()}
+	aria-valuemax={maximo}
 	tabindex="0"
 	onmousedown={iniciarArrasto}
 	onkeydown={teclado}
