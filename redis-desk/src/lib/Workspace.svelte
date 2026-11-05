@@ -307,17 +307,20 @@
 	<div class="coluna">
 		<div class="controles">
 			<!--
-				Nota de design: o seletor NÃO desliga enquanto `varrendo` é
-				verdadeiro. A pessoa pode trocar de banco com um `rescan`
-				ainda em voo, de propósito — é o mesmo espírito de
-				`scanTree`, que também corre em segundo plano sem travar a
-				tela. A segurança não vem de impedir a troca, vem de
-				`geracaoIndice` em `varrer()`: a resposta do banco abandonado
-				chega, não bate mais com a geração atual, e é descartada.
+				Nota de design: o seletor desliga enquanto `varrendo` é
+				verdadeiro, junto com o botão. `progresso` (do evento global
+				`onRescanProgress`, sem `host_id`/`db` no payload) e o próprio
+				`varrendo` não carregam geração nenhuma — não dá para
+				descartar uma resposta atrasada que não se sabe de qual banco
+				é. Desligar o controle fecha essa classe inteira, em vez de
+				só escondê-la. O que ainda pode correr depois de uma troca de
+				banco — a pergunta de índice do `scanStatus` — continua
+				protegido por `geracaoIndice`, que compara a geração da
+				resposta contra a atual antes de escrever `relatorio`/`erro`.
 			-->
 			<label class="banco">
 				<span>Banco</span>
-				<select bind:value={db}>
+				<select bind:value={db} disabled={varrendo}>
 					{#if bancos.length === 0}
 						<option value={db}>{db}</option>
 					{:else}

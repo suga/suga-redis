@@ -225,15 +225,19 @@ test("Varrer de novo: trocar de banco antes do rescan voltar não deixa o result
 	await fireEvent.click(screen.getByRole("button", { name: "Varrer de novo" }));
 	await waitFor(() => expect(varredura).toHaveBeenCalledTimes(1));
 
-	// Antes do `rescan` voltar, troca para o banco 1 — a mesma troca rápida
-	// do teste anterior, agora durante uma varredura manual em vez de uma
-	// pergunta de índice automática.
+	// Uma pessoa de verdade não consegue mais fazer esta troca por aqui — o
+	// seletor desliga junto com `varrendo` — mas o teste dispara o evento
+	// direto no elemento mesmo assim, como defesa a mais: se o valor mudar
+	// por qualquer outro caminho, `geracaoIndice` ainda tem que impedir que
+	// a resposta do banco abandonado aterrisse em `relatorio`/`erro`.
 	const seletor = screen.getByRole("combobox") as HTMLSelectElement;
 	await waitFor(() => expect(seletor.querySelectorAll("option")).toHaveLength(2));
+	expect(seletor).toBeDisabled();
 	await fireEvent.change(seletor, { target: { value: "1" } });
-	// O `rescan` do banco 0 continua pendurado, então a linha ainda diz
-	// "Varrendo…" — é só o `rescan` que é descartado, não o indicador de
-	// carregamento, que se desliga no `finally` de qualquer forma.
+	// `progresso` e `varrendo` não carregam geração nenhuma — não há como
+	// filtrá-los pelo banco, por isso a linha segue dizendo "Varrendo…" até
+	// o `rescan` abandonado liberar o `finally`. É exatamente por isso que
+	// a correção de verdade é desligar o seletor, não alargar a guarda.
 	await waitFor(() => expect(screen.getByText(/Varrendo/)).toBeInTheDocument());
 
 	// Só agora o `rescan` do banco 0, já abandonado, responde — com um
@@ -251,4 +255,45 @@ test("Varrer de novo: trocar de banco antes do rescan voltar não deixa o result
 	// `rescan` atrasado do banco 0 pode ter aterrissado em cima dela.
 	expect(screen.getByText(/nunca varrido/)).toBeInTheDocument();
 	expect(screen.queryByTestId("erro-indice")).not.toBeInTheDocument();
+});
+
+test("o seletor de banco desliga durante a varredura manual e volta a ligar depois", async () => {
+	bancos.mockImplementation(async () => [
+		[0, 10],
+		[1, 20],
+	]);
+	indice.mockImplementation(async () => null);
+
+	const { promessa, resolve } = promessaControlavel<{
+		host_id: string;
+		db: number;
+		keys: number;
+		finished_at: number;
+		duration_ms: number;
+	}>();
+	varredura.mockImplementation(() => promessa);
+
+	render(Workspace, { props: { host: host(), falhaConexao: null } });
+	await waitFor(() => expect(screen.getByText(/nunca varrido/)).toBeInTheDocument());
+
+	const seletor = screen.getByRole("combobox") as HTMLSelectElement;
+	expect(seletor).toBeEnabled();
+
+	await fireEvent.click(screen.getByRole("button", { name: "Varrer de novo" }));
+
+	// Com o `rescan` ainda em voo, trocar de banco por aqui não é mais
+	// possível — a classe inteira de resposta atrasada sem geração
+	// (`progresso`, `varrendo`) fica fechada por não haver como abrir o
+	// seletor para chegar nela.
+	await waitFor(() => expect(seletor).toBeDisabled());
+
+	resolve({
+		host_id: "h1",
+		db: 0,
+		keys: 3,
+		finished_at: Date.now(),
+		duration_ms: 1,
+	});
+
+	await waitFor(() => expect(seletor).toBeEnabled());
 });
