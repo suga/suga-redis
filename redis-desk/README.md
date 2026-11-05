@@ -132,6 +132,11 @@ sudo dpkg -i suga-redis_*.deb
 
 Veja [`docs/build.md`](docs/build.md).
 
+### Mexer no código
+
+Comece por [`docs/CONTEXTO.md`](docs/CONTEXTO.md): estado atual, arquitetura,
+invariantes e as armadilhas que já quebraram este projeto.
+
 ---
 
 ## Começar a usar
