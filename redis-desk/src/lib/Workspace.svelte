@@ -231,10 +231,18 @@
 		// `rescan` está prestes a trazer.
 		erroIndice = "";
 		perguntandoIndice = false;
-		geracaoIndice += 1;
+		const minhaGeracao = ++geracaoIndice;
 		try {
-			relatorio = await rescan(host.id, db);
+			const novoRelatorio = await rescan(host.id, db);
+			// O seletor de banco não se desliga durante a varredura (ver nota
+			// de design logo acima do markup) — a pessoa pode trocar de
+			// banco com isto ainda em voo. Se trocou, `abrirBanco` já subiu
+			// `geracaoIndice` de novo, e este resultado, de um banco que já
+			// não é o aberto, não pode aterrissar.
+			if (minhaGeracao !== geracaoIndice) return;
+			relatorio = novoRelatorio;
 		} catch (err) {
+			if (minhaGeracao !== geracaoIndice) return;
 			erro = errorMessage(err);
 		} finally {
 			varrendo = false;
@@ -298,6 +306,15 @@
 <div class="trabalho" style="--largura-chaves: {larguraChaves}px">
 	<div class="coluna">
 		<div class="controles">
+			<!--
+				Nota de design: o seletor NÃO desliga enquanto `varrendo` é
+				verdadeiro. A pessoa pode trocar de banco com um `rescan`
+				ainda em voo, de propósito — é o mesmo espírito de
+				`scanTree`, que também corre em segundo plano sem travar a
+				tela. A segurança não vem de impedir a troca, vem de
+				`geracaoIndice` em `varrer()`: a resposta do banco abandonado
+				chega, não bate mais com a geração atual, e é descartada.
+			-->
 			<label class="banco">
 				<span>Banco</span>
 				<select bind:value={db}>

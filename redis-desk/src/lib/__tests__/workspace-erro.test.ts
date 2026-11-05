@@ -198,3 +198,57 @@ test("troca rápida de banco: uma resposta atrasada da pergunta antiga não sobr
 	expect(screen.getByText(/nunca varrido/)).toBeInTheDocument();
 	expect(screen.queryByTestId("erro-indice")).not.toBeInTheDocument();
 });
+
+test("Varrer de novo: trocar de banco antes do rescan voltar não deixa o resultado antigo aterrissar", async () => {
+	bancos.mockImplementation(async () => [
+		[0, 10],
+		[1, 20],
+	]);
+	// O índice já respondeu, legitimamente vazio, para os dois bancos —
+	// o que está em jogo aqui é só a resposta do `rescan`, não a dele.
+	indice.mockImplementation(async () => null);
+
+	const { promessa, resolve } = promessaControlavel<{
+		host_id: string;
+		db: number;
+		keys: number;
+		finished_at: number;
+		duration_ms: number;
+	}>();
+	varredura.mockImplementation(() => promessa);
+
+	render(Workspace, { props: { host: host(), falhaConexao: null } });
+	await waitFor(() => expect(screen.getByText(/nunca varrido/)).toBeInTheDocument());
+
+	// Clica em "Varrer de novo" no banco 0 (o aberto) — o `rescan` fica
+	// pendurado, controlado por este teste.
+	await fireEvent.click(screen.getByRole("button", { name: "Varrer de novo" }));
+	await waitFor(() => expect(varredura).toHaveBeenCalledTimes(1));
+
+	// Antes do `rescan` voltar, troca para o banco 1 — a mesma troca rápida
+	// do teste anterior, agora durante uma varredura manual em vez de uma
+	// pergunta de índice automática.
+	const seletor = screen.getByRole("combobox") as HTMLSelectElement;
+	await waitFor(() => expect(seletor.querySelectorAll("option")).toHaveLength(2));
+	await fireEvent.change(seletor, { target: { value: "1" } });
+	// O `rescan` do banco 0 continua pendurado, então a linha ainda diz
+	// "Varrendo…" — é só o `rescan` que é descartado, não o indicador de
+	// carregamento, que se desliga no `finally` de qualquer forma.
+	await waitFor(() => expect(screen.getByText(/Varrendo/)).toBeInTheDocument());
+
+	// Só agora o `rescan` do banco 0, já abandonado, responde — com um
+	// relatório que não é mais sobre o banco aberto.
+	resolve({
+		host_id: "h1",
+		db: 0,
+		keys: 999,
+		finished_at: Date.now(),
+		duration_ms: 1,
+	});
+	await waitFor(() => expect(screen.getByText(/nunca varrido/)).toBeInTheDocument());
+
+	// O banco 1 continua mostrando a resposta que já tinha — nada do
+	// `rescan` atrasado do banco 0 pode ter aterrissado em cima dela.
+	expect(screen.getByText(/nunca varrido/)).toBeInTheDocument();
+	expect(screen.queryByTestId("erro-indice")).not.toBeInTheDocument();
+});
