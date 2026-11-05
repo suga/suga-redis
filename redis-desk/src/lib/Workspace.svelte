@@ -7,6 +7,7 @@
 	import KeyEditor from "$lib/KeyEditor.svelte";
 	import KeyTree from "$lib/KeyTree.svelte";
 	import HistoryPanel from "$lib/HistoryPanel.svelte";
+	import LogPanel from "$lib/LogPanel.svelte";
 	import NewKeyDialog from "$lib/NewKeyDialog.svelte";
 	import SearchPanel from "$lib/SearchPanel.svelte";
 	import ValuePanel from "$lib/ValuePanel.svelte";
@@ -62,12 +63,13 @@
 	/** Força o painel a reler a chave depois de uma escrita. */
 	let revisao = $state(0);
 
-	type Aba = "valor" | "busca" | "historico";
+	type Aba = "valor" | "busca" | "historico" | "logs";
 	let aba = $state<Aba>("valor");
 	const ABAS: { id: Aba; label: string }[] = [
 		{ id: "valor", label: "Valor" },
 		{ id: "busca", label: "Busca" },
 		{ id: "historico", label: "Histórico" },
+		{ id: "logs", label: "Logs" },
 	];
 
 	onMount(() => {
@@ -302,6 +304,8 @@
 			/>
 		{:else if aba === "historico"}
 			<HistoryPanel hostId={host.id} onRolledBack={escreveu} />
+		{:else if aba === "logs"}
+			<LogPanel />
 		{:else if erro}
 			<p class="erro" role="alert">{erro}</p>
 		{:else if selecionada}
