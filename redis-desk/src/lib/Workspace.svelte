@@ -73,6 +73,22 @@
 	 */
 	let erroIndice = $state("");
 	/**
+	 * A pergunta ao índice está em voo — distinta de "nunca varrido", que é
+	 * a resposta legítima quando a pergunta JÁ voltou e não há relatório.
+	 * Sem isto, um host lento (a própria origem do incidente: 5679 ms só
+	 * para um PING) mostrava "nunca varrido" enquanto ainda esperava a
+	 * resposta — os mesmos pixels de uma pergunta respondida.
+	 */
+	let perguntandoIndice = $state(false);
+	/**
+	 * Sobe a cada nova pergunta ao índice. Uma troca rápida de banco dispara
+	 * uma pergunta nova antes da anterior voltar; se a antiga responder
+	 * depois, seu `.then`/`.catch` compara a geração que carregava consigo
+	 * contra esta e desiste — sem isso, uma resposta atrasada de um banco
+	 * que não é mais o aberto sobrescrevia o estado do banco atual.
+	 */
+	let geracaoIndice = 0;
+	/**
 	 * Falha ao listar os bancos — distinta de `bancos.length === 0`, que
 	 * também é a resposta legítima de um host sem nenhum banco populado.
 	 * Sem isto, o seletor ficava pelado nos dois casos.
@@ -135,18 +151,27 @@
 	async function abrirBanco(hostId: string, banco: number) {
 		erro = "";
 		erroIndice = "";
+		relatorio = null;
+		perguntandoIndice = true;
 		selecionada = null;
 		raiz = [];
 		lendo = { scanned: 0, total_estimate: 0, root: [], done: false };
 
+		const minhaGeracao = ++geracaoIndice;
 		scanStatus(hostId, banco)
 			.then((r) => {
+				// Uma troca de banco mais nova já partiu: esta resposta é de
+				// uma pergunta que não interessa mais mostrar.
+				if (minhaGeracao !== geracaoIndice) return;
 				relatorio = r;
 				erroIndice = "";
+				perguntandoIndice = false;
 			})
 			.catch((err) => {
+				if (minhaGeracao !== geracaoIndice) return;
 				relatorio = null;
 				erroIndice = errorMessage(err);
+				perguntandoIndice = false;
 			});
 
 		try {
@@ -168,6 +193,9 @@
 	$effect(() => {
 		if (falhaConexao) {
 			erro = falhaConexao;
+			erroIndice = "";
+			perguntandoIndice = false;
+			geracaoIndice += 1; // descarta qualquer pergunta de índice em voo
 			selecionada = null;
 			raiz = [];
 			lendo = null;
@@ -195,6 +223,15 @@
 		varrendo = true;
 		progresso = null;
 		erro = "";
+		// Simétrico ao `erro` acima: sem isto, um "não foi possível
+		// perguntar" de antes do clique sobrevivia debaixo de uma linha que
+		// o próprio "Varrer de novo" acabou de corrigir. A geração também
+		// sobe, para que uma resposta atrasada da pergunta de índice do
+		// `abrirBanco` anterior não sobrescreva o relatório que este
+		// `rescan` está prestes a trazer.
+		erroIndice = "";
+		perguntandoIndice = false;
+		geracaoIndice += 1;
 		try {
 			relatorio = await rescan(host.id, db);
 		} catch (err) {
@@ -298,6 +335,8 @@
 						Índice de busca: {haQuantoTempo(Math.max(0, Math.round((Date.now() - relatorio.finished_at) / 1000)))}
 					{:else if erroIndice}
 						Índice de busca: não foi possível perguntar
+					{:else if perguntandoIndice}
+						Índice de busca: perguntando ao servidor…
 					{:else}
 						Índice de busca: nunca varrido
 					{/if}
