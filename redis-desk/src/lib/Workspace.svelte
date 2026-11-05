@@ -66,6 +66,18 @@
 	let filtro = $state("");
 	let selecionada = $state<string | null>(null);
 	let relatorio = $state<ScanReport | null>(null);
+	/**
+	 * Falha ao perguntar o relatório de índice — distinta de `relatorio ===
+	 * null`, que também é a resposta legítima de um banco nunca varrido.
+	 * Sem isto, as duas viravam o mesmo "nunca varrido" na tela.
+	 */
+	let erroIndice = $state("");
+	/**
+	 * Falha ao listar os bancos — distinta de `bancos.length === 0`, que
+	 * também é a resposta legítima de um host sem nenhum banco populado.
+	 * Sem isto, o seletor ficava pelado nos dois casos.
+	 */
+	let erroBancos = $state("");
 	let progresso = $state<ScanProgress | null>(null);
 	/** Andamento da varredura que monta a árvore. */
 	let lendo = $state<ScanSnapshot | null>(null);
@@ -122,13 +134,20 @@
 	 */
 	async function abrirBanco(hostId: string, banco: number) {
 		erro = "";
+		erroIndice = "";
 		selecionada = null;
 		raiz = [];
 		lendo = { scanned: 0, total_estimate: 0, root: [], done: false };
 
 		scanStatus(hostId, banco)
-			.then((r) => (relatorio = r))
-			.catch(() => (relatorio = null));
+			.then((r) => {
+				relatorio = r;
+				erroIndice = "";
+			})
+			.catch((err) => {
+				relatorio = null;
+				erroIndice = errorMessage(err);
+			});
 
 		try {
 			await scanTree(hostId, banco);
@@ -160,9 +179,16 @@
 
 	$effect(() => {
 		const hostId = host.id;
+		erroBancos = "";
 		listDbs(hostId)
-			.then((lista) => (bancos = lista))
-			.catch(() => (bancos = []));
+			.then((lista) => {
+				bancos = lista;
+				erroBancos = "";
+			})
+			.catch((err) => {
+				bancos = [];
+				erroBancos = errorMessage(err);
+			});
 	});
 
 	async function varrer() {
@@ -247,6 +273,9 @@
 					{/if}
 				</select>
 			</label>
+			{#if erroBancos}
+				<p class="erro" role="alert" data-testid="erro-bancos">{erroBancos}</p>
+			{/if}
 
 			<div class="busca-linha">
 				<input
@@ -267,12 +296,17 @@
 						Varrendo…
 					{:else if relatorio}
 						Índice de busca: {haQuantoTempo(Math.max(0, Math.round((Date.now() - relatorio.finished_at) / 1000)))}
+					{:else if erroIndice}
+						Índice de busca: não foi possível perguntar
 					{:else}
 						Índice de busca: nunca varrido
 					{/if}
 				</span>
 				<button onclick={varrer} disabled={varrendo}>Varrer de novo</button>
 			</div>
+			{#if erroIndice}
+				<p class="erro" role="alert" data-testid="erro-indice">{erroIndice}</p>
+			{/if}
 		</div>
 
 		{#if lendo}
