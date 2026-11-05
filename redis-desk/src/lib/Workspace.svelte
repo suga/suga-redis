@@ -113,13 +113,6 @@
 	 */
 	let geracaoArvore = 0;
 	/**
-	 * A varredura automática — a que parte sozinha a cada troca de banco —
-	 * está em voo. Desliga o seletor de banco, do mesmo jeito que `varrendo`
-	 * já desligava na varredura manual: sem isso a corrida continuava aberta
-	 * no caminho comum, fechada só no raro.
-	 */
-	let abrindo = $state(false);
-	/**
 	 * Falha ao listar os bancos — distinta de `bancos.length === 0`, que
 	 * também é a resposta legítima de um host sem nenhum banco populado.
 	 * Sem isto, o seletor ficava pelado nos dois casos.
@@ -197,7 +190,6 @@
 
 		const minhaGeracao = ++geracaoIndice;
 		const minhaVarredura = ++geracaoArvore;
-		abrindo = true;
 		scanStatus(hostId, banco)
 			.then((r) => {
 				// Uma troca de banco mais nova já partiu: esta resposta é de
@@ -236,7 +228,6 @@
 			// Também sob a geração: limpar `lendo` de uma varredura velha
 			// apagaria a barra de progresso da varredura nova.
 			if (minhaVarredura === geracaoArvore) {
-				abrindo = false;
 				lendo = null;
 			}
 		}
@@ -256,7 +247,6 @@
 			perguntandoIndice = false;
 			geracaoIndice += 1; // descarta qualquer pergunta de índice em voo
 			geracaoArvore += 1; // e qualquer varredura que ainda esteja correndo
-			abrindo = false;
 			selecionada = null;
 			raiz = [];
 			lendo = null;
@@ -369,22 +359,25 @@
 	<div class="coluna">
 		<div class="controles">
 			<!--
-				Nota de design: o seletor desliga enquanto QUALQUER varredura
-				corre — a manual (`varrendo`) e a automática que parte a cada
-				troca de banco (`abrindo`). `progresso` (do evento global
+				Nota de design: o seletor desliga enquanto a varredura MANUAL
+				corre (`varrendo`), e só ela. `progresso` (do evento global
 				`onRescanProgress`, sem `host_id`/`db` no payload) e o próprio
 				`varrendo` não carregam geração nenhuma — não dá para
 				descartar uma resposta atrasada que não se sabe de qual banco
-				é. Desligar o controle fecha essa classe inteira, em vez de
-				só escondê-la. O que ainda pode correr depois de uma troca de
-				banco — a pergunta de índice do `scanStatus` e a varredura da
-				árvore — continua protegido por `geracaoIndice` e
-				`geracaoArvore`, que comparam a geração da resposta contra a
-				atual antes de escrever qualquer coisa na tela.
+				é, e ali a pessoa escolheu esperar ao clicar em "Varrer de
+				novo". A varredura AUTOMÁTICA, que parte sozinha a cada troca
+				de banco, NÃO desliga o seletor: ela é a primeira coisa que
+				acontece num banco recém-aberto e, num banco de milhões de
+				chaves, congelaria o controle por quase um minuto sem
+				ninguém ter pedido nada. O que ela pode deixar correndo —
+				a pergunta de índice do `scanStatus` e a varredura da árvore
+				— está protegido por `geracaoIndice` e `geracaoArvore`, que
+				comparam a geração da resposta contra a atual antes de
+				escrever qualquer coisa na tela.
 			-->
 			<label class="banco">
 				<span>Banco</span>
-				<select bind:value={db} disabled={varrendo || abrindo}>
+				<select bind:value={db} disabled={varrendo}>
 					{#if bancos.length === 0}
 						<option value={db}>{db}</option>
 					{:else}

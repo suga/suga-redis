@@ -301,7 +301,7 @@ test("o seletor de banco desliga durante a varredura manual e volta a ligar depo
 	await waitFor(() => expect(seletor).toBeEnabled());
 });
 
-test("o seletor de banco desliga durante a varredura automática também", async () => {
+test("o seletor de banco continua utilizável durante a varredura automática", async () => {
 	bancos.mockImplementation(async () => [
 		[0, 10],
 		[1, 20],
@@ -311,15 +311,45 @@ test("o seletor de banco desliga durante a varredura automática também", async
 
 	render(Workspace, { props: { host: host(), falhaConexao: null } });
 
-	// A varredura automática — a que acontece a cada troca de banco, sem
-	// ninguém clicar em nada — é a comum; a manual é a rara. Deixar o
-	// seletor ligado só nela mantinha aberta a corrida que a manual já
-	// tinha fechado.
+	// A varredura automática é a primeira coisa que acontece num banco
+	// recém-aberto e, num banco de milhões de chaves, demora. Desligar o
+	// seletor aqui congelaria o controle por quase um minuto sem ninguém
+	// ter pedido nada — diferente da varredura manual, em que a pessoa
+	// clicou sabendo que ia esperar. A corrida fica por conta da geração.
 	const seletor = await screen.findByRole("combobox");
-	await waitFor(() => expect(seletor).toBeDisabled());
+	await waitFor(() => expect(screen.getByTestId("lendo")).toBeInTheDocument());
+	expect(seletor).toBeEnabled();
 
 	emVoo.resolve(undefined);
 	await waitFor(() => expect(seletor).toBeEnabled());
+});
+
+test("trocar de banco no meio da varredura descarta a falha da anterior", async () => {
+	bancos.mockImplementation(async () => [
+		[0, 10],
+		[1, 20],
+	]);
+	const banco0 = promessaControlavel<undefined>();
+	const banco1 = promessaControlavel<undefined>();
+	arvore.mockImplementationOnce(() => banco0.promessa);
+	arvore.mockImplementationOnce(() => banco1.promessa);
+
+	render(Workspace, { props: { host: host(), falhaConexao: null } });
+	const seletor = await screen.findByRole("combobox");
+	await waitFor(() => expect(arvore).toHaveBeenCalledWith("h1", 0));
+
+	// Agora que o seletor segue ligado, esta é a corrida de verdade: trocar
+	// para o banco 1 com a varredura do banco 0 ainda em voo.
+	await fireEvent.change(seletor, { target: { value: "1" } });
+	await waitFor(() => expect(arvore).toHaveBeenCalledWith("h1", 1));
+
+	banco0.reject(new Error("a varredura do banco 0 falhou"));
+	await tick();
+	await tick();
+
+	// A falha do banco 0 não pode aparecer na tela do banco 1.
+	expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+	banco1.resolve(undefined);
 });
 
 test("a falha de uma varredura antiga não aterrissa sobre o estado novo", async () => {
