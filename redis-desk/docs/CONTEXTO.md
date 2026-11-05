@@ -4,7 +4,7 @@ Documento de retomada. Leia antes de mexer no código — especialmente a
 seção **Fatos que custaram caro**, que registra coisas que não se deduzem
 lendo os arquivos e que já quebraram este projeto uma vez cada.
 
-Estado em 2026-11-04. Branch `feat/redis-desk`, 40 commits, árvore limpa.
+Estado em 2026-11-05. Branch `feat/redis-desk`, 61 commits, árvore limpa.
 
 ---
 
@@ -18,12 +18,41 @@ O plano original (`docs/superpowers/plans/2026-11-03-redis-desktop.md`) tem
 **88 de 88 checkboxes marcados** — as 17 tarefas foram concluídas. O trabalho
 posterior foi correção e desempenho em cima de uso real.
 
+Um segundo desenho, fechado nesta sessão (`docs/superpowers/specs/2026-11-05-conexao-visivel-design.md`
+e o plano que o segue), resolveu um problema mais estrutural do que
+desempenho: o aplicativo não dizia se estava conectado. Abrir o host
+**host-serverless** (Valkey serverless, produção, TLS) mostrou uma árvore
+vazia, e não havia como saber, olhando a tela, se aquilo era um banco sem
+chaves ou uma pergunta que falhou. A causa desse incidente **segue aberta**
+(ver **Onde está incompleto**); o que esta leva de dez tarefas construiu foi
+o instrumento para resolvê-la, e de quebra fechou o buraco que a escondia:
+
+- Um **anel de log em memória** (`core/log.rs`) guarda as últimas entradas
+  do aplicativo sem nunca tocar disco — fechou o app, perdeu o log, por
+  decisão, não por limitação.
+- O **pool registra** quando um socket abre, falha ou é derrubado.
+- A **fachada em `commands.rs` cronometra** cada operação e registra o que
+  falhou e o que passou de 1 s.
+- **Conectar e desconectar** viraram comandos de verdade, não um efeito
+  colateral de abrir a árvore.
+- Uma **aba Logs**, legível depois do susto: hora, host, banco, operação,
+  duração e erro.
+- **Quatro estados de conexão** na linha de cada host (conectado,
+  conectando, falhou, desconectado) — vermelho e caixa alta continuam
+  significando só produção, nunca estado de conexão.
+- Os **dois divisores de coluna** ficaram arrastáveis, com a largura
+  lembrada.
+- E os **dois `catch` silenciosos** que transformavam uma pergunta falha em
+  resposta vazia — `listDbs` e `scanStatus`, em `Workspace.svelte` —
+  pararam de existir: cada falha agora tem seu próprio estado (`erroBancos`,
+  `erroIndice`), visível, em vez de se disfarçar de banco vazio.
+
 ## Estado
 
 | | |
 |:-|-:|
-| Testes Rust | **100**, todos passando |
-| Testes de interface | **53**, todos passando |
+| Testes Rust | **114**, todos passando |
+| Testes de interface | **91**, todos passando |
 | Linhas de código | ~17.300 |
 | `cargo clippy` | 3 avisos pré-existentes (`config.rs:246`, `history.rs:381`, `history.rs:443`) |
 | `svelte-check` | 0 erros, 0 avisos |
@@ -82,7 +111,11 @@ src/lib/
 
 Duas regras seguidas de ponta a ponta:
 
-- **Identificadores em inglês; comentários e texto de tela em português.**
+- **Identificadores em inglês no Rust; comentários e texto de tela em
+  português.** Nos componentes Svelte os locais seguem a convenção
+  portuguesa do próprio arquivo (`bancos`, `relatorio`, `filtro`,
+  `varrendo`, `erroIndice`) — a regra de inglês vale para o núcleo em Rust,
+  não para a tela.
 - **Nada fala com o Redis fora de `core/`,** e nada fala com o `core` a
   partir da tela sem passar por `commands.rs`.
 
@@ -178,7 +211,27 @@ quando metadados inúteis eram coletados junto).
 
 ## Onde está incompleto
 
-### 1. Nível com milhões de nomes distintos (o próximo passo)
+### 1. O host-serverless: a causa raiz segue aberta
+
+O host **host-serverless** (Valkey serverless, produção, TLS) respondeu
+árvore vazia a uma pergunta cujo banco o dono confirma que **tem dado**.
+`PING` respondia; `SCAN` voltava cursor `0` com lote vazio, sem erro; o
+seletor de banco aparecia pelado, sem contagem. Duas hipóteses sobreviveram
+à investigação e nenhuma foi descartada:
+
+- `db_sizes` estourava e o `catch` silencioso de `Workspace.svelte`
+  engolia o erro, mostrando "banco vazio" onde havia falha; ou
+- o servidor responde vazio de verdade a `DBSIZE`/`SCAN` nesse host —
+  proxy do serverless, ACL ou shard entre o cliente e o dado.
+
+Esta leva de tarefas fechou o `catch` silencioso que confundia as duas
+hipóteses (ver acima) e deu à aba **Logs** o que faltava para decidi-las: a
+resposta crua do servidor, por host, por operação, com o erro quando
+houver. **Ninguém ainda abriu o host-serverless no binário empacotado para
+ler essa aba** — essa leitura é o próximo passo, não um resultado desta
+sessão. Até lá, a causa raiz continua em aberto.
+
+### 2. Nível com milhões de nomes distintos
 
 `sessao:token:` tem ~3,4 milhões de filhos distintos. O teto por nível é
 50.000; além dele, o botão **Carregar mais** revarre só aquele prefixo e
@@ -192,7 +245,7 @@ filtrar só o que está em memória.
 
 **Era a pergunta aberta quando esta sessão terminou.**
 
-### 2. Não implementado, de propósito
+### 3. Não implementado, de propósito
 
 - **Reordenar itens de lista.** Não há troca atômica no conjunto de
   operações; em duas escritas, uma falha deixa a lista errada.
@@ -203,7 +256,7 @@ filtrar só o que está em memória.
   conferidos pelo binário empacotado via MCP, mas o clique humano continua
   devendo.
 
-### 3. Avisos conhecidos
+### 4. Avisos conhecidos
 
 - 3 avisos de clippy pré-existentes, todos de "função com muitos argumentos"
   ou `assert_eq!` com booleano literal. Nenhum é defeito.
