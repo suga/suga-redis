@@ -534,6 +534,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reusing_a_cached_socket_logs_nothing() {
+        let logs = Arc::new(LogRing::new());
+        let pool = Pool::new().with_log(logs.clone());
+        let host = test_host("Redis reaproveitado", TEST_PORT);
+
+        pool.get(&host, host.db, None).await.unwrap();
+        pool.get(&host, host.db, None).await.unwrap();
+
+        let conexoes = logs
+            .snapshot()
+            .into_iter()
+            .filter(|entry| entry.operation == "connect")
+            .count();
+        // É por isto que a fachada (`commands::connect`) não pode delegar a
+        // linha de falha ao pool: na segunda chamada em diante o pool está
+        // mudo, e nem toda falha o faz reconectar — só `Unreachable`. Se a
+        // fachada também se calasse, um `Auth` ou um `ClusterSingleDb`
+        // sobre este socket não apareceria em lugar nenhum.
+        assert_eq!(
+            conexoes, 1,
+            "o socket em cache não abre conexão nova, logo não registra outra linha"
+        );
+    }
+
+    #[tokio::test]
     async fn ping_returns_a_duration() {
         let pool = Pool::new();
         let host = test_host("Redis de teste", TEST_PORT);

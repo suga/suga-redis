@@ -269,41 +269,23 @@ impl AppState {
 /// Todo comando que fala com o núcleo passa por aqui, cada um decidindo
 /// sozinho, no `match` de `host_and_password`, se chama com `Some` ou
 /// `None`.
+///
+/// NENHUMA operação é dispensada de deixar a linha de falha, nem mesmo
+/// `connect`, cuja falha o `Pool` também registra quando um socket nasce.
+/// Essa dispensa chegou a existir, para poupar a linha repetida, e abriu um
+/// buraco: o pool só fala quando um socket NASCE (`Pool::connect`, chamado
+/// por `get` apenas sem conexão em cache) ou quando `with_retry` reconecta
+/// — e ele só reconecta em `ConnError::Unreachable`. `Auth`,
+/// `ClusterSingleDb` e `Protocol` sobre um socket já aberto não produziam
+/// linha nenhuma, de lado nenhum. Silêncio é o defeito que este trabalho
+/// inteiro veio eliminar; uma linha repetida é só uma linha repetida, e a
+/// aba de Logs não depende mais do conteúdo da entrada para desenhá-la.
 async fn registrar<T>(
     state: &AppState,
     operation: &str,
     host_id: &str,
     host: Option<&Host>,
     db: Option<u8>,
-    fut: impl std::future::Future<Output = Result<T>>,
-) -> Result<T> {
-    registrar_com(state, operation, host_id, host, db, OnFailure::Log, fut).await
-}
-
-/// O que `registrar_com` faz com um `Err`.
-enum OnFailure {
-    /// Empurra a linha de falha — o caso de toda operação.
-    Log,
-    /// Não empurra: quem está mais perto da falha já a registrou, e uma
-    /// segunda linha com o mesmo host, a mesma operação, o mesmo
-    /// milissegundo e o mesmo motivo é o mesmo evento contado duas vezes.
-    /// Hoje só `connect`, cuja falha o `Pool` escreve — e escreve melhor,
-    /// porque só ele sabe o banco e se um socket chegou a nascer.
-    AlreadyLogged,
-}
-
-/// `registrar` com a decisão sobre a falha explícita. A lentidão continua
-/// registrada nos dois modos: o `Pool` só fala quando um socket NASCE, e um
-/// `connect` de 5,6 s sobre um socket já aberto — o caso do host que
-/// originou este trabalho — não deixaria rastro nenhum se a fachada também
-/// se calasse.
-async fn registrar_com<T>(
-    state: &AppState,
-    operation: &str,
-    host_id: &str,
-    host: Option<&Host>,
-    db: Option<u8>,
-    on_failure: OnFailure,
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
     let start = Instant::now();
@@ -314,7 +296,6 @@ async fn registrar_com<T>(
         .unwrap_or_else(|| host_id.to_string());
 
     match &result {
-        Err(_) if matches!(on_failure, OnFailure::AlreadyLogged) => {}
         Err(err) => state.logs.push(LogEntry {
             at_ms: now_ms(),
             kind: LogKind::Failure,
@@ -375,27 +356,20 @@ pub fn remove_host(state: &AppState, host_id: &str) -> Result<()> {
 pub async fn connect(state: &AppState, host_id: &str) -> Result<u64> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            // `AlreadyLogged`: o `Pool` é o dono do evento de conexão. Ele
-            // já empurra a linha dessa tentativa, com o banco, a duração e
-            // o motivo classificado — e é o único que sabe se um socket
-            // chegou a nascer. A linha de falha da fachada seria o mesmo
-            // evento, no mesmo milissegundo, com o mesmo texto.
-            registrar_com(
-                state,
-                "connect",
-                host_id,
-                Some(&host),
-                None,
-                OnFailure::AlreadyLogged,
-                async {
-                    let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
-                    Ok(elapsed.as_millis() as u64)
-                },
-            )
+            // A fachada registra a falha SEMPRE, mesmo quando o `Pool`
+            // também registra. Quando o socket nasce aqui, as duas linhas
+            // contam o mesmo evento — e é um preço baixo: o pool fica mudo
+            // sempre que o socket já estava em cache, e só reconecta (e
+            // portanto só volta a falar) em `ConnError::Unreachable`. Um
+            // host que recusa a senha ou que é cluster com banco único,
+            // sobre um socket já aberto, não teria quem o registrasse. Ver
+            // a nota em `registrar`.
+            registrar(state, "connect", host_id, Some(&host), None, async {
+                let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
+                Ok(elapsed.as_millis() as u64)
+            })
             .await
         }
-        // Aqui o pool nunca chegou a ser chamado: ninguém mais registraria
-        // esta falha.
         Err(err) => registrar(state, "connect", host_id, None, None, async { Err(err) }).await,
     }
 }
@@ -1554,7 +1528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_connect_writes_one_line_for_one_event() {
+    async fn a_failed_connect_always_leaves_a_failure_line() {
         let (_dir, state) = test_state();
         let mut spec = host_spec(Env::Dev);
         spec.port = 1; // ninguém atende aqui
@@ -1564,23 +1538,20 @@ mod tests {
             .await
             .expect_err("a porta 1 não podia aceitar conexão");
 
-        let entries = logs(&state);
-        let do_connect: Vec<_> = entries
-            .iter()
-            .filter(|entry| entry.operation == "connect")
-            .collect();
-        // Duas linhas — a do pool e a da fachada — com o mesmo host, a mesma
-        // operação, o mesmo milissegundo e o mesmo motivo são o mesmo evento
-        // contado duas vezes, num anel cujo anti-objetivo é virar enxurrada.
-        assert_eq!(
-            do_connect.len(),
-            1,
-            "uma tentativa de conexão é UM evento, veio {do_connect:?}"
-        );
+        // A linha é da FACHADA, e tem de existir independentemente de o
+        // `Pool` ter registrado a dele. O pool só fala quando um socket
+        // nasce ou quando `with_retry` reconecta — e ele só reconecta em
+        // `ConnError::Unreachable`. Dispensar a fachada porque "o pool já
+        // registra" deixava `Auth`, `ClusterSingleDb` e `Protocol` sobre um
+        // socket em cache sem linha nenhuma, de lado nenhum. O clique em
+        // Conectar num host já conectado passa exatamente por aí.
+        let falha = logs(&state)
+            .into_iter()
+            .find(|entry| entry.kind == LogKind::Failure && entry.operation == "connect")
+            .expect("uma conexão que falhou precisa deixar uma linha de falha");
         assert!(
-            do_connect[0].detail.is_some(),
-            "a linha que sobrou precisa ser a que diz por quê, veio {:?}",
-            do_connect[0]
+            falha.detail.is_some_and(|d| !d.is_empty()),
+            "a linha de falha precisa dizer por quê"
         );
     }
 
