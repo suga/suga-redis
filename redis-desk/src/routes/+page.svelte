@@ -89,6 +89,12 @@
 				onNew={() => (editando = { host: null })}
 				onEdit={(host) => (editando = { host })}
 				onChanged={carregar}
+				onDisconnected={(host) => {
+					// Só fecha o workspace se era este o host aberto: desconectar
+					// outro host, em segundo plano, não pode derrubar a tela de
+					// quem está olhando.
+					if (aberto?.id === host.id) aberto = null;
+				}}
 			/>
 		</aside>
 

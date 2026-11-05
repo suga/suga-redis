@@ -10,6 +10,8 @@ vi.mock("$lib/api", () => ({
 	removeHost: vi.fn(async () => undefined),
 	testHost: vi.fn(async () => 3),
 	listHosts: vi.fn(async () => []),
+	connect: vi.fn(async () => 7),
+	disconnect: vi.fn(async () => undefined),
 	errorMessage: (err: unknown) => String(err),
 }));
 
@@ -106,6 +108,7 @@ function montarLista(env: Env = "prod") {
 			onNew: vi.fn(),
 			onEdit: vi.fn(),
 			onChanged: vi.fn(),
+			onDisconnected: vi.fn(),
 		},
 	});
 	return { alvo, onSelect, unmount };

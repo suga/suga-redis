@@ -7,7 +7,21 @@
 	 * hosts de produção existem sem ler nome nenhum.
 	 */
 	import { envChrome } from "$lib/env";
-	import { errorMessage, removeHost, testHost, type Host } from "$lib/api";
+	import { connect, disconnect, errorMessage, removeHost, testHost, type Host } from "$lib/api";
+
+	/**
+	 * O que se sabe sobre a conexão com um host, até a próxima ação.
+	 *
+	 * Não é o resultado do botão Testar — aquele responde "dá para
+	 * alcançar?". Este responde "está conectado agora?", a pergunta que
+	 * faltava quando um host de produção abriu mostrando "nenhuma chave" e
+	 * não havia como dizer se era banco vazio ou conexão que nunca aconteceu.
+	 */
+	type EstadoConexao =
+		| { tipo: "desligado" }
+		| { tipo: "conectando" }
+		| { tipo: "conectado"; ms: number }
+		| { tipo: "falhou"; motivo: string };
 
 	interface Props {
 		hosts: Host[];
@@ -17,13 +31,47 @@
 		onEdit: (host: Host) => void;
 		/** Chamado depois de remover, para a tela recarregar a lista. */
 		onChanged: () => void;
+		/** Chamado depois de desconectar — a casca fecha o workspace se era este o host aberto. */
+		onDisconnected: (host: Host) => void;
 	}
 
-	let { hosts, selectedId, onSelect, onNew, onEdit, onChanged }: Props = $props();
+	let { hosts, selectedId, onSelect, onNew, onEdit, onChanged, onDisconnected }: Props =
+		$props();
 
 	/** Resultado do último teste por host: a latência, ou a falha. */
 	let testes = $state<Record<string, { ms: number } | { erro: string }>>({});
 	let testando = $state<string | null>(null);
+
+	/** Estado de conexão por host. Ausente = nunca mexeram neste host ainda. */
+	let estados = $state<Record<string, EstadoConexao>>({});
+
+	function estadoDe(hostId: string): EstadoConexao {
+		return estados[hostId] ?? { tipo: "desligado" };
+	}
+
+	/**
+	 * Conecta de verdade e só então abre o workspace — nos dois desfechos.
+	 * Falhando, o workspace abre do mesmo jeito, em estado de falha: é lá
+	 * que vive a aba Logs, e é justamente quando a conexão falha que ela
+	 * precisa estar alcançável.
+	 */
+	async function conectar(host: Host) {
+		estados[host.id] = { tipo: "conectando" };
+		try {
+			const ms = await connect(host.id);
+			estados[host.id] = { tipo: "conectado", ms };
+		} catch (err) {
+			estados[host.id] = { tipo: "falhou", motivo: errorMessage(err) };
+		} finally {
+			onSelect(host);
+		}
+	}
+
+	async function desconectar(host: Host) {
+		await disconnect(host.id);
+		estados[host.id] = { tipo: "desligado" };
+		onDisconnected(host);
+	}
 
 	async function testar(host: Host) {
 		testando = host.id;
@@ -59,6 +107,7 @@
 			{#each hosts as host (host.id)}
 				{@const resultado = testes[host.id]}
 				{@const chrome = envChrome(host.env)}
+				{@const estado = estadoDe(host.id)}
 				<li
 					class="linha"
 					class:selecionada={host.id === selectedId}
@@ -84,7 +133,17 @@
 					</p>
 
 					<div class="acoes">
-						<button class="conectar" onclick={() => onSelect(host)}>Conectar</button>
+						{#if estado.tipo === "conectado"}
+							<button class="conectar" onclick={() => desconectar(host)}>Desconectar</button>
+						{:else}
+							<button
+								class="conectar"
+								onclick={() => conectar(host)}
+								disabled={estado.tipo === "conectando"}
+							>
+								{estado.tipo === "conectando" ? "Conectando…" : "Conectar"}
+							</button>
+						{/if}
 						<button onclick={() => testar(host)} disabled={testando === host.id}>
 							{testando === host.id ? "Testando" : "Testar"}
 						</button>
@@ -92,10 +151,24 @@
 						<button class="danger" onclick={() => remover(host)}>Remover</button>
 					</div>
 
-					{#if resultado && "ms" in resultado}
-						<p class="resultado mono">Respondeu em {resultado.ms} ms</p>
-					{:else if resultado}
-						<p class="resultado falha" role="alert">{resultado.erro}</p>
+					<p class="estado" data-testid="estado-conexao" data-tipo={estado.tipo}>
+						{#if estado.tipo === "desligado"}
+							nunca conectado
+						{:else if estado.tipo === "conectando"}
+							conectando…
+						{:else if estado.tipo === "conectado"}
+							conectado · {estado.ms} ms
+						{:else}
+							{estado.motivo}
+						{/if}
+					</p>
+
+					{#if estado.tipo === "desligado"}
+						{#if resultado && "ms" in resultado}
+							<p class="resultado mono">Respondeu em {resultado.ms} ms</p>
+						{:else if resultado}
+							<p class="resultado falha" role="alert">{resultado.erro}</p>
+						{/if}
 					{/if}
 				</li>
 			{/each}
@@ -236,5 +309,23 @@
 
 	.falha {
 		color: #e49a94;
+	}
+
+	/* Verde, âmbar e cinza — nunca vermelho, que neste app só quer dizer
+	   produção, e nunca caixa alta, que só a flag do ambiente usa. Mesmos
+	   tons de LogPanel.svelte, para a mesma ideia ter a mesma cor na tela
+	   inteira. */
+	.estado {
+		margin: 0.45rem 0 0;
+		color: var(--text-faint);
+		font-size: 0.88rem;
+	}
+
+	.estado[data-tipo="conectado"] {
+		color: #87a18e;
+	}
+
+	.estado[data-tipo="falhou"] {
+		color: #bbac81;
 	}
 </style>
