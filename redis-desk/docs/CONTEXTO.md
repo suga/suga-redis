@@ -4,7 +4,7 @@ Documento de retomada. Leia antes de mexer no código — especialmente a
 seção **Fatos que custaram caro**, que registra coisas que não se deduzem
 lendo os arquivos e que já quebraram este projeto uma vez cada.
 
-Estado em 2026-11-05. Branch `feat/redis-desk`, 68 commits, árvore limpa.
+Estado em 2026-11-05. Branch `feat/redis-desk`, 72 commits, árvore limpa.
 
 ---
 
@@ -51,8 +51,8 @@ o instrumento para resolvê-la, e de quebra fechou o buraco que a escondia:
 
 | | |
 |:-|-:|
-| Testes Rust | **120**, todos passando |
-| Testes de interface | **109**, todos passando |
+| Testes Rust | **121**, todos passando |
+| Testes de interface | **110**, todos passando |
 | Linhas de código | ~17.300 |
 | `cargo clippy` | 3 avisos pré-existentes (`config.rs:246`, `history.rs:381`, `history.rs:443`) |
 | `svelte-check` | 0 erros, 0 avisos |
