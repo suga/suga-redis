@@ -21,6 +21,8 @@
 
 	let hosts = $state<Host[]>([]);
 	let aberto = $state<Host | null>(null);
+	/** Motivo de uma falha de `connect` já sabida para o host aberto — repassado ao `Workspace`. */
+	let falhaConexao = $state<string | null>(null);
 	let erro = $state("");
 	/** `null` = nenhum formulário; `{ host: null }` = cadastro novo. */
 	let editando = $state<{ host: Host | null } | null>(null);
@@ -82,8 +84,9 @@
 			<HostList
 				{hosts}
 				selectedId={aberto?.id ?? null}
-				onSelect={(host) => {
+				onSelect={(host, motivo) => {
 					aberto = host;
+					falhaConexao = motivo ?? null;
 					editando = null;
 				}}
 				onNew={() => (editando = { host: null })}
@@ -93,7 +96,10 @@
 					// Só fecha o workspace se era este o host aberto: desconectar
 					// outro host, em segundo plano, não pode derrubar a tela de
 					// quem está olhando.
-					if (aberto?.id === host.id) aberto = null;
+					if (aberto?.id === host.id) {
+						aberto = null;
+						falhaConexao = null;
+					}
 				}}
 			/>
 		</aside>
@@ -113,7 +119,7 @@
 				{/key}
 			{:else if aberto}
 				{#key aberto.id}
-					<Workspace host={aberto} />
+					<Workspace host={aberto} {falhaConexao} />
 				{/key}
 			{:else}
 				<!-- A marca só aparece aqui, onde não há nada competindo com ela.

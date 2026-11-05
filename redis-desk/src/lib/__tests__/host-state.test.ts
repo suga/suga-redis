@@ -115,7 +115,9 @@ test("abre a área de trabalho mesmo quando a conexão falha", async () => {
 	await user.click(screen.getByRole("button", { name: "Conectar" }));
 	await screen.findByTestId("estado-conexao");
 
-	expect(onSelect).toHaveBeenCalledWith(alvo);
+	// O motivo viaja junto: é o que a casca repassa ao Workspace para ele
+	// não tentar varrer um host já sabido inalcançável.
+	expect(onSelect).toHaveBeenCalledWith(alvo, "não foi possível alcançar o host");
 });
 
 test("troca o botão para Desconectar quando conectado", async () => {
@@ -142,6 +144,48 @@ test("desconectar devolve o host ao estado desligado", async () => {
 	expect(desconectou).toHaveBeenCalledWith("h1");
 	expect(onDisconnected).toHaveBeenCalledWith(alvo);
 	expect(await screen.findByTestId("estado-conexao")).toHaveTextContent("nunca conectado");
+	expect(screen.getByRole("button", { name: "Conectar" })).toBeInTheDocument();
+});
+
+test("desconectar fica desabilitado enquanto a chamada está em voo", async () => {
+	const user = userEvent.setup();
+	conectou.mockResolvedValueOnce(9);
+	let liberar: () => void = () => {};
+	desconectou.mockReturnValueOnce(
+		new Promise<void>((resolve) => {
+			liberar = resolve;
+		}),
+	);
+	montar();
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	await user.click(await screen.findByRole("button", { name: "Desconectar" }));
+
+	// Em voo: o botão não pode aceitar um segundo clique, que disparia uma
+	// segunda chamada a `disconnect` concorrente com a primeira.
+	expect(screen.getByRole("button", { name: "Desconectando…" })).toBeDisabled();
+	liberar();
+});
+
+test("desconectar que falha mostra o motivo, em vez de ficar mudo", async () => {
+	const user = userEvent.setup();
+	conectou.mockResolvedValueOnce(9);
+	desconectou.mockRejectedValueOnce({
+		kind: "unknown_host",
+		message: "host não encontrado",
+	});
+	const alvo = host();
+	const { onDisconnected } = montar([alvo]);
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	await user.click(await screen.findByRole("button", { name: "Desconectar" }));
+
+	expect(await screen.findByTestId("estado-conexao")).toHaveTextContent("host não encontrado");
+	// Não desconectou de fato: a casca não pode ser avisada de que o
+	// workspace deste host deve fechar.
+	expect(onDisconnected).not.toHaveBeenCalled();
+	// E a linha continua oferecendo uma ação, não presa em "conectado" sem
+	// explicação — mesma régua de uma falha de `connect`.
 	expect(screen.getByRole("button", { name: "Conectar" })).toBeInTheDocument();
 });
 

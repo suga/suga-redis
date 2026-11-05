@@ -33,9 +33,22 @@
 
 	interface Props {
 		host: Host;
+		/**
+		 * O motivo de uma falha de `connect` já observada por quem abriu
+		 * este host — `null` quando a conexão deu certo, ou quando o
+		 * workspace foi aberto sem passar por `connect` (clique no nome).
+		 *
+		 * Lido direto do prop, NUNCA copiado para um `$state` próprio: uma
+		 * nova tentativa no MESMO host (falhou, e a pessoa clicou Conectar
+		 * de novo) precisa refletir aqui sem exigir remontagem — e um
+		 * `$state` inicializado a partir de um prop só captura o valor
+		 * inicial, o mesmo problema que `docs/CONTEXTO.md` registra para
+		 * `db` mais abaixo.
+		 */
+		falhaConexao: string | null;
 	}
 
-	let { host }: Props = $props();
+	let { host, falhaConexao }: Props = $props();
 
 	/**
 	 * O banco parte do que o host traz cadastrado e passa a ser escolha da
@@ -121,7 +134,22 @@
 		}
 	}
 
+	/**
+	 * Uma conexão já sabida como falha não ganha uma segunda tentativa: sem
+	 * isto, o `scan_tree` do Rust abre o próprio socket por conta própria e
+	 * repete, em silêncio, a mesma falha que a linha do host já mostra —
+	 * deixando a tela dizer "falhou" e "lendo as chaves" ao mesmo tempo, a
+	 * própria confusão que esta tarefa existe para acabar.
+	 */
 	$effect(() => {
+		if (falhaConexao) {
+			erro = falhaConexao;
+			selecionada = null;
+			raiz = [];
+			lendo = null;
+			relatorio = null;
+			return;
+		}
 		abrirBanco(host.id, db);
 	});
 

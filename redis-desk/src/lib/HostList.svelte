@@ -26,7 +26,13 @@
 	interface Props {
 		hosts: Host[];
 		selectedId: string | null;
-		onSelect: (host: Host) => void;
+		/**
+		 * `falhaConexao` carrega o motivo quando quem chamou já sabe, por ter
+		 * acabado de tentar `connect`, que a conexão falhou — para a casca
+		 * repassar ao `Workspace` e ele nem tentar varrer. Ausente (clique no
+		 * nome, sem passar por `connect`) ou `undefined` no sucesso.
+		 */
+		onSelect: (host: Host, falhaConexao?: string) => void;
 		onNew: () => void;
 		onEdit: (host: Host) => void;
 		/** Chamado depois de remover, para a tela recarregar a lista. */
@@ -44,6 +50,10 @@
 
 	/** Estado de conexão por host. Ausente = nunca mexeram neste host ainda. */
 	let estados = $state<Record<string, EstadoConexao>>({});
+	/** Qual host está no meio de um `disconnect()` agora — evita que um
+	 *  clique duplo dispare duas chamadas concorrentes, do mesmo jeito que
+	 *  `conectando` já protege o lado de conectar. */
+	let desconectando = $state<string | null>(null);
 
 	function estadoDe(hostId: string): EstadoConexao {
 		return estados[hostId] ?? { tipo: "desligado" };
@@ -53,24 +63,41 @@
 	 * Conecta de verdade e só então abre o workspace — nos dois desfechos.
 	 * Falhando, o workspace abre do mesmo jeito, em estado de falha: é lá
 	 * que vive a aba Logs, e é justamente quando a conexão falha que ela
-	 * precisa estar alcançável.
+	 * precisa estar alcançável. O motivo (se houver) viaja com `onSelect`
+	 * para a casca repassar ao `Workspace`, que não tenta varrer um host já
+	 * sabido inalcançável.
 	 */
 	async function conectar(host: Host) {
 		estados[host.id] = { tipo: "conectando" };
 		try {
 			const ms = await connect(host.id);
 			estados[host.id] = { tipo: "conectado", ms };
-		} catch (err) {
-			estados[host.id] = { tipo: "falhou", motivo: errorMessage(err) };
-		} finally {
 			onSelect(host);
+		} catch (err) {
+			const motivo = errorMessage(err);
+			estados[host.id] = { tipo: "falhou", motivo };
+			onSelect(host, motivo);
 		}
 	}
 
+	/**
+	 * `disconnect` também pode falhar (host desconhecido, por exemplo). Uma
+	 * funcionalidade cuja razão de existir é dizer a verdade sobre a conexão
+	 * não pode ter um caminho de falha mudo: se não desconectou de fato, a
+	 * linha mostra o motivo — do mesmo jeito que uma falha de `connect` — em
+	 * vez de ficar presa em "conectado" sem avisar ninguém.
+	 */
 	async function desconectar(host: Host) {
-		await disconnect(host.id);
-		estados[host.id] = { tipo: "desligado" };
-		onDisconnected(host);
+		desconectando = host.id;
+		try {
+			await disconnect(host.id);
+			estados[host.id] = { tipo: "desligado" };
+			onDisconnected(host);
+		} catch (err) {
+			estados[host.id] = { tipo: "falhou", motivo: errorMessage(err) };
+		} finally {
+			desconectando = null;
+		}
 	}
 
 	async function testar(host: Host) {
@@ -134,7 +161,13 @@
 
 					<div class="acoes">
 						{#if estado.tipo === "conectado"}
-							<button class="conectar" onclick={() => desconectar(host)}>Desconectar</button>
+							<button
+								class="conectar"
+								onclick={() => desconectar(host)}
+								disabled={desconectando === host.id}
+							>
+								{desconectando === host.id ? "Desconectando…" : "Desconectar"}
+							</button>
 						{:else}
 							<button
 								class="conectar"
