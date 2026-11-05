@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -33,6 +34,7 @@ use crate::core::index::{Index, IndexError, ScanProgress, ScanReport};
 use crate::core::keys::{
     Alvo, KeyTrie, Level, MAX_CHILDREN, ScanSnapshot, expand_branch, scan_trie,
 };
+use crate::core::log::{LogEntry, LogKind, LogRing, SLOW_MS};
 use crate::core::search::{SearchOutcome, search as search_index};
 use crate::core::value::{
     ValueLimit, ValueView, WriteOp, op_summary, read_value as read_value_from_redis,
@@ -168,6 +170,13 @@ pub struct AppState {
     /// clique custaria uma varredura do banco inteiro, porque o `MATCH` do
     /// `SCAN` não encurta o trabalho do Redis — só filtra o que volta.
     pub trees: Mutex<TreeCache>,
+    /// As últimas conexões, falhas e operações lentas — ver `core::log`.
+    ///
+    /// O MESMO `Arc` é entregue ao `Pool` (ver `AppState::open`): o anel tem
+    /// dois pontos de entrada por desenho, o pool sabe quando um socket abre
+    /// ou morre, a fachada sabe o NOME da operação que estava rodando. Um
+    /// anel por componente contaria só metade da história.
+    pub logs: Arc<LogRing>,
 }
 
 /// As árvores de prefixo, por (host, banco).
@@ -183,13 +192,17 @@ impl AppState {
     /// índice.
     pub fn open(dir: &Path) -> Result<AppState> {
         let db_path: PathBuf = dir.join(DB_FILE);
+        // Um `Arc` só, entregue ao `Pool` logo abaixo — ver o comentário de
+        // `AppState::logs`.
+        let logs = Arc::new(LogRing::new());
         Ok(AppState {
             hosts: Mutex::new(HostStore::open(dir)?),
-            pool: Pool::new(),
+            pool: Pool::new().with_log(logs.clone()),
             index: Index::open(&db_path)?,
             history: History::open(&db_path)?,
             approvals: Arc::new(ApprovalQueue::new()),
             trees: Mutex::new(TreeCache::new()),
+            logs,
         })
     }
 
@@ -206,6 +219,66 @@ impl AppState {
         let password = hosts.password(host_id)?;
         Ok((host, password))
     }
+}
+
+/// Cronometra `fut` e registra o resultado no anel de log de `state`:
+/// `Failure` (com o `Display` do erro já classificado) quando dá errado,
+/// `Slow` quando dá certo mas passa de `SLOW_MS`, e nada quando dá certo
+/// rápido — um comando saudável não deixa rastro.
+///
+/// `host` é o host JÁ RESOLVIDO quando existe; `None` quando nem isso deu
+/// certo (ex.: `host_id` que não está mais cadastrado) — nesse caso o campo
+/// `LogEntry::host` fica em branco, porque não há nome de host para mostrar;
+/// a mensagem do erro (`detail`) já cita o id, então nenhuma informação se
+/// perde.
+///
+/// Todo comando que fala com o núcleo passa por aqui, cada um decidindo
+/// sozinho, no `match` de `host_and_password`, se chama com `Some` ou
+/// `None`.
+async fn registrar<T>(
+    state: &AppState,
+    operation: &str,
+    host: Option<&Host>,
+    db: Option<u8>,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    let start = Instant::now();
+    let result = fut.await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+    let host_name = host.map(|h| h.name.clone()).unwrap_or_default();
+
+    match &result {
+        Err(err) => state.logs.push(LogEntry {
+            at_ms: now_ms(),
+            kind: LogKind::Failure,
+            host: host_name,
+            db,
+            operation: operation.to_string(),
+            duration_ms: Some(duration_ms),
+            detail: Some(err.to_string()),
+        }),
+        Ok(_) if duration_ms >= SLOW_MS => state.logs.push(LogEntry {
+            at_ms: now_ms(),
+            kind: LogKind::Slow,
+            host: host_name,
+            db,
+            operation: operation.to_string(),
+            duration_ms: Some(duration_ms),
+            detail: None,
+        }),
+        Ok(_) => {}
+    }
+
+    result
+}
+
+/// Epoch em milissegundos para `LogEntry::at_ms` — ver o comentário
+/// equivalente em `core::conn`; o anel em si não lê o relógio.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("relógio do sistema antes de 1970")
+        .as_millis() as u64
 }
 
 // ---------------------------------------------------------------- hosts
@@ -235,15 +308,29 @@ pub fn remove_host(state: &AppState, host_id: &str) -> Result<()> {
 /// Testa a conexão com o host, devolvendo o tempo de resposta em
 /// milissegundos.
 pub async fn test_host(state: &AppState, host_id: &str) -> Result<u64> {
-    let (host, pw) = state.host_and_password(host_id)?;
-    let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
-    Ok(elapsed.as_millis() as u64)
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "test_host", Some(&host), None, async {
+                let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
+                Ok(elapsed.as_millis() as u64)
+            })
+            .await
+        }
+        Err(err) => registrar(state, "test_host", None, None, async { Err(err) }).await,
+    }
 }
 
 /// Os bancos do host que têm ao menos uma chave, com a contagem de cada um.
 pub async fn list_dbs(state: &AppState, host_id: &str) -> Result<Vec<(u8, u64)>> {
-    let (host, pw) = state.host_and_password(host_id)?;
-    Ok(state.pool.db_sizes(&host, pw.as_deref()).await?)
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "list_dbs", Some(&host), None, async {
+                Ok(state.pool.db_sizes(&host, pw.as_deref()).await?)
+            })
+            .await
+        }
+        Err(err) => registrar(state, "list_dbs", None, None, async { Err(err) }).await,
+    }
 }
 
 // ----------------------------------------------------------------- chaves
@@ -262,17 +349,23 @@ pub async fn scan_tree(
     db: u8,
     snapshot: impl Fn(ScanSnapshot),
 ) -> Result<()> {
-    let (host, pw) = state.host_and_password(host_id)?;
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "scan_tree", Some(&host), Some(db), async {
+                let trie = Arc::new(Mutex::new(KeyTrie::new()));
+                state
+                    .trees
+                    .lock()
+                    .unwrap()
+                    .insert((host_id.to_string(), db), trie.clone());
 
-    let trie = Arc::new(Mutex::new(KeyTrie::new()));
-    state
-        .trees
-        .lock()
-        .unwrap()
-        .insert((host_id.to_string(), db), trie.clone());
-
-    scan_trie(&state.pool, &host, pw.as_deref(), db, &trie, snapshot).await?;
-    Ok(())
+                scan_trie(&state.pool, &host, pw.as_deref(), db, &trie, snapshot).await?;
+                Ok(())
+            })
+            .await
+        }
+        Err(err) => registrar(state, "scan_tree", None, Some(db), async { Err(err) }).await,
+    }
 }
 
 /// Carrega mais filhos de um galho cuja lista saiu incompleta.
@@ -290,40 +383,51 @@ pub async fn load_more_children(
     prefix: &str,
     progress: impl Fn(crate::core::keys::ScanTick),
 ) -> Result<Level> {
-    let (host, pw) = state.host_and_password(host_id)?;
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "load_more_children", Some(&host), Some(db), async {
+                let trie = state
+                    .trees
+                    .lock()
+                    .unwrap()
+                    .get(&(host_id.to_string(), db))
+                    .cloned()
+                    .ok_or_else(|| CommandError::UnknownHost(host_id.to_string()))?;
 
-    let trie = state
-        .trees
-        .lock()
-        .unwrap()
-        .get(&(host_id.to_string(), db))
-        .cloned()
-        .ok_or_else(|| CommandError::UnknownHost(host_id.to_string()))?;
+                // Quantos já estão à vista, mais uma leva.
+                let atual = trie
+                    .lock()
+                    .unwrap()
+                    .level(prefix)
+                    .map(|n| n.children.len())
+                    .unwrap_or(0);
 
-    // Quantos já estão à vista, mais uma leva.
-    let atual = trie
-        .lock()
-        .unwrap()
-        .level(prefix)
-        .map(|n| n.children.len())
-        .unwrap_or(0);
+                expand_branch(
+                    &state.pool,
+                    Alvo {
+                        host: &host,
+                        pw: pw.as_deref(),
+                        db,
+                    },
+                    &trie,
+                    prefix,
+                    atual + MAX_CHILDREN,
+                    progress,
+                )
+                .await?;
 
-    expand_branch(
-        &state.pool,
-        Alvo {
-            host: &host,
-            pw: pw.as_deref(),
-            db,
-        },
-        &trie,
-        prefix,
-        atual + MAX_CHILDREN,
-        progress,
-    )
-    .await?;
-
-    let nivel = trie.lock().unwrap().level(prefix);
-    nivel.ok_or_else(|| CommandError::UnknownHost(prefix.to_string()))
+                let nivel = trie.lock().unwrap().level(prefix);
+                nivel.ok_or_else(|| CommandError::UnknownHost(prefix.to_string()))
+            })
+            .await
+        }
+        Err(err) => {
+            registrar(state, "load_more_children", None, Some(db), async {
+                Err(err)
+            })
+            .await
+        }
+    }
 }
 
 /// Os filhos de um prefixo, lidos da árvore em memória.
@@ -352,11 +456,18 @@ pub async fn rescan(
     db: u8,
     progress: impl Fn(ScanProgress),
 ) -> Result<ScanReport> {
-    let (host, pw) = state.host_and_password(host_id)?;
-    Ok(state
-        .index
-        .rescan(&state.pool, &host, pw.as_deref(), db, progress)
-        .await?)
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "rescan", Some(&host), Some(db), async {
+                Ok(state
+                    .index
+                    .rescan(&state.pool, &host, pw.as_deref(), db, progress)
+                    .await?)
+            })
+            .await
+        }
+        Err(err) => registrar(state, "rescan", None, Some(db), async { Err(err) }).await,
+    }
 }
 
 /// De quando é o índice deste (host, banco) — `None` se nunca foi varrido.
@@ -378,13 +489,23 @@ pub async fn read_value_more(
     key: &str,
     offset: usize,
 ) -> Result<ValueView> {
-    let (host, pw) = state.host_and_password(host_id)?;
-    let limit = ValueLimit {
-        offset,
-        max_bytes: PAGE_BYTES,
-        max_elements: PAGE_ELEMENTS,
-    };
-    Ok(read_value_from_redis(&state.pool, &host, pw.as_deref(), db, key, limit).await?)
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "read_value", Some(&host), Some(db), async {
+                let limit = ValueLimit {
+                    offset,
+                    max_bytes: PAGE_BYTES,
+                    max_elements: PAGE_ELEMENTS,
+                };
+                Ok(
+                    read_value_from_redis(&state.pool, &host, pw.as_deref(), db, key, limit)
+                        .await?,
+                )
+            })
+            .await
+        }
+        Err(err) => registrar(state, "read_value", None, Some(db), async { Err(err) }).await,
+    }
 }
 
 /// Aplica `op` em `key`, com cópia de segurança e entrada de histórico.
@@ -399,36 +520,43 @@ pub async fn write_value(
     op: WriteOp,
     confirmed: bool,
 ) -> Result<WriteOutcome> {
-    let (host, pw) = state.host_and_password(host_id)?;
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "write_value", Some(&host), Some(db), async {
+                if needs_confirmation(host.env, confirmed) {
+                    return Ok(WriteOutcome::NeedsConfirmation {
+                        summary: op_summary(key, &op),
+                    });
+                }
 
-    if needs_confirmation(host.env, confirmed) {
-        return Ok(WriteOutcome::NeedsConfirmation {
-            summary: op_summary(key, &op),
-        });
+                let entry_id = state
+                    .history
+                    .write_with_backup(
+                        &state.pool,
+                        &host,
+                        pw.as_deref(),
+                        db,
+                        key,
+                        &op,
+                        Actor::Human,
+                    )
+                    .await?;
+
+                // O índice sabia desta chave com o valor ANTIGO. Apagar a
+                // linha é o conserto honesto e barato: a busca para de
+                // devolver um texto que não está mais lá, e a próxima
+                // varredura reindexa a chave com o valor novo. Reindexar só
+                // esta chave aqui exigiria relê-la do Redis — custo de uma
+                // ida e volta a mais em toda escrita, para adiantar o que a
+                // varredura faz de qualquer jeito.
+                state.index.forget_key(host_id, db, key)?;
+
+                Ok(WriteOutcome::Applied { entry_id })
+            })
+            .await
+        }
+        Err(err) => registrar(state, "write_value", None, Some(db), async { Err(err) }).await,
     }
-
-    let entry_id = state
-        .history
-        .write_with_backup(
-            &state.pool,
-            &host,
-            pw.as_deref(),
-            db,
-            key,
-            &op,
-            Actor::Human,
-        )
-        .await?;
-
-    // O índice sabia desta chave com o valor ANTIGO. Apagar a linha é o
-    // conserto honesto e barato: a busca para de devolver um texto que não
-    // está mais lá, e a próxima varredura reindexa a chave com o valor novo.
-    // Reindexar só esta chave aqui exigiria relê-la do Redis — custo de uma
-    // ida e volta a mais em toda escrita, para adiantar o que a varredura
-    // faz de qualquer jeito.
-    state.index.forget_key(host_id, db, key)?;
-
-    Ok(WriteOutcome::Applied { entry_id })
 }
 
 // -------------------------------------------------------------- histórico
@@ -472,17 +600,33 @@ pub async fn search(
     db: u8,
     needle: &str,
 ) -> Result<SearchOutcome> {
-    let (host, pw) = state.host_and_password(host_id)?;
-    Ok(search_index(
-        &state.index,
-        &state.pool,
-        &host,
-        pw.as_deref(),
-        db,
-        needle,
-        SEARCH_LIMIT,
-    )
-    .await?)
+    match state.host_and_password(host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "search", Some(&host), Some(db), async {
+                Ok(search_index(
+                    &state.index,
+                    &state.pool,
+                    &host,
+                    pw.as_deref(),
+                    db,
+                    needle,
+                    SEARCH_LIMIT,
+                )
+                .await?)
+            })
+            .await
+        }
+        Err(err) => registrar(state, "search", None, Some(db), async { Err(err) }).await,
+    }
+}
+
+// -------------------------------------------------------------------- log
+
+/// As últimas conexões, falhas e operações lentas — mais recente primeiro.
+/// É o que deixa a tela distinguir "o banco está vazio" de "a conexão
+/// falhou", em vez de mostrar a mesma lista vazia para os dois casos.
+pub fn logs(state: &AppState) -> Vec<LogEntry> {
+    state.logs.snapshot()
 }
 
 // ------------------------------------------------- escrita pedida pela LLM
@@ -681,6 +825,11 @@ pub async fn cmd_search(
     needle: String,
 ) -> Result<SearchOutcome> {
     search(&state, &host_id, db, &needle).await
+}
+
+#[tauri::command]
+pub fn cmd_logs(state: tauri::State<'_, AppState>) -> Vec<LogEntry> {
+    logs(&state)
 }
 
 #[tauri::command]
@@ -1063,5 +1212,67 @@ mod tests {
         );
 
         del(&mut conn, key).await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_command_leaves_a_line_in_the_log() {
+        let (_dir, state) = test_state();
+
+        list_dbs(&state, "host-que-nao-existe")
+            .await
+            .expect_err("host inexistente precisa falhar");
+
+        let falha = logs(&state)
+            .into_iter()
+            .find(|e| e.kind == LogKind::Failure && e.operation == "list_dbs")
+            .expect("a falha de list_dbs precisava estar no anel");
+        assert!(
+            falha
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("não está cadastrado")),
+            "o detail precisa ser a mensagem já classificada do erro, veio {:?}",
+            falha.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn a_command_that_works_fast_leaves_no_line() {
+        let (_dir, state) = test_state();
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+
+        list_dbs(&state, &host_id).await.unwrap();
+
+        let entries = logs(&state);
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.kind != LogKind::Failure && e.kind != LogKind::Slow),
+            "uma operação rápida e bem-sucedida não podia deixar Failure nem Slow, veio {entries:?}"
+        );
+    }
+
+    #[test]
+    fn the_log_a_command_hands_over_is_newest_first() {
+        let (_dir, state) = test_state();
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            list_dbs(&state, "primeiro-inexistente")
+                .await
+                .expect_err("precisa falhar");
+            list_dbs(&state, "segundo-inexistente")
+                .await
+                .expect_err("precisa falhar");
+        });
+
+        let entries = logs(&state);
+        assert!(
+            entries[0]
+                .detail
+                .as_deref()
+                .is_some_and(|d| d.contains("segundo-inexistente")),
+            "a entrada mais na frente precisa ser a SEGUNDA falha, veio {:?}",
+            entries[0].detail
+        );
     }
 }
