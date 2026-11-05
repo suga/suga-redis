@@ -69,12 +69,26 @@
 		const xInicial = evento.clientX;
 		const larguraInicialDoArrasto = largura;
 
+		// Visível além da alça de 7px: sem isto, um arrasto rápido ultrapassa
+		// a alça e perde o cursor de redimensionar no meio do gesto.
+		document.body.style.cursor = "col-resize";
+
 		function mover(e: MouseEvent) {
+			if (e.buttons === 0) {
+				// O botão já foi solto, e nenhum `mouseup` chegou até a
+				// página — o normal ao soltar fora de uma janela do Tauri
+				// que não está maximizada. Sem este desvio, os listeners
+				// ficam presos no `window` e a coluna continua "arrastando"
+				// sozinha na próxima vez que o ponteiro cruzar a janela.
+				soltar();
+				return;
+			}
 			aplicar(larguraInicialDoArrasto + (e.clientX - xInicial));
 		}
 
 		function soltar() {
 			localStorage.setItem(chave, String(largura));
+			document.body.style.cursor = "";
 			window.removeEventListener("mousemove", mover);
 			window.removeEventListener("mouseup", soltar);
 			soltarArrasto = null;
@@ -114,6 +128,7 @@
 	aria-label="Redimensionar coluna"
 	aria-valuenow={largura}
 	aria-valuemin={min}
+	aria-valuemax={teto()}
 	tabindex="0"
 	onmousedown={iniciarArrasto}
 	onkeydown={teclado}
