@@ -24,11 +24,11 @@
 
 ## Review Focus
 
-1. **Senha e valor de chave no log** — a linha registra o nome da operação e o erro, nunca o conteúdo; um host com senha no chaveiro não pode vazar por `Display` de erro. *(teste na Tarefa 1 e na Tarefa 3)*
-2. **Desconectar no meio de uma varredura** — retratos em voo continuam chegando por evento depois do `drop_host` e não podem repovoar a árvore de um host do qual já se saiu. *(teste na Tarefa 7)*
-3. **Largura guardada inválida** — `localStorage` com lixo, `NaN`, negativo ou maior que a janela não pode deixar a coluna irrecuperável. *(teste na Tarefa 8)*
-4. **Janela estreita** — abaixo de `52rem` o layout empilha; a largura guardada precisa ser ignorada aí, não aplicada a uma coluna que já não existe. *(teste na Tarefa 8)*
-5. **Anel cheio** — a linha 1001 descarta a mais velha, e a ordem continua mais-recente-primeiro. *(teste na Tarefa 1)*
+1. **Senha e valor de chave no log** — a linha registra o nome da operação e o erro, nunca o conteúdo; um host com senha no chaveiro não pode vazar por `Display` de erro. *(teste na Task 1 e na Task 3)*
+2. **Desconectar no meio de uma varredura** — retratos em voo continuam chegando por evento depois do `drop_host` e não podem repovoar a árvore de um host do qual já se saiu. *(teste na Task 7)*
+3. **Largura guardada inválida** — `localStorage` com lixo, `NaN`, negativo ou maior que a janela não pode deixar a coluna irrecuperável. *(teste na Task 8)*
+4. **Janela estreita** — abaixo de `52rem` o layout empilha; a largura guardada precisa ser ignorada aí, não aplicada a uma coluna que já não existe. *(teste na Task 8)*
+5. **Anel cheio** — a linha 1001 descarta a mais velha, e a ordem continua mais-recente-primeiro. *(teste na Task 1)*
 
 ---
 
@@ -47,7 +47,7 @@
 
 ---
 
-## Tarefa 1: O anel de log
+## Task 1: O anel de log
 
 **Files:**
 - Create: `src-tauri/src/core/log.rs`
@@ -121,14 +121,14 @@ git commit -m "feat: add an in-memory ring for connection, failure and slowness"
 
 ---
 
-## Tarefa 2: O pool registra o que acontece com o socket
+## Task 2: O pool registra o que acontece com o socket
 
 **Files:**
 - Modify: `src-tauri/src/core/conn.rs` (`Pool`, `connect`, `drop_host`)
 - Test: `core/conn.rs`, `mod tests`
 
 **Interfaces:**
-- Consumes: `LogRing`, `LogEntry`, `LogKind` da Tarefa 1.
+- Consumes: `LogRing`, `LogEntry`, `LogKind` da Task 1.
 - Produces:
   ```rust
   impl Pool {
@@ -183,14 +183,14 @@ git commit -m "feat: the pool records when a socket opens, fails or is dropped"
 
 ---
 
-## Tarefa 3: A fachada cronometra, registra e entrega o log
+## Task 3: A fachada cronometra, registra e entrega o log
 
 **Files:**
 - Modify: `src-tauri/src/commands.rs`
 - Test: `commands.rs`, `mod tests`
 
 **Interfaces:**
-- Consumes: Tarefas 1 e 2.
+- Consumes: Tasks 1 e 2.
 - Produces:
   ```rust
   // em AppState
@@ -245,7 +245,7 @@ git commit -m "feat: time every command, record what failed or dragged"
 
 ---
 
-## Tarefa 4: Conectar e desconectar de verdade
+## Task 4: Conectar e desconectar de verdade
 
 **Files:**
 - Modify: `src-tauri/src/commands.rs`, `src-tauri/src/lib.rs` (registrar os comandos)
@@ -300,14 +300,14 @@ git commit -m "feat: connect and disconnect a host for real"
 
 ---
 
-## Tarefa 5: A porta da tela
+## Task 5: A porta da tela
 
 **Files:**
 - Modify: `src/lib/api.ts`
 - Test: `src/lib/__tests__/api-log.test.ts` *(novo)*
 
 **Interfaces:**
-- Consumes: Tarefas 3 e 4.
+- Consumes: Tasks 3 e 4.
 - Produces:
   ```ts
   export type LogKind = "connection" | "failure" | "slow";
@@ -345,7 +345,7 @@ git commit -m "feat: open the door for logs, connect and disconnect"
 
 ---
 
-## Tarefa 6: A aba Logs
+## Task 6: A aba Logs
 
 **Files:**
 - Create: `src/lib/LogPanel.svelte`
@@ -353,7 +353,7 @@ git commit -m "feat: open the door for logs, connect and disconnect"
 - Test: `src/lib/__tests__/log-panel.test.ts` *(novo)*
 
 **Interfaces:**
-- Consumes: `logs()`, `LogEntry` da Tarefa 5.
+- Consumes: `logs()`, `LogEntry` da Task 5.
 - Produces: `<LogPanel />`, sem props — o log é do aplicativo, não do host aberto.
 
 - [ ] **Step 1: Write the failing tests**
@@ -383,14 +383,14 @@ git commit -m "feat: add a Logs tab that survives nothing but answers everything
 
 ---
 
-## Tarefa 7: Estado da conexão na linha do host
+## Task 7: Estado da conexão na linha do host
 
 **Files:**
 - Modify: `src/lib/HostList.svelte` (props, `testes`, o bloco de ações `:86-99` e o resultado `:100-104`), `src/routes/+page.svelte` (`aberto`, `onSelect`)
 - Test: `src/lib/__tests__/host-state.test.ts` *(novo)*
 
 **Interfaces:**
-- Consumes: `connect`, `disconnect` da Tarefa 5.
+- Consumes: `connect`, `disconnect` da Task 5.
 - Produces: em `HostList`, `estados: Record<string, EstadoConexao>` com
   ```ts
   type EstadoConexao =
@@ -434,7 +434,7 @@ git commit -m "feat: say on the host row whether it is connected, and why not"
 
 ---
 
-## Tarefa 8: Divisores arrastáveis
+## Task 8: Divisores arrastáveis
 
 **Files:**
 - Create: `src/lib/Divisor.svelte`
@@ -484,7 +484,7 @@ git commit -m "feat: let both column dividers be dragged, and remember the width
 
 ---
 
-## Tarefa 9: Fechar os erros engolidos
+## Task 9: Fechar os erros engolidos
 
 **Files:**
 - Modify: `src/lib/Workspace.svelte:111` (`scanStatus`) e `:130` (`listDbs`)
@@ -520,7 +520,7 @@ git commit -m "fix: an empty database and a failed question are no longer the sa
 
 ---
 
-## Tarefa 10: Fechamento
+## Task 10: Fechamento
 
 - [ ] **Step 1:** `cd src-tauri && cargo test` → tudo passa
 - [ ] **Step 2:** `cd src-tauri && cargo clippy` → nenhum aviso novo (3 pré-existentes são conhecidos)
