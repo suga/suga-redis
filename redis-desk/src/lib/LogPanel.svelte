@@ -71,7 +71,17 @@
 		</p>
 	{:else}
 		<ul>
-			{#each entradas as entrada (`${entrada.at_ms}-${entrada.host}-${entrada.operation}`)}
+			<!-- Chave pelo índice, de propósito. Qualquer chave montada com o
+			     CONTEÚDO da entrada é falsa: uma falha de "Conectar" empurra
+			     duas linhas — a do pool e a da fachada — no mesmo
+			     milissegundo, com o mesmo host e a mesma operação, diferindo
+			     só no tipo. O Svelte 5 derruba o bloco inteiro ao ver chave
+			     repetida, e derrubava justamente a aba que a pessoa abriu
+			     para descobrir por que a conexão falhou. A lista é um retrato
+			     imutável, trocado por inteiro a cada leitura, então o índice
+			     identifica a posição tão bem quanto qualquer outra coisa e
+			     não depende do que está escrito na linha. -->
+			{#each entradas as entrada, i (i)}
 				<li data-testid="entrada">
 					<div class="cabeca">
 						<span class="tipo tipo--{entrada.kind}">{ROTULO[entrada.kind]}</span>

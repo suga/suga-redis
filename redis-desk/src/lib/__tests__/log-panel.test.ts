@@ -117,6 +117,33 @@ test("mostra hosts que não são o aberto", async () => {
 	expect(texto).toContain("redis-que-nao-abriu");
 });
 
+test("sobrevive a duas entradas do mesmo instante, host e operação", async () => {
+	// Uma falha de "Conectar" empurra DUAS linhas separadas por nanossegundos:
+	// o pool registra a tentativa de socket (`connection`) e a fachada
+	// registra a falha da operação (`failure`). Elas caem no mesmo
+	// milissegundo, com o mesmo host e a mesma operação — só o `kind` muda.
+	// Uma chave de `{#each}` montada com o conteúdo da entrada trata as duas
+	// como a mesma, e o Svelte 5 derruba a aba inteira. É o caminho exato que
+	// esta aba existe para servir: clicar em Logs depois de uma conexão que
+	// falhou.
+	leu.mockResolvedValue([
+		entrada({
+			kind: "failure",
+			duration_ms: 5,
+			detail: "não foi possível alcançar o host",
+		}),
+		entrada({
+			kind: "connection",
+			duration_ms: 5,
+			detail: "não foi possível alcançar o host",
+		}),
+	]);
+	montar();
+
+	const linhas = await screen.findAllByTestId("entrada");
+	expect(linhas).toHaveLength(2);
+});
+
 test("avisa quando não conseguiu ler o log", async () => {
 	leu.mockRejectedValue(new Error("falha ao ler"));
 	montar();
