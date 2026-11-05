@@ -4,7 +4,7 @@ Documento de retomada. Leia antes de mexer no código — especialmente a
 seção **Fatos que custaram caro**, que registra coisas que não se deduzem
 lendo os arquivos e que já quebraram este projeto uma vez cada.
 
-Estado em 2026-11-05. Branch `feat/redis-desk`, 61 commits, árvore limpa.
+Estado em 2026-11-05. Branch `feat/redis-desk`, 68 commits, árvore limpa.
 
 ---
 
@@ -51,8 +51,8 @@ o instrumento para resolvê-la, e de quebra fechou o buraco que a escondia:
 
 | | |
 |:-|-:|
-| Testes Rust | **114**, todos passando |
-| Testes de interface | **91**, todos passando |
+| Testes Rust | **120**, todos passando |
+| Testes de interface | **109**, todos passando |
 | Linhas de código | ~17.300 |
 | `cargo clippy` | 3 avisos pré-existentes (`config.rs:246`, `history.rs:381`, `history.rs:443`) |
 | `svelte-check` | 0 erros, 0 avisos |
@@ -167,6 +167,16 @@ nenhum teste pegava, porque o Redis de teste fala em texto puro.
 - `INFO keyspace` volta **vazio**; `db_sizes` recua para `DBSIZE`.
 - O DNS resolve com prefixo `default.` — é a marca desse produto.
 
+### O Node 22 já tem um `localStorage`, e ele é inerte
+
+`globalThis.localStorage` passou a existir no Node 22 como um `getter`
+nativo que não funciona sem `--localstorage-file` — e, por existir antes,
+impede o jsdom de instalar o dele. Qualquer `localStorage.getItem` num
+teste explodia com "Cannot read properties of undefined", e nada no
+código diz por quê. `src/tests/setup.ts` instala um `Storage` em memória
+por cima. Mesma família da armadilha do `JSON.parse` logo abaixo: as duas
+nasceram da subida do Node 20 para o 22.
+
 ### A mensagem do `JSON.parse` não é contrato
 
 Até o Node 20 trazia `at position N`; do 22 em diante traz um trecho do
@@ -225,11 +235,23 @@ seletor de banco aparecia pelado, sem contagem. Duas hipóteses sobreviveram
   proxy do serverless, ACL ou shard entre o cliente e o dado.
 
 Esta leva de tarefas fechou o `catch` silencioso que confundia as duas
-hipóteses (ver acima) e deu à aba **Logs** o que faltava para decidi-las: a
-resposta crua do servidor, por host, por operação, com o erro quando
-houver. **Ninguém ainda abriu o host-serverless no binário empacotado para
-ler essa aba** — essa leitura é o próximo passo, não um resultado desta
-sessão. Até lá, a causa raiz continua em aberto.
+hipóteses e deu à tela o que falta para decidi-las. **Atenção ao que o log
+NÃO é:** ele registra conexão, falha e lentidão — um comando saudável não
+deixa rastro, por decisão de desenho (ver *Não-objetivos*). Se o `DBSIZE`
+daquele host responder `0` de verdade, a aba **Logs** fica calada, e
+calada é a resposta certa.
+
+Quem decide entre as duas hipóteses é a tela do `Workspace`:
+
+- `db_sizes` estourou → `erroBancos` mostra a mensagem ao lado do seletor
+  de bancos (e o anel ganha uma linha `failure` de `list_dbs`, com o
+  motivo, para ler depois);
+- nenhum erro na tela e o seletor com `0` chaves → o servidor **respondeu
+  vazio de verdade**, e a hipótese que sobra é a do proxy/ACL/shard.
+
+**Ninguém ainda abriu o host-serverless no binário empacotado para olhar
+essas duas coisas** — essa leitura é o próximo passo, não um resultado
+desta sessão. Até lá, a causa raiz continua em aberto.
 
 ### 2. Nível com milhões de nomes distintos
 

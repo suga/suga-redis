@@ -208,7 +208,22 @@ no log e a mostrar o estado de falha. Foi esse silêncio que escondeu o Hub.
 ## Como se sabe que funcionou
 
 Abrir o host-serverless e, em vez de uma árvore muda, ler na tela se ele
-conectou — e no log, o que o servidor respondeu a `DBSIZE` e `SCAN`.
+conectou — e saber, olhando, qual das duas hipóteses está de pé:
 
-Essa resposta decide entre as duas hipóteses abertas, e aí a causa raiz do
-Hub vira um bug comum: com evidência.
+- se `db_sizes` estourou, a mensagem do erro aparece ao lado do seletor de
+  bancos, e o log ganha uma linha de **falha** com o motivo;
+- se não há erro nenhum e o seletor mostra `0` chaves, o servidor
+  respondeu vazio de verdade — e aí a hipótese que sobra é a do
+  proxy/ACL/shard.
+
+É a distinção entre as duas que decide, e com ela a causa raiz do Hub vira
+um bug comum: com evidência.
+
+> **Correção de 2026-11-05, depois da implementação.** A redação anterior
+> dizia "e no log, o que o servidor respondeu a `DBSIZE` e `SCAN`". Isso
+> contradizia os Não-objetivos deste mesmo documento: o log registra
+> conexão, falha e lentidão, e **um comando saudável não deixa rastro** —
+> é o que o impede de virar enxurrada. Se o `DBSIZE` daquele host
+> responder `0` sem erro, o log fica calado, e a próxima pessoa concluiria
+> que o instrumento está quebrado em vez de que o servidor não disse nada.
+> O critério acima pede o que o aplicativo realmente mostra.

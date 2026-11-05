@@ -526,5 +526,5 @@ git commit -m "fix: an empty database and a failed question are no longer the sa
 - [ ] **Step 2:** `cd src-tauri && cargo clippy` → nenhum aviso novo (3 pré-existentes são conhecidos)
 - [ ] **Step 3:** `npm test` e `npm run check` → tudo passa, 0 erros, 0 avisos
 - [ ] **Step 4:** `npm run dist && ditto dist/Suga-Redis.app /Applications/Suga-Redis.app`
-- [ ] **Step 5:** Abrir o host-serverless no binário empacotado, ler a aba Logs e **registrar no `docs/CONTEXTO.md`** o que o servidor respondeu a `DBSIZE` e `SCAN` — é a evidência que decide a causa raiz que segue aberta.
+- [ ] **Step 5:** Abrir o host-serverless no binário empacotado e **registrar no `docs/CONTEXTO.md`** qual das duas hipóteses está de pé: (a) há mensagem de erro ao lado do seletor de bancos — e então o anel tem a linha de falha de `list_dbs` com o motivo; ou (b) não há erro nenhum e o seletor mostra `0` chaves — e então o servidor respondeu vazio de verdade. **O log não guarda a resposta crua de um comando que deu certo**: ele registra conexão, falha e lentidão, e um comando saudável não deixa rastro (ver *Não-objetivos* do desenho). Uma aba Logs calada com a tela sem erro É a evidência da hipótese (b), não sinal de instrumento quebrado.
 - [ ] **Step 6:** Atualizar `docs/CONTEXTO.md` (estado, contagem de testes, o que ficou incompleto) e commitar.
