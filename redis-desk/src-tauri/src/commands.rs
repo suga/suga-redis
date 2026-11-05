@@ -226,6 +226,19 @@ impl AppState {
         })
     }
 
+    /// Só o host, sem tocar no chaveiro do sistema: para quem precisa do
+    /// NOME dele (a linha de log) e não da senha. `None` quando o host já
+    /// não está cadastrado — a operação pode seguir, e a linha de log cai
+    /// no `host_id` cru, que ainda diz de quem se trata.
+    pub(crate) fn host_by_id(&self, host_id: &str) -> Option<Host> {
+        self.hosts
+            .lock()
+            .unwrap()
+            .list()
+            .into_iter()
+            .find(|host| host.id == host_id)
+    }
+
     /// O host e a senha dele, resolvidos juntos — nenhuma operação precisa
     /// de um sem o outro, e separá-los daria duas chances de esquecer a
     /// senha.
@@ -264,6 +277,35 @@ async fn registrar<T>(
     db: Option<u8>,
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
+    registrar_com(state, operation, host_id, host, db, OnFailure::Log, fut).await
+}
+
+/// O que `registrar_com` faz com um `Err`.
+enum OnFailure {
+    /// Empurra a linha de falha — o caso de toda operação.
+    Log,
+    /// Não empurra: quem está mais perto da falha já a registrou, e uma
+    /// segunda linha com o mesmo host, a mesma operação, o mesmo
+    /// milissegundo e o mesmo motivo é o mesmo evento contado duas vezes.
+    /// Hoje só `connect`, cuja falha o `Pool` escreve — e escreve melhor,
+    /// porque só ele sabe o banco e se um socket chegou a nascer.
+    AlreadyLogged,
+}
+
+/// `registrar` com a decisão sobre a falha explícita. A lentidão continua
+/// registrada nos dois modos: o `Pool` só fala quando um socket NASCE, e um
+/// `connect` de 5,6 s sobre um socket já aberto — o caso do host que
+/// originou este trabalho — não deixaria rastro nenhum se a fachada também
+/// se calasse.
+async fn registrar_com<T>(
+    state: &AppState,
+    operation: &str,
+    host_id: &str,
+    host: Option<&Host>,
+    db: Option<u8>,
+    on_failure: OnFailure,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
     let start = Instant::now();
     let result = fut.await;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -272,6 +314,7 @@ async fn registrar<T>(
         .unwrap_or_else(|| host_id.to_string());
 
     match &result {
+        Err(_) if matches!(on_failure, OnFailure::AlreadyLogged) => {}
         Err(err) => state.logs.push(LogEntry {
             at_ms: now_ms(),
             kind: LogKind::Failure,
@@ -332,12 +375,27 @@ pub fn remove_host(state: &AppState, host_id: &str) -> Result<()> {
 pub async fn connect(state: &AppState, host_id: &str) -> Result<u64> {
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "connect", host_id, Some(&host), None, async {
-                let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
-                Ok(elapsed.as_millis() as u64)
-            })
+            // `AlreadyLogged`: o `Pool` é o dono do evento de conexão. Ele
+            // já empurra a linha dessa tentativa, com o banco, a duração e
+            // o motivo classificado — e é o único que sabe se um socket
+            // chegou a nascer. A linha de falha da fachada seria o mesmo
+            // evento, no mesmo milissegundo, com o mesmo texto.
+            registrar_com(
+                state,
+                "connect",
+                host_id,
+                Some(&host),
+                None,
+                OnFailure::AlreadyLogged,
+                async {
+                    let elapsed = state.pool.ping(&host, pw.as_deref()).await?;
+                    Ok(elapsed.as_millis() as u64)
+                },
+            )
             .await
         }
+        // Aqui o pool nunca chegou a ser chamado: ninguém mais registraria
+        // esta falha.
         Err(err) => registrar(state, "connect", host_id, None, None, async { Err(err) }).await,
     }
 }
@@ -542,8 +600,26 @@ pub async fn rescan(
 }
 
 /// De quando é o índice deste (host, banco) — `None` se nunca foi varrido.
-pub fn scan_status(state: &AppState, host_id: &str, db: u8) -> Result<Option<ScanReport>> {
-    Ok(state.index.last_scan(host_id, db)?)
+///
+/// Passa pelo anel como todo o resto: era um dos dois `catch` mudos que o
+/// desenho nomeou por linha, e consertar só o lado da tela deixava a falha
+/// visível no momento e perdida logo depois. `async` só por isso — a
+/// pergunta em si é um `SELECT` local.
+///
+/// Resolve o host sem tocar no chaveiro: aqui não há senha a usar, e
+/// exigi-la faria um host recém-removido do cadastro passar a falhar numa
+/// pergunta que o índice ainda sabe responder.
+pub async fn scan_status(state: &AppState, host_id: &str, db: u8) -> Result<Option<ScanReport>> {
+    let host = state.host_by_id(host_id);
+    registrar(
+        state,
+        "scan_status",
+        host_id,
+        host.as_ref(),
+        Some(db),
+        async { Ok(state.index.last_scan(host_id, db)?) },
+    )
+    .await
 }
 
 // ----------------------------------------------------------------- valor
@@ -560,9 +636,18 @@ pub async fn read_value_more(
     key: &str,
     offset: usize,
 ) -> Result<ValueView> {
+    // Nome próprio para a busca de continuação: sem isso, a linha do log
+    // não distingue a primeira página de uma página seguinte — e são
+    // custos e causas diferentes.
+    let operation = if offset == 0 {
+        "read_value"
+    } else {
+        "read_value_more"
+    };
+
     match state.host_and_password(host_id) {
         Ok((host, pw)) => {
-            registrar(state, "read_value", host_id, Some(&host), Some(db), async {
+            registrar(state, operation, host_id, Some(&host), Some(db), async {
                 let limit = ValueLimit {
                     offset,
                     max_bytes: PAGE_BYTES,
@@ -576,10 +661,7 @@ pub async fn read_value_more(
             .await
         }
         Err(err) => {
-            registrar(state, "read_value", host_id, None, Some(db), async {
-                Err(err)
-            })
-            .await
+            registrar(state, operation, host_id, None, Some(db), async { Err(err) }).await
         }
     }
 }
@@ -660,24 +742,50 @@ pub fn list_history(state: &AppState, host_id: &str, limit: usize) -> Result<Vec
 /// do host aberto na tela: quem desfaz uma mudança feita em produção está
 /// mexendo em produção, independente de onde esteja olhando agora.
 pub async fn rollback(state: &AppState, entry_id: i64, confirmed: bool) -> Result<WriteOutcome> {
-    let entry = state.history.get(entry_id)?;
+    // Sem a entrada não há host a nomear, e esta leitura também pode
+    // falhar: a linha fica no nome do alvo que a pessoa tinha em mãos.
+    // Desfazer é uma ESCRITA contra um banco possivelmente de produção —
+    // nenhum pedaço dela pode falhar em silêncio.
+    let entry = match state.history.get(entry_id) {
+        Ok(entry) => entry,
+        Err(err) => {
+            let alvo = format!("histórico #{entry_id}");
+            return registrar(state, "rollback", &alvo, None, None, async {
+                Err(err.into())
+            })
+            .await;
+        }
+    };
 
-    if needs_confirmation(entry.env, confirmed) {
-        return Ok(WriteOutcome::NeedsConfirmation {
-            summary: format!("Desfazer em {}: {}", entry.key, entry.summary),
-        });
+    let host_id = entry.host_id.clone();
+    let db = entry.db;
+
+    match state.host_and_password(&host_id) {
+        Ok((host, pw)) => {
+            registrar(state, "rollback", &host_id, Some(&host), Some(db), async {
+                // A trava de produção fica DENTRO da cronometragem, como em
+                // `write_value`: recusar por falta de confirmação não é
+                // falha, é resposta — e sai daqui como `Ok`, sem linha.
+                if needs_confirmation(entry.env, confirmed) {
+                    return Ok(WriteOutcome::NeedsConfirmation {
+                        summary: format!("Desfazer em {}: {}", entry.key, entry.summary),
+                    });
+                }
+
+                state
+                    .history
+                    .rollback(&state.pool, &host, pw.as_deref(), entry_id)
+                    .await?;
+                state.index.forget_key(&host_id, entry.db, &entry.key)?;
+
+                Ok(WriteOutcome::Applied { entry_id })
+            })
+            .await
+        }
+        Err(err) => {
+            registrar(state, "rollback", &host_id, None, Some(db), async { Err(err) }).await
+        }
     }
-
-    let (host, pw) = state.host_and_password(&entry.host_id)?;
-    state
-        .history
-        .rollback(&state.pool, &host, pw.as_deref(), entry_id)
-        .await?;
-    state
-        .index
-        .forget_key(&entry.host_id, entry.db, &entry.key)?;
-
-    Ok(WriteOutcome::Applied { entry_id })
 }
 
 // ------------------------------------------------------------------ busca
@@ -864,12 +972,12 @@ pub async fn cmd_rescan(
 }
 
 #[tauri::command]
-pub fn cmd_scan_status(
+pub async fn cmd_scan_status(
     state: tauri::State<'_, AppState>,
     host_id: String,
     db: u8,
 ) -> Result<Option<ScanReport>> {
-    scan_status(&state, &host_id, db)
+    scan_status(&state, &host_id, db).await
 }
 
 #[tauri::command]
@@ -1442,6 +1550,145 @@ mod tests {
                 .is_some_and(|d| d.contains("segundo-inexistente")),
             "a entrada mais na frente precisa ser a SEGUNDA falha, veio {:?}",
             entries[0].detail
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_connect_writes_one_line_for_one_event() {
+        let (_dir, state) = test_state();
+        let mut spec = host_spec(Env::Dev);
+        spec.port = 1; // ninguém atende aqui
+        let host_id = add_host(&state, spec, None).unwrap();
+
+        connect(&state, &host_id)
+            .await
+            .expect_err("a porta 1 não podia aceitar conexão");
+
+        let entries = logs(&state);
+        let do_connect: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.operation == "connect")
+            .collect();
+        // Duas linhas — a do pool e a da fachada — com o mesmo host, a mesma
+        // operação, o mesmo milissegundo e o mesmo motivo são o mesmo evento
+        // contado duas vezes, num anel cujo anti-objetivo é virar enxurrada.
+        assert_eq!(
+            do_connect.len(),
+            1,
+            "uma tentativa de conexão é UM evento, veio {do_connect:?}"
+        );
+        assert!(
+            do_connect[0].detail.is_some(),
+            "a linha que sobrou precisa ser a que diz por quê, veio {:?}",
+            do_connect[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_rollback_leaves_a_line_in_the_log() {
+        let (_dir, state) = test_state();
+
+        rollback(&state, 999_999, false)
+            .await
+            .expect_err("não existe entrada 999999");
+
+        let logged = logs(&state)
+            .into_iter()
+            .any(|entry| entry.kind == LogKind::Failure && entry.operation == "rollback");
+        assert!(
+            logged,
+            "desfazer é uma ESCRITA contra um banco possivelmente de produção: falhar não pode ser mudo"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rollback_against_a_vanished_host_is_logged_with_the_host() {
+        let (_dir, state) = test_state();
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let key = "commands:rollback:log";
+        let mut conn = raw_conn().await;
+        del(&mut conn, key).await;
+
+        let outcome = write_value(
+            &state,
+            &host_id,
+            TEST_DB,
+            key,
+            WriteOp::SetString {
+                value: text_bytes("antes"),
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let WriteOutcome::Applied { entry_id } = outcome else {
+            panic!("a escrita em dev não devia pedir confirmação");
+        };
+
+        // O host sai do cadastro; a entrada de histórico continua lá,
+        // apontando para ele.
+        remove_host(&state, &host_id).unwrap();
+
+        rollback(&state, entry_id, false)
+            .await
+            .expect_err("o host já não existe");
+
+        let entry = logs(&state)
+            .into_iter()
+            .find(|entry| entry.operation == "rollback")
+            .expect("a falha precisava estar no anel");
+        assert_eq!(entry.kind, LogKind::Failure);
+        assert_eq!(
+            entry.host, host_id,
+            "sem o Host resolvido, a linha ainda precisa dizer de qual host se trata"
+        );
+        assert_eq!(entry.db, Some(TEST_DB));
+
+        del(&mut conn, key).await;
+    }
+
+    #[tokio::test]
+    async fn paging_a_value_is_logged_under_its_own_name() {
+        let (_dir, state) = test_state();
+
+        read_value(&state, "host-que-nao-existe", TEST_DB, "k")
+            .await
+            .expect_err("host inexistente");
+        read_value_more(&state, "host-que-nao-existe", TEST_DB, "k", 50)
+            .await
+            .expect_err("host inexistente");
+
+        let nomes: Vec<String> = logs(&state)
+            .into_iter()
+            .filter(|entry| entry.kind == LogKind::Failure)
+            .map(|entry| entry.operation)
+            .collect();
+        // Sem nomes distintos, a linha do log não distingue a primeira
+        // leitura de uma busca de continuação — custos e causas diferentes.
+        assert!(
+            nomes.contains(&"read_value".to_string())
+                && nomes.contains(&"read_value_more".to_string()),
+            "esperava as duas operações nomeadas separadamente, veio {nomes:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn asking_for_the_index_report_passes_through_the_log() {
+        let (_dir, state) = test_state();
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+
+        // Um relatório de índice que responde rápido e sem erro não deixa
+        // rastro — é a mesma regra de todo comando saudável. O que esta
+        // passagem garante é que, quando ele FALHAR, a falha tem por onde
+        // sair: era um dos dois `catch` mudos que o desenho nomeou.
+        scan_status(&state, &host_id, TEST_DB).await.unwrap();
+
+        let barulho = logs(&state)
+            .into_iter()
+            .any(|entry| entry.operation == "scan_status");
+        assert!(
+            !barulho,
+            "uma pergunta rápida e bem-sucedida não podia deixar linha nenhuma"
         );
     }
 
