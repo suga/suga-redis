@@ -4,13 +4,14 @@
 //! no meio travaria a interface indefinidamente.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncConnectionConfig, Client};
 
 use super::config::Host;
+use super::log::{LogEntry, LogKind, LogRing};
 
 /// Tempo máximo de espera para abrir uma conexão ou receber uma resposta do
 /// Redis.
@@ -68,6 +69,11 @@ pub struct Pool {
     connections: Mutex<HashMap<(String, u8), MultiplexedConnection>>,
     connection_timeout: Duration,
     response_timeout: Duration,
+    /// Anel onde `connect`/`drop_host` registram o que acontece com o
+    /// socket. `new`/`with_timeouts` dão ao pool um anel próprio e
+    /// descartável — só `with_log` troca por um compartilhado (ver seu
+    /// comentário).
+    logs: Arc<LogRing>,
 }
 
 impl Default for Pool {
@@ -116,7 +122,19 @@ impl Pool {
             connections: Mutex::new(HashMap::new()),
             connection_timeout,
             response_timeout,
+            logs: Arc::new(LogRing::new()),
         }
+    }
+
+    /// Troca o anel de log do pool pelo `logs` informado, descartando o anel
+    /// próprio que `new`/`with_timeouts` criaram. Existe para a Task 3: o
+    /// `AppState` guarda um único `Arc<LogRing>` e o entrega aqui, para que
+    /// as entradas de conexão deste pool caiam no mesmo anel que a fachada
+    /// usa para falhas e operações lentas — sem isso, cada um teria seu
+    /// próprio histórico e a UI veria metade da história.
+    pub fn with_log(mut self, logs: Arc<LogRing>) -> Pool {
+        self.logs = logs;
+        self
     }
 
     /// Devolve a conexão multiplexada do (host, banco), abrindo-a (e
@@ -150,11 +168,34 @@ impl Pool {
     /// porque a classificação de erro de conexão (`ConnError::Unreachable`)
     /// normalmente indica que o socket caiu — e um socket é compartilhado
     /// por todos os bancos abertos daquele host.
-    pub fn drop_host(&self, id: &str) {
-        self.connections
-            .lock()
-            .unwrap()
-            .retain(|(host_id, _db), _conn| host_id != id);
+    ///
+    /// Recebe o `Host` inteiro, não só o id: o id é a chave usada para
+    /// achar as conexões no mapa, mas o nome (`host.name`) é o que vai para
+    /// o anel de log quando havia algo para descartar — ver `LogEntry::host`
+    /// em `core::log`.
+    pub fn drop_host(&self, host: &Host) {
+        // Verifica se havia algo a descartar antes de mexer no mapa: sem
+        // isso, todo `drop_host` (inclusive os chamados por `with_retry`
+        // antes de uma conexão sequer ter sido aberta) empurraria uma
+        // entrada "disconnect" vazia no anel.
+        let had_connections = {
+            let mut connections = self.connections.lock().unwrap();
+            let had_connections = connections.keys().any(|(host_id, _db)| host_id == &host.id);
+            connections.retain(|(host_id, _db), _conn| host_id != &host.id);
+            had_connections
+        };
+
+        if had_connections {
+            self.logs.push(LogEntry {
+                at_ms: now_ms(),
+                kind: LogKind::Connection,
+                host: host.name.clone(),
+                db: None,
+                operation: "disconnect".to_string(),
+                duration_ms: None,
+                detail: None,
+            });
+        }
     }
 
     async fn connect(
@@ -168,16 +209,54 @@ impl Pool {
         }
 
         let url = build_url(host, db, password);
-        let client = Client::open(url).map_err(|err| classify(host, err))?;
+        let start = Instant::now();
+
+        let client = match Client::open(url) {
+            Ok(client) => client,
+            Err(err) => {
+                let classified = classify(host, err);
+                self.log_connect(host, db, None, Some(classified.to_string()));
+                return Err(classified);
+            }
+        };
 
         let config = AsyncConnectionConfig::new()
             .set_connection_timeout(Some(self.connection_timeout))
             .set_response_timeout(Some(self.response_timeout));
 
-        client
+        match client
             .get_multiplexed_async_connection_with_config(&config)
             .await
-            .map_err(|err| classify(host, err))
+        {
+            Ok(conn) => {
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                self.log_connect(host, db, Some(elapsed_ms), None);
+                Ok(conn)
+            }
+            Err(err) => {
+                let classified = classify(host, err);
+                self.log_connect(host, db, None, Some(classified.to_string()));
+                Err(classified)
+            }
+        }
+    }
+
+    /// Registra uma tentativa de abrir o socket de `(host, db)` no anel de
+    /// log: `duration_ms` preenchido e `detail` ausente numa conexão bem
+    /// sucedida, ou o inverso numa falha. `detail` é sempre o `Display` do
+    /// `ConnError` já classificado (`classify`), nunca a URL de conexão —
+    /// que embute a senha (ver `build_url`) — nem o erro cru do driver, que
+    /// poderia carregar o mesmo texto.
+    fn log_connect(&self, host: &Host, db: u8, duration_ms: Option<u64>, detail: Option<String>) {
+        self.logs.push(LogEntry {
+            at_ms: now_ms(),
+            kind: LogKind::Connection,
+            host: host.name.clone(),
+            db: Some(db),
+            operation: "connect".to_string(),
+            duration_ms,
+            detail,
+        });
     }
 
     /// Roda uma operação assíncrona arbitrária sobre a conexão cacheada do
@@ -213,7 +292,7 @@ impl Pool {
             Ok(value) => Ok(value),
             Err(err) => match classify(host, err) {
                 ConnError::Unreachable { .. } => {
-                    self.drop_host(&host.id);
+                    self.drop_host(host);
                     let conn = self.get(host, db, password).await?;
                     operation(conn).await.map_err(|err| classify(host, err))
                 }
@@ -255,7 +334,7 @@ impl Pool {
             Ok(value) => Ok(value),
             Err(err) => match classify(host, err) {
                 ConnError::Unreachable { detail, .. } => {
-                    self.drop_host(&host.id);
+                    self.drop_host(host);
                     Err(ConnError::Ambiguous {
                         key: key.to_string(),
                         detail,
@@ -317,6 +396,16 @@ impl Pool {
             Vec::new()
         })
     }
+}
+
+/// Epoch em milissegundos, para preencher `LogEntry::at_ms` — o anel em si
+/// não lê o relógio (ver o comentário de módulo de `core::log`), então quem
+/// empurra uma entrada precisa calcular isso.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("relógio do sistema antes de 1970")
+        .as_millis() as u64
 }
 
 /// Monta a URL de conexão a partir do host: `rediss://` quando `tls`,
@@ -619,6 +708,104 @@ mod tests {
         // nenhuma conexão nova foi aberta (o que `CLIENT LIST` também
         // mostraria, com uma linha a mais por conexão nova).
         assert_eq!(id1, id2);
+    }
+
+    #[tokio::test]
+    async fn opening_a_connection_is_logged() {
+        let ring = Arc::new(LogRing::new());
+        let pool = Pool::new().with_log(ring.clone());
+        let mut host = test_host("Redis de teste", TEST_PORT);
+        host.db = 13;
+
+        pool.get(&host, host.db, None).await.unwrap();
+
+        let snapshot = ring.snapshot();
+        let entry = snapshot
+            .iter()
+            .find(|e| e.operation == "connect")
+            .expect("esperava uma entrada de conexão no anel");
+
+        assert_eq!(entry.kind, LogKind::Connection);
+        assert_eq!(entry.host, "Redis de teste");
+        assert_eq!(entry.db, Some(13));
+        assert!(
+            entry.duration_ms.is_some(),
+            "duration_ms devia estar preenchido para uma conexão aberta com sucesso"
+        );
+        assert!(entry.detail.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_refused_connection_is_logged_with_the_reason() {
+        let ring = Arc::new(LogRing::new());
+        let pool = Pool::new().with_log(ring.clone());
+        // Porta 1 em loopback: ninguém escuta ali, então a recusa é
+        // imediata, sem precisar do padrão de "porta fechada" usado em
+        // `unreachable_host_names_itself_in_the_error`.
+        let host = test_host("Servidor Inacessível", 1);
+        let password = "senha-super-secreta";
+
+        let err = pool.get(&host, host.db, Some(password)).await.unwrap_err();
+
+        assert!(
+            matches!(err, ConnError::Unreachable { .. }),
+            "esperava ConnError::Unreachable, veio {err:?}"
+        );
+
+        let snapshot = ring.snapshot();
+        let entry = snapshot
+            .iter()
+            .find(|e| e.operation == "connect")
+            .expect("esperava uma entrada de conexão no anel");
+
+        assert_eq!(entry.kind, LogKind::Connection);
+        let detail = entry.detail.as_deref().unwrap_or("");
+        assert_eq!(
+            detail,
+            err.to_string(),
+            "detail precisa ser o texto já classificado de ConnError, não a URL crua"
+        );
+        assert!(
+            !detail.contains(password),
+            "a senha não pode aparecer no detail: {detail}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_a_host_is_logged() {
+        let ring = Arc::new(LogRing::new());
+        let pool = Pool::new().with_log(ring.clone());
+        let mut host = test_host("Redis de teste", TEST_PORT);
+        host.db = 13;
+
+        pool.get(&host, host.db, None).await.unwrap();
+        pool.drop_host(&host);
+
+        let snapshot = ring.snapshot();
+        let entry = snapshot
+            .iter()
+            .find(|e| e.operation == "disconnect")
+            .expect("esperava uma entrada de desconexão no anel");
+
+        assert_eq!(entry.kind, LogKind::Connection);
+        assert_eq!(
+            entry.host, "Redis de teste",
+            "o campo host precisa ser o nome de exibição, não o id interno do host"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_a_host_with_nothing_cached_logs_nothing() {
+        let ring = Arc::new(LogRing::new());
+        let pool = Pool::new().with_log(ring.clone());
+        let host = test_host("Host Nunca Conectado", 1);
+
+        pool.drop_host(&host);
+
+        assert!(
+            ring.snapshot().is_empty(),
+            "não havia nada para descartar, então o anel deveria continuar vazio"
+        );
     }
 
     #[tokio::test]
