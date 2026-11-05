@@ -17,7 +17,10 @@
 	import { onMount } from "svelte";
 
 	let entradas = $state<LogEntry[]>([]);
-	let carregando = $state(false);
+	// Começa true: o instante antes do onMount resolver é "ainda não lido",
+	// não "lido e vazio" — os dois não podem parecer a mesma tela por
+	// coincidência de tempo.
+	let carregando = $state(true);
 	let erro = $state("");
 
 	async function carregar() {
@@ -68,7 +71,7 @@
 		</p>
 	{:else}
 		<ul>
-			{#each entradas as entrada (entrada.at_ms + entrada.host + entrada.operation)}
+			{#each entradas as entrada (`${entrada.at_ms}-${entrada.host}-${entrada.operation}`)}
 				<li data-testid="entrada">
 					<div class="cabeca">
 						<span class="tipo tipo--{entrada.kind}">{ROTULO[entrada.kind]}</span>
@@ -76,6 +79,9 @@
 					</div>
 					<div class="linha">
 						<span class="host">{entrada.host}</span>
+						{#if entrada.db !== null}
+							<span class="banco" data-testid="banco">banco {entrada.db}</span>
+						{/if}
 						<span class="operacao">
 							{entrada.operation}{entrada.duration_ms !== null
 								? ` · ${duracao(entrada.duration_ms)}`
@@ -123,14 +129,16 @@
 	}
 
 	/* Verde, âmbar e cinza — nunca vermelho, que neste app só quer dizer
-	   produção. Tons próprios, separados dos tokens de ambiente em app.css,
-	   para que o significado de um não vaze para o outro. */
+	   produção. Os tons aqui são deliberadamente dessaturados e mais claros
+	   que --dev (#4e7a4a) e --homolog (#c98a20): um verde ou âmbar na mesma
+	   saturação dos tokens de ambiente seria quase gêmeo deles na tela, e
+	   ambiente é a única cor forte que este app se permite ter. */
 	.tipo--connection {
-		color: #5f9d63;
+		color: #87a18e;
 	}
 
 	.tipo--failure {
-		color: #c99a3c;
+		color: #bbac81;
 	}
 
 	.tipo--slow {
@@ -151,10 +159,16 @@
 
 	.host {
 		color: var(--text-dim);
+		word-break: break-word;
+	}
+
+	.banco {
+		color: var(--text-dim);
 	}
 
 	.operacao {
 		color: var(--text);
+		word-break: break-word;
 	}
 
 	.detalhe {

@@ -66,6 +66,18 @@ test("mostra a mais recente em cima, com hora, host, operação e duração", as
 	expect(linhas[1]).toHaveTextContent("redis-estoque");
 });
 
+test("mostra o banco quando houver, e omite quando não houver", async () => {
+	leu.mockResolvedValue([
+		entrada({ db: 3 }),
+		entrada({ at_ms: 1_762_000_000_000, host: "redis-estoque", db: null }),
+	]);
+	montar();
+
+	const linhas = await screen.findAllByTestId("entrada");
+	expect(within(linhas[0]).getByTestId("banco")).toHaveTextContent("banco 3");
+	expect(within(linhas[1]).queryByTestId("banco")).not.toBeInTheDocument();
+});
+
 test("mostra o motivo da falha", async () => {
 	leu.mockResolvedValue([
 		entrada({
