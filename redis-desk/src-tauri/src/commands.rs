@@ -551,6 +551,27 @@ pub fn tree_level(state: &AppState, host_id: &str, db: u8, prefix: &str) -> Opti
     trie.lock().unwrap().level(prefix)
 }
 
+/// Tira a chave da árvore em memória daquele (host, banco).
+///
+/// A árvore na tela é desenhada da trie, não do servidor: uma chave que
+/// deixou de existir precisa sair daqui, senão continua listada até alguém
+/// desconectar — que é o que joga a trie fora.
+///
+/// Silencioso de propósito. Se não há trie aberta para esse par, ou a
+/// chave nunca entrou nela (teto de filhos, teto de nós), não há nada a
+/// consertar — e nada disso é erro que a pessoa possa resolver.
+fn forget_key_in_tree(state: &AppState, host_id: &str, db: u8, key: &str) {
+    let trie = state
+        .trees
+        .lock()
+        .unwrap()
+        .get(&(host_id.to_string(), db))
+        .cloned();
+    if let Some(trie) = trie {
+        trie.lock().unwrap().remover(key);
+    }
+}
+
 /// Refaz o índice de busca do (host, banco). `progress` é chamado a cada
 /// chave para a barra de progresso.
 pub async fn rescan(
@@ -627,10 +648,19 @@ pub async fn read_value_more(
                     max_bytes: PAGE_BYTES,
                     max_elements: PAGE_ELEMENTS,
                 };
-                Ok(
-                    read_value_from_redis(&state.pool, &host, pw.as_deref(), db, key, limit)
-                        .await?,
-                )
+                let lido =
+                    read_value_from_redis(&state.pool, &host, pw.as_deref(), db, key, limit).await;
+
+                // A chave sumiu entre a varredura e o clique — expirou por
+                // TTL, quase sempre. Esta leitura é a primeira notícia que
+                // temos disso, e a árvore em memória precisa saber: sem
+                // isto a chave continua listada, e clicar nela só repete o
+                // mesmo erro.
+                if matches!(lido, Err(ConnError::KeyGone(_))) {
+                    forget_key_in_tree(state, host_id, db, key);
+                }
+
+                Ok(lido?)
             })
             .await
         }
@@ -688,6 +718,12 @@ pub async fn write_value(
                     // ida e volta a mais em toda escrita, para adiantar o que a
                     // varredura faz de qualquer jeito.
                     state.index.forget_key(host_id, db, key)?;
+
+                    // A árvore é cache igual ao índice, e `DeleteKey` é a
+                    // única operação que faz a chave deixar de existir.
+                    if matches!(op, WriteOp::DeleteKey) {
+                        forget_key_in_tree(state, host_id, db, key);
+                    }
 
                     Ok(WriteOutcome::Applied { entry_id })
                 },
@@ -1687,5 +1723,67 @@ mod tests {
         // E o retrato continua achatado no mesmo nível, como a tela já lia.
         assert_eq!(json["scanned"], 3);
         assert_eq!(json["done"], false);
+    }
+
+    /// Apagar uma chave tem de tirá-la da ÁRVORE, não só do Redis.
+    ///
+    /// A árvore na tela sai da trie em memória. Sem isto, a chave apagada
+    /// continuava listada até a pessoa desconectar e conectar de novo —
+    /// que é o único caminho que jogava a trie fora.
+    #[tokio::test]
+    async fn deleting_a_key_takes_it_off_the_tree() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn().await;
+
+        let chave = "arvore_rs_test:apagada:alvo";
+        let vizinha = "arvore_rs_test:apagada:fica";
+        set_string(&mut conn, chave, "x").await;
+        set_string(&mut conn, vizinha, "y").await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        scan_tree(&state, &host_id, TEST_DB, |_| {}).await.unwrap();
+
+        let antes = tree_level(&state, &host_id, TEST_DB, "arvore_rs_test:apagada:").unwrap();
+        assert_eq!(antes.children.len(), 2, "as duas estão na árvore antes");
+
+        write_value(&state, &host_id, TEST_DB, chave, WriteOp::DeleteKey, false)
+            .await
+            .unwrap();
+
+        let depois = tree_level(&state, &host_id, TEST_DB, "arvore_rs_test:apagada:").unwrap();
+        let rotulos: Vec<&str> = depois.children.iter().map(|c| c.label.as_str()).collect();
+
+        del(&mut conn, vizinha).await;
+
+        assert_eq!(rotulos, vec!["fica"], "a apagada não pode continuar na árvore");
+    }
+
+    /// Uma chave que expirou entre a varredura e o clique também sai da
+    /// árvore: a leitura já descobriu que ela não existe mais.
+    #[tokio::test]
+    async fn reading_a_vanished_key_takes_it_off_the_tree() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn().await;
+
+        let chave = "arvore_rs_test:expirada:alvo";
+        set_string(&mut conn, chave, "x").await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        scan_tree(&state, &host_id, TEST_DB, |_| {}).await.unwrap();
+        assert!(
+            tree_level(&state, &host_id, TEST_DB, "arvore_rs_test:expirada:").is_some(),
+            "a chave entrou na árvore"
+        );
+
+        // O que o TTL faria, só que na hora.
+        del(&mut conn, chave).await;
+
+        let erro = read_value(&state, &host_id, TEST_DB, chave).await;
+        assert!(erro.is_err(), "a leitura precisa falhar com a chave sumida");
+
+        assert!(
+            tree_level(&state, &host_id, TEST_DB, "arvore_rs_test:expirada:").is_none(),
+            "e o galho vazio não fica para trás"
+        );
     }
 }

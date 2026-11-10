@@ -379,3 +379,36 @@ test("a falha de uma varredura antiga não aterrissa sobre o estado novo", async
 	expect(screen.getByRole("alert")).toHaveTextContent("não foi possível alcançar o host");
 	expect(screen.queryByTestId("lendo")).not.toBeInTheDocument();
 });
+
+test("Varrer de novo relê a árvore, não só o índice", async () => {
+	// O botão vive ao lado de "Índice de busca:" e só reconstruía o índice
+	// de valores. Quem clica nele quer ver as ATUALIZAÇÕES — chaves novas,
+	// chaves que sumiram — e isso exige revarrer a árvore.
+	varredura.mockResolvedValue({ keys: 0, bytes: 0, took_ms: 1 } as never);
+
+	render(Workspace, { props: { host: host(), falhaConexao: null } });
+	await waitFor(() => expect(arvore).toHaveBeenCalledTimes(1));
+
+	await fireEvent.click(screen.getByRole("button", { name: "Varrer de novo" }));
+
+	await waitFor(() => expect(arvore).toHaveBeenCalledTimes(2));
+	expect(varredura).toHaveBeenCalledTimes(1);
+});
+
+test("Varrer de novo mostra a barra de progresso da varredura", async () => {
+	// A mesma barra da abertura do banco: é ela que diz quanto falta.
+	const rescanEmVoo = promessaControlavel<unknown>();
+	varredura.mockImplementation(() => rescanEmVoo.promessa as never);
+	const arvoreEmVoo = promessaControlavel<void>();
+
+	render(Workspace, { props: { host: host(), falhaConexao: null } });
+	await waitFor(() => expect(arvore).toHaveBeenCalledTimes(1));
+
+	arvore.mockImplementation(() => arvoreEmVoo.promessa);
+	await fireEvent.click(screen.getByRole("button", { name: "Varrer de novo" }));
+
+	expect(await screen.findByTestId("lendo")).toBeInTheDocument();
+
+	arvoreEmVoo.resolve();
+	rescanEmVoo.resolve({ keys: 0, bytes: 0, took_ms: 1 });
+});

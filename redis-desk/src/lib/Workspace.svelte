@@ -283,7 +283,22 @@
 		erroIndice = "";
 		perguntandoIndice = false;
 		const minhaGeracao = ++geracaoIndice;
+		const minhaVarredura = ++geracaoArvore;
 		try {
+			// Primeiro a ÁRVORE, depois o índice.
+			//
+			// Quem clica aqui quer ver o que mudou no banco — chaves novas,
+			// chaves que sumiram — e isso é a varredura de nomes, não o
+			// índice de valores. É ela também que alimenta a barra de
+			// progresso (`lendo`, por `onTreeProgress`), a mesma que
+			// aparece ao abrir um banco; o índice segue mostrando a própria
+			// contagem na linha de cima.
+			lendo = { scanned: 0, total_estimate: 0, root: [], done: false };
+			await scanTree(host.id, db);
+			if (minhaVarredura !== geracaoArvore) return;
+			// Os galhos abertos releem da trie recém-refeita.
+			versaoArvore += 1;
+
 			const novoRelatorio = await rescan(host.id, db);
 			// O seletor desliga durante a varredura (ver a nota de design
 			// logo acima do markup), mas o estado da tela ainda pode mudar
@@ -297,6 +312,7 @@
 			if (minhaGeracao !== geracaoIndice) return;
 			erro = errorMessage(err);
 		} finally {
+			if (minhaVarredura === geracaoArvore) lendo = null;
 			varrendo = false;
 			progresso = null;
 		}
@@ -347,11 +363,23 @@
 	/** Uma escrita foi aplicada: relê a chave e atualiza a árvore. */
 	function escreveu() {
 		revisao += 1;
+		// Apagar é escrita como qualquer outra, e o núcleo já tirou a chave
+		// da trie. A árvore na tela precisa reler os galhos abertos para
+		// deixar de mostrar o que não existe mais.
+		versaoArvore += 1;
 	}
 
-	/** A chave sumiu entre a varredura e o clique: tira da seleção. */
+	/**
+	 * A chave sumiu entre a varredura e o clique: tira da seleção e manda a
+	 * árvore reler.
+	 *
+	 * O núcleo já a removeu da trie ao descobrir, na leitura, que ela não
+	 * existe mais. Sem releitura aqui, ela continuaria listada e clicar
+	 * nela só repetiria o mesmo erro.
+	 */
 	function chaveSumiu() {
 		selecionada = null;
+		versaoArvore += 1;
 	}
 </script>
 

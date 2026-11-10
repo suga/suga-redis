@@ -269,6 +269,54 @@ impl KeyTrie {
         }
     }
 
+    /// Tira UMA chave da trie, devolvendo se ela estava lá.
+    ///
+    /// Existe porque a árvore na tela é desenhada a partir daqui, não do
+    /// servidor: sem isto, uma chave apagada (ou expirada) continuava
+    /// visível até alguém desconectar, que é o que joga a trie fora.
+    ///
+    /// Só mexe nas contagens se achar a chave EXATA registrada como
+    /// terminal. Um caminho que existe sem a chave no fim — ou uma chave
+    /// que a varredura nunca chegou a inserir, por teto de filhos ou de
+    /// nós — não desce contagem nenhuma: descer seria corromper números
+    /// que ninguém subiu.
+    pub fn remover(&mut self, chave: &str) -> bool {
+        // Caminho de nós, da raiz até o terminal, antes de mexer em nada.
+        let mut caminho = vec![0usize];
+        let mut atual = 0usize;
+        for segmento in chave.split(SEPARATOR) {
+            match self.nos[atual].filhos.get(segmento) {
+                Some(&indice) => {
+                    caminho.push(indice);
+                    atual = indice;
+                }
+                None => return false,
+            }
+        }
+
+        if self.nos[atual].terminal.as_deref() != Some(chave) {
+            return false;
+        }
+
+        self.nos[atual].terminal = None;
+        for &indice in &caminho {
+            self.nos[indice].count = self.nos[indice].count.saturating_sub(1);
+        }
+
+        // Da folha para a raiz: um nó que ficou sem chave e sem filhos não
+        // tem mais o que mostrar. Desvincula do pai em vez de remover da
+        // arena — os índices dos outros nós apontam para posições fixas.
+        for janela in caminho.windows(2).rev() {
+            let (pai, filho) = (janela[0], janela[1]);
+            if self.nos[filho].count == 0 && self.nos[filho].filhos.is_empty() {
+                let rotulo = self.nos[filho].label.clone();
+                self.nos[pai].filhos.remove(&rotulo);
+            }
+        }
+
+        true
+    }
+
     /// Os filhos de `prefixo`, ou `None` se esse caminho não existe.
     ///
     /// Um nó que é chave E caminho (existem `a:b` e `a:b:c`) aparece como
@@ -1375,5 +1423,75 @@ mod tests {
             !set_meta.kind.editable(),
             "Set é somente leitura neste produto"
         );
+    }
+
+    /// Uma chave apagada — ou expirada — precisa sair da trie.
+    ///
+    /// A árvore na tela é desenhada a partir daqui, não do servidor. Sem
+    /// remoção, apagar uma chave deixava ela visível até alguém
+    /// desconectar e conectar de novo, que é o que joga a trie fora.
+    #[test]
+    fn removing_a_key_takes_it_off_the_tree() {
+        let mut trie = KeyTrie::new();
+        trie.inserir("app:cache:a");
+        trie.inserir("app:cache:b");
+        trie.inserir("app:fila:x");
+
+        assert!(trie.remover("app:cache:a"));
+
+        assert_eq!(trie.keys(), 2, "a contagem da raiz desce junto");
+        let cache = trie.level("app:cache:").unwrap();
+        let rotulos: Vec<&str> = cache.children.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(rotulos, vec!["b"], "só o irmão sobra");
+
+        let app = trie.level("app:").unwrap();
+        let contagem = app
+            .children
+            .iter()
+            .find(|c| c.label == "cache")
+            .map(|c| c.count);
+        assert_eq!(contagem, Some(1), "o galho pai também desce");
+    }
+
+    #[test]
+    fn removing_the_last_key_of_a_branch_prunes_the_branch() {
+        let mut trie = KeyTrie::new();
+        trie.inserir("app:cache:a");
+        trie.inserir("app:fila:x");
+
+        assert!(trie.remover("app:cache:a"));
+
+        let app = trie.level("app:").unwrap();
+        let rotulos: Vec<&str> = app.children.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(rotulos, vec!["fila"], "o galho vazio não fica para trás");
+        assert!(trie.level("app:cache:").is_none());
+    }
+
+    #[test]
+    fn removing_a_key_that_is_not_there_changes_nothing() {
+        let mut trie = KeyTrie::new();
+        trie.inserir("app:cache:a");
+
+        assert!(!trie.remover("app:cache:z"));
+        assert!(!trie.remover("outro:caminho"));
+        assert_eq!(trie.keys(), 1);
+        assert_eq!(trie.level("app:cache:").unwrap().children.len(), 1);
+    }
+
+    /// Um nó que é chave E caminho ao mesmo tempo: apagar a chave não pode
+    /// levar embora o galho que leva aos filhos dela.
+    #[test]
+    fn removing_a_key_that_is_also_a_path_keeps_the_path() {
+        let mut trie = KeyTrie::new();
+        trie.inserir("sessao:ativa");
+        trie.inserir("sessao:ativa:detalhe");
+
+        assert!(trie.remover("sessao:ativa"));
+
+        let sessao = trie.level("sessao:").unwrap();
+        let ativa = sessao.children.iter().find(|c| c.label == "ativa");
+        assert!(ativa.is_some(), "o caminho para o filho continua de pé");
+        assert_eq!(ativa.unwrap().count, 1, "só a chave de cima saiu");
+        assert!(trie.level("sessao:ativa:").is_some());
     }
 }
