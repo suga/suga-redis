@@ -120,6 +120,11 @@
 	 * sabido inalcançável.
 	 */
 	async function conectar(host: Host) {
+		// O resultado do Testar responde "dá para alcançar?" — e uma
+		// tentativa de conexão responde a MESMA pergunta, agora. Deixar o
+		// antigo na tela foi o que fez um "timed out" de antes da VPN voltar
+		// continuar embaixo de um host recém-conectado.
+		delete testes[host.id];
 		estados[host.id] = { tipo: "conectando" };
 		try {
 			const ms = await connect(host.id);

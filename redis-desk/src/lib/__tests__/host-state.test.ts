@@ -341,3 +341,22 @@ test("uma remoção que falha tem lugar próprio na tela", async () => {
 	expect(await screen.findByTestId("erro-remocao")).toHaveTextContent("não deu para remover");
 	expect(onChanged).not.toHaveBeenCalled();
 });
+
+test("conectar apaga o resultado velho do Testar", async () => {
+	// O caso real: sem VPN, o Testar falha com "timed out". A VPN volta, a
+	// conexão funciona — e a linha vermelha do teste antigo continuava na
+	// tela, dizendo que o host estava inalcançável enquanto o estado logo
+	// acima dizia "conectado".
+	const user = userEvent.setup();
+	testou.mockRejectedValue(new Error("timed out"));
+	conectou.mockResolvedValue(12);
+	montar();
+
+	await user.click(screen.getByRole("button", { name: "Testar" }));
+	expect(await screen.findByText(/timed out/)).toBeInTheDocument();
+
+	await user.click(screen.getByRole("button", { name: "Conectar" }));
+	await screen.findByText(/conectado · 12 ms/);
+
+	expect(screen.queryByText(/timed out/)).not.toBeInTheDocument();
+});
