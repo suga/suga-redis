@@ -107,7 +107,24 @@
 	 */
 	let erroJson = $derived(cortado ? null : validarJson(texto));
 	let indentado = $derived(cortado ? null : formatarJson(texto));
-	let mudou = $derived(texto !== servidor);
+
+	/**
+	 * Formatar é VISUALIZAÇÃO, não edição.
+	 *
+	 * Quem aperta "Formatar JSON" quer ler um valor espremido, não
+	 * reescrevê-lo. Se o indentado fosse direto para o servidor, salvar
+	 * trocaria o valor inteiro por causa de espaço em branco que ninguém
+	 * pediu — e num valor de 100 kB isso é uma escrita inteira de graça.
+	 *
+	 * Guarda-se o par: o texto original e exatamente o indentado que saiu
+	 * dele. Enquanto o campo ainda for aquele indentado, o que se grava é o
+	 * original. Qualquer tecla a mais rompe a igualdade e o que está na
+	 * tela volta a ser o que vale.
+	 */
+	let formatado = $state<{ de: string; para: string } | null>(null);
+
+	let aSalvar = $derived(formatado && texto === formatado.para ? formatado.de : texto);
+	let mudou = $derived(aSalvar !== servidor);
 	let colorir = $derived(pareceJson(texto) && texto.length <= TETO_REALCE_BYTES);
 
 	/**
@@ -175,7 +192,14 @@
 
 		<div class="acoes">
 			{#if indentado !== null && indentado !== texto}
-				<button type="button" onclick={() => (texto = indentado ?? texto)}>
+				<button
+					type="button"
+					onclick={() => {
+						if (indentado === null) return;
+						formatado = { de: texto, para: indentado };
+						texto = indentado;
+					}}
+				>
 					Formatar JSON
 				</button>
 			{/if}
@@ -183,7 +207,7 @@
 				type="button"
 				class="primary"
 				disabled={busy || !mudou || cortado}
-				onclick={() => onSubmit({ op: "set_string", value: textBytes(texto) })}
+				onclick={() => onSubmit({ op: "set_string", value: textBytes(aSalvar) })}
 			>
 				Salvar
 			</button>

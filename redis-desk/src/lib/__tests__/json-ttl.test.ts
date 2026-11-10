@@ -277,3 +277,28 @@ test("JSON inválido avisa, mas não impede editar nem salvar", async () => {
 	expect(screen.getByTestId("json-erro")).toBeInTheDocument();
 	expect(screen.getByRole("button", { name: "Salvar" })).toBeEnabled();
 });
+
+test("formatar é só visualização: não muda o que será gravado", async () => {
+	// A pessoa formata para LER um JSON espremido. Se isso contasse como
+	// edição, salvar reescreveria o valor inteiro no servidor só por causa
+	// de espaços em branco — uma mudança que ela não pediu.
+	const user = userEvent.setup();
+	const espremido = '{"a":1,"b":[2,3]}';
+	montar(view({ value: { kind: "string", data: texto(espremido) } }));
+
+	await user.click(screen.getByRole("button", { name: "Formatar JSON" }));
+
+	const campo = screen.getByLabelText("Valor");
+	expect(campo).toHaveValue(JSON.stringify(JSON.parse(espremido), null, 2));
+	expect(screen.getByRole("button", { name: "Salvar" })).toBeDisabled();
+});
+
+test("editar depois de formatar volta a valer como mudança", async () => {
+	const user = userEvent.setup();
+	montar(view({ value: { kind: "string", data: texto('{"a":1}') } }));
+
+	await user.click(screen.getByRole("button", { name: "Formatar JSON" }));
+	await user.type(screen.getByLabelText("Valor"), " ");
+
+	expect(screen.getByRole("button", { name: "Salvar" })).toBeEnabled();
+});
