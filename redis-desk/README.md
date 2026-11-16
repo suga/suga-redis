@@ -162,7 +162,7 @@ exemplo), a versão instalada continua intacta.
 
 O `.deb` é a exceção: ele avisa, mas a troca é manual.
 
-[releases]: https://github.com/marco-sugamele/suga-redis/releases/latest
+[releases]: https://github.com/suga/suga-redis/releases/latest
 
 ### Compilar você mesmo
 

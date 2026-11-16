@@ -46,7 +46,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/marco-sugamele/suga-redis/releases/latest/download/latest.json"
+        "https://github.com/suga/suga-redis/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEUwMUI5Q0Q1RjI2RjkzOUMKUldTY2syL3kxWndiNEJCQnJjbzdCM1JRQjhkb1lhWUVtdmNuQ1BjOE1hTC9lRmtqbXNPUVcxSFEK"
     }
