@@ -175,6 +175,7 @@ export const en: Catalogo = {
 	"tempo.haMinutos": "{n} min ago",
 	"tempo.haHoras": "{n} h ago",
 	"tempo.haDias": "{n} days ago",
+	"binario.aviso": "(binary, {tamanho} bytes)",
 	"estado.conectado": "connected · {ms} ms · database {banco}",
 	"acao.conectar": "Connect",
 };

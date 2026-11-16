@@ -4,7 +4,8 @@ Documento de retomada. Leia antes de mexer no código — especialmente a
 seção **Fatos que custaram caro**, que registra coisas que não se deduzem
 lendo os arquivos e que já quebraram este projeto uma vez cada.
 
-Estado em 2026-11-05. Branch `feat/redis-desk`, 72 commits, árvore limpa.
+Estado em 2026-11-16. Branch `main`, 97 commits, árvore limpa.
+O repositório é **público** (`suga/suga-redis`) e é projeto pessoal.
 
 ---
 
@@ -51,9 +52,10 @@ o instrumento para resolvê-la, e de quebra fechou o buraco que a escondia:
 
 | | |
 |:-|-:|
-| Testes Rust | **121**, todos passando |
-| Testes de interface | **110**, todos passando |
-| Linhas de código | ~17.300 |
+| Testes Rust | **128**, todos passando |
+| Testes de interface | **165**, todos passando |
+| Linhas de código | ~23.000 |
+| Idiomas da interface | **3** (pt-BR, en, es), 176 chaves por catálogo |
 | `cargo clippy` | 3 avisos pré-existentes (`config.rs:246`, `history.rs:381`, `history.rs:443`) |
 | `svelte-check` | 0 erros, 0 avisos |
 
@@ -84,6 +86,43 @@ Bancos usados pelos testes, para não colidir ao escrever novos: 0–2
 (`conn`/`value`), 1 (`keys`), 4 (`search` índice frio), 5 (`index`), 6–9
 (`search`), 10 (`commands`), 11 (`mcp`), 12 (`approval`), 15 (medições
 descartáveis).
+
+## O que mudou depois de 2026-11-05
+
+Três levas, nesta ordem:
+
+**Distribuição.** `release.yml` empacota mac (universal, `.dmg`) e linux
+(`.AppImage` + `.deb`) a partir de uma tag `v*`; o app pergunta ao GitHub
+por versão nova ao abrir e se atualiza sozinho, conferindo a assinatura
+minisign antes de trocar qualquer coisa. `npm run versao 0.2.0` sobe a
+versão nos quatro lugares onde ela mora e cria a tag. **Nenhuma release foi
+cortada ainda** — o `release.yml` nunca rodou.
+
+**README com imagens, em cinco idiomas.** `README.md` (inglês) na raiz é a
+fonte; `README.pt-BR.md`, `.es.md`, `.zh-CN.md` e `.ru.md` ao lado. As nove
+imagens em `docs/img/` saíram do binário empacotado rodando contra um
+cadastro de hosts fictício (`SUGA_REDIS_DATA_DIR` apontado para um
+diretório descartável e um contêiner Redis só da demonstração) — **nunca
+contra host real**, e é assim que elas devem ser refeitas.
+
+**Interface em três idiomas** (ver *Idiomas*, abaixo).
+
+## Idiomas
+
+`core/i18n.svelte.ts` guarda o idioma em uso e `t(chave, valores)` devolve o
+texto, trocando `{marcas}` por valores. Os catálogos vivem em
+`src/lib/idiomas/` — `pt-BR.ts` é a base e os outros dois **têm a forma
+dele**, então um idioma que esquece uma chave não compila.
+
+- A escolha fica no `localStorage` e vence o idioma do sistema; sistema que
+  não falamos cai no **inglês**, não no português.
+- O **carimbo de ambiente é traduzido junto** (`ambiente.prod` e irmãos). Um
+  aviso que não acompanha o idioma é o aviso perdido.
+- **Os testes estão travados em `pt-BR`** (`src/tests/setup.ts`). Eles acham
+  botão pelo nome visível; sem a trava passariam a depender do idioma de
+  quem roda.
+- Número e data saem por `Intl` com o idioma em uso — inclusive o aviso de
+  valor binário, que foi o último a escapar.
 
 ---
 
@@ -131,6 +170,9 @@ Duas regras seguidas de ponta a ponta:
 - **Valor truncado não pode ser salvo** — gravaria o pedaço sobre o inteiro.
 - Tipos editáveis: `string`, `hash`, `list`, `zset`. `set`, `stream` e
   RedisJSON são somente leitura.
+- **Nada neste repositório pode citar outro projeto, cliente ou host real.**
+  Ele é público e é só sobre si mesmo. Já vazou duas vezes, e as duas em
+  comentário e doc, não em código — ninguém faz grep na própria prosa.
 - Caixa alta na interface significa **uma** coisa: o ambiente.
 - O vermelho `--prod` significa **uma** coisa: produção. Erro de formulário
   não usa.
@@ -253,7 +295,36 @@ Quem decide entre as duas hipóteses é a tela do `Workspace`:
 essas duas coisas** — essa leitura é o próximo passo, não um resultado
 desta sessão. Até lá, a causa raiz continua em aberto.
 
-### 2. Nível com milhões de nomes distintos
+### 2. O binário ainda só fala português
+
+A tela fala três idiomas; o que vem do Rust, não. São **37 mensagens de
+erro** (`#[error(...)]` nos módulos de `core/`) que atravessam a fronteira
+do Tauri como texto pronto, mais o `--help` em `lib.rs` e as 10 descrições
+das ferramentas MCP.
+
+O caminho decidido para os erros é o barato: frase traduzida na tela com a
+mensagem técnica do Rust embaixo, em fonte mono, como detalhe. Virá-los em
+código + parâmetros é de dois a três dias e mexe em sete módulos — só vale
+se alguém reclamar. As descrições do MCP ficam num idioma só **de
+propósito**: quem as lê é o modelo, não gente.
+
+### 3. As imagens do README mostram a janela em português
+
+As nove capturas saíram antes do i18n. O README em inglês afirma que o
+carimbo sai `PRODUCTION` e argumenta justamente que uma janela gritando
+`PRODUÇÃO` para quem lê inglês perde o aviso — com as imagens logo abaixo
+mostrando essa janela. Refazer exige empacotar o binário novo e repetir a
+montagem descrita em *O que mudou*.
+
+### 4. Nenhuma release foi cortada
+
+Versão `0.1.0` nos quatro lugares, `git tag` vazio. O `release.yml` nunca
+rodou, então ninguém sabe se ele funciona. Depende de
+`TAURI_SIGNING_PRIVATE_KEY` e `_PASSWORD` estarem nos Secrets do
+repositório. Enquanto não houver tag, o badge de versão do README aponta
+para uma release que não existe.
+
+### 5. Nível com milhões de nomes distintos
 
 Um nível visto em uso tinha ~3,4 milhões de filhos distintos. O teto por nível é
 50.000; além dele, o botão **Carregar mais** revarre só aquele prefixo e
@@ -267,7 +338,7 @@ filtrar só o que está em memória.
 
 **Era a pergunta aberta quando esta sessão terminou.**
 
-### 3. Não implementado, de propósito
+### 6. Não implementado, de propósito
 
 - **Reordenar itens de lista.** Não há troca atômica no conjunto de
   operações; em duas escritas, uma falha deixa a lista errada.
@@ -278,7 +349,7 @@ filtrar só o que está em memória.
   conferidos pelo binário empacotado via MCP, mas o clique humano continua
   devendo.
 
-### 4. Avisos conhecidos
+### 7. Avisos conhecidos
 
 - 3 avisos de clippy pré-existentes, todos de "função com muitos argumentos"
   ou `assert_eq!` com booleano literal. Nenhum é defeito.

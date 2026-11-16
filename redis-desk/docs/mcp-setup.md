@@ -9,7 +9,7 @@ neles.
 Com o app já instalado no mac:
 
 ```bash
-claude mcp add suga-redis -- /Applications/suga-redis.app/Contents/MacOS/suga-redis --mcp
+claude mcp add suga-redis -- /Applications/Suga-Redis.app/Contents/MacOS/suga-redis --mcp
 ```
 
 No linux, aponte para o binário onde ele estiver:

@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { numero } from "$lib/formato";
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * Mostra um valor de qualquer tipo, sem deixar editar nada.
 	 *
@@ -22,7 +24,7 @@
 	function mostrar(bytes: Bytes): string {
 		if (bytes.text !== null) return bytes.text;
 		const tamanho = bytes.base64 ? Math.floor((bytes.base64.length * 3) / 4) : 0;
-		return `(binário, ${tamanho.toLocaleString("pt-BR")} bytes)`;
+		return t("binario.aviso", { tamanho: numero(tamanho) });
 	}
 
 	function binario(bytes: Bytes): boolean {

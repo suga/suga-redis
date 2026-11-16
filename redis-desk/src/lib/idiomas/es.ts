@@ -175,6 +175,7 @@ export const es: Catalogo = {
 	"tempo.haMinutos": "hace {n} min",
 	"tempo.haHoras": "hace {n} h",
 	"tempo.haDias": "hace {n} días",
+	"binario.aviso": "(binario, {tamanho} bytes)",
 	"estado.conectado": "conectado · {ms} ms · base {banco}",
 	"acao.conectar": "Conectar",
 };

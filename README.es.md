@@ -51,7 +51,7 @@ diluye.
 En la columna de hosts, cada fila lleva la marca de color de su entorno: se
 ve cuántos hosts de producción hay sin leer un solo nombre.
 
-<img src="redis-desk/docs/img/ambientes.png" alt="Columna de hosts con las marcas de entorno: dos filas de producción, una de homologación y una de desarrollo" width="820" />
+<img src="redis-desk/docs/img/ambientes.png" alt="Columna de hosts con las marcas de entorno: dos filas de producción, una de preproducción y una de desarrollo" width="820" />
 
 ### 🌐 Tres idiomas, y abre en el tuyo
 

@@ -173,6 +173,7 @@ export const ptBR = {
 	"tempo.haMinutos": "há {n} min",
 	"tempo.haHoras": "há {n} h",
 	"tempo.haDias": "há {n} dias",
+	"binario.aviso": "(binário, {tamanho} bytes)",
 	"estado.conectado": "conectado · {ms} ms · banco {banco}",
 	"acao.conectar": "Conectar",
 };

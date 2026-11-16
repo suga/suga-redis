@@ -143,7 +143,7 @@ Expected: PASS, 5 testes.
 
 - [x] **Step 6: Escrever `scripts/test-redis.sh`**
 
-`up` sobe `redis:7-alpine` como container `redis-desk-test` em `127.0.0.1:6399`; `down` remove; `reset` roda `FLUSHALL` nesse container de teste. É o único lugar do repositório onde `FLUSHALL` aparece, e só contra a porta 6399.
+`up` sobe `redis:7-alpine` como container `suga-redis-test` em `127.0.0.1:6399`; `down` remove; `reset` roda `FLUSHALL` nesse container de teste. É o único lugar do repositório onde `FLUSHALL` aparece, e só contra a porta 6399.
 
 - [x] **Step 7: Commit**
 

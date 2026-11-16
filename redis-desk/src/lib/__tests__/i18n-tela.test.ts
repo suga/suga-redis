@@ -170,3 +170,21 @@ test("dá para trocar o idioma pela tela, e a escolha fica guardada", async () =
 	expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
 	expect(localStorage.getItem("idioma")).toBe("en");
 });
+
+test("o aviso de valor binário também segue o idioma", async () => {
+	definirIdioma("en");
+	const ReadOnlyView = (await import("$lib/editors/ReadOnlyView.svelte")).default;
+
+	render(ReadOnlyView, {
+		props: {
+			value: {
+				kind: "string",
+				data: { text: null, base64: "A".repeat(4096), truncated: false },
+			},
+		},
+	});
+
+	// O número vinha com o separador do português, fixo, enquanto o resto
+	// da tela já seguia o idioma escolhido.
+	expect(screen.getByText("(binary, 3,072 bytes)")).toBeInTheDocument();
+});
