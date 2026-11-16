@@ -2,301 +2,312 @@
 
 <img src="redis-desk/static/suga-redis-logo.png" alt="Suga-Redis" width="420" />
 
-**Conecte · Gerencie · Acelere**
+**Connect · Manage · Accelerate**
 
-Um cliente de mesa para Redis feito para quem opera banco de produção —
-e precisa saber *onde está pisando* antes de apertar qualquer coisa.
+A desktop Redis client built for people who work on production databases —
+and need to know *where they are standing* before pressing anything.
 
-[![Release](https://img.shields.io/github/v/release/suga/suga-redis?label=vers%C3%A3o&color=f2a33c)](https://github.com/suga/suga-redis/releases/latest)
+[![Release](https://img.shields.io/github/v/release/suga/suga-redis?label=version&color=f2a33c)](https://github.com/suga/suga-redis/releases/latest)
 [![CI](https://github.com/suga/suga-redis/actions/workflows/ci.yml/badge.svg)](https://github.com/suga/suga-redis/actions/workflows/ci.yml)
 [![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%2B%20Intel-999)](#macos)
 [![Linux](https://img.shields.io/badge/Linux-x86__64-999)](#linux)
-[![Licença](https://img.shields.io/badge/licen%C3%A7a-MIT-blue)](#licença)
+[![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 
-### [⬇️  Baixar a última versão](https://github.com/suga/suga-redis/releases/latest)
+**English** · [Português (BR)](README.pt-BR.md) · [Español](README.es.md) · [简体中文](README.zh-CN.md) · [Русский](README.ru.md)
 
-`.dmg` para macOS · `.AppImage` e `.deb` para Linux · atualiza sozinho depois
+### [⬇️  Download the latest version](https://github.com/suga/suga-redis/releases/latest)
+
+`.dmg` for macOS · `.AppImage` and `.deb` for Linux · self-updating afterwards
 
 <br>
 
-<img src="redis-desk/docs/img/hero.gif" alt="Abrir um host de produção, a árvore de chaves montando sozinha e um valor em JSON aberto no editor" width="900" />
+<img src="redis-desk/docs/img/hero.gif" alt="Opening a production host, the key tree assembling itself and a JSON value open in the editor" width="900" />
 
 </div>
 
----
-
-## O problema
-
-Você abre uma ferramenta de Redis com cinco abas iguais. Uma é produção. Qual?
-
-Você precisa achar o cliente com o e-mail `ana@empresa.com`, mas ele está
-dentro de um JSON, dentro de uma chave, entre cinquenta mil.
-
-Você salva. Era a chave errada. E agora?
-
-O Suga-Redis responde essas três perguntas por construção.
-
-## O que ele faz
-
-### 🚦 O ambiente grita antes de você errar
-
-A janela inteira muda de cor conforme o host aberto, com a palavra carimbada
-no topo: `PRODUÇÃO`, `HOMOLOGAÇÃO`, `DESENVOLVIMENTO`.
-
-Caixa alta tem **um significado só** no app inteiro — o ambiente. Nenhum
-outro rótulo grita junto, então o carimbo nunca se dilui.
-
-Na coluna de hosts, cada linha carrega a marca colorida do seu ambiente: dá
-para ver quantos hosts de produção existem sem ler um nome sequer.
-
-<img src="redis-desk/docs/img/ambientes.png" alt="Coluna de hosts com as marcas de ambiente: duas linhas de produção, uma de homologação e uma de desenvolvimento" width="820" />
-
-### 🔎 Busca que entra dentro do valor
-
-Procure `arco@emp` e ele acha `marco@empresa.com` — dentro de campo de hash,
-item de lista, membro de sorted set ou JSON guardado como string.
-
-Substring de verdade, em qualquer posição, não só palavra inteira.
-
-**Medido: 3 ms com 5.000 chaves indexadas.**
-
-O nome das chaves é lido do servidor na hora, então a busca por nome funciona
-mesmo num banco recém-aberto, sem varredura nenhuma.
-
-<img src="redis-desk/docs/img/busca-no-valor.png" alt="Busca por arco@emp destacando marco@empresa.com dentro do JSON de várias chaves" width="820" />
-
-### 🌳 Árvore que aguenta um banco de verdade
-
-As chaves vêm agrupadas por prefixo (`wallet:`, `cache:`, `session:`), com a
-contagem de cada galho. A lista desenha só o que cabe na tela — dezenas de
-milhares de chaves não travam a janela.
-
-E a leitura é enxuta de propósito: **onze idas e voltas** para ler 50 mil
-chaves, não trezentas e cinquenta. Num Redis gerenciado em outra região, isso
-é a diferença entre 1,5 segundo e 45.
-
-<img src="redis-desk/docs/img/arvore.png" alt="Árvore agrupada por prefixo, com a contagem de chaves de cada galho" width="820" />
-
-### ✏️ Editor por tipo, com JSON colorido e validado
-
-Cada tipo tem sua tela: `string` com área de texto, `hash` com tabela
-campo/valor, `list` com índice, `zset` com membro e pontuação.
-
-Valor em JSON abre **colorido e indentado**, pronto para conferir.
-
-<img src="redis-desk/docs/img/editor-json.png" alt="Valor em JSON aberto no editor, colorido e indentado" width="820" />
-
-Ao editar, um validador aponta **linha e coluna** do erro — e não te impede de
-salvar: uma string no Redis não precisa ser JSON, e quem decide isso é você.
-
-<img src="redis-desk/docs/img/editor-json-invalido.png" alt="Aviso de JSON inválido apontando linha 4, coluna 3" width="820" />
-
-Valor binário recusa edição por texto: o que voltasse do campo já não seriam
-os mesmos bytes.
-
-### ⏱️ Prazo de expiração na mão
-
-Veja quanto falta em contagem regressiva, defina um prazo novo em segundos,
-minutos, horas ou dias, ou tire o prazo de vez.
-
-### ↩️ Volta atrás de verdade
-
-Toda escrita guarda o valor anterior **antes** de acontecer. O histórico
-mostra o que mudou, quem mudou e quando, com antes e depois lado a lado — e
-um botão para desfazer.
-
-<img src="redis-desk/docs/img/historico.png" alt="Histórico com antes e depois lado a lado e o botão Voltar atrás" width="820" />
-
-### 🔒 Produção pede confirmação
-
-Salvar ou apagar em host de produção abre um diálogo com o resumo exato da
-mudança. Um clique. Nunca digitar frase.
-
-A trava mora no backend, não na tela: um botão pode esquecer de perguntar,
-essa função não pode ser contornada.
-
-<img src="redis-desk/docs/img/confirmacao-producao.png" alt="Diálogo de confirmação em host de produção, com o resumo exato da mudança" width="820" />
-
-### 🤖 O Claude lê seus bancos — e pede licença para escrever
-
-O mesmo binário é um servidor MCP. Ligado ao Claude Code, ele responde coisas
-como *"quantas chaves de sessão existem e quando expiram?"* direto do seu
-Redis.
-
-Ler funciona sem o app aberto. **Escrever, não.** Quando o Claude pede uma
-escrita, a janela vem para a frente e você libera digitando o nome do host.
-Sem app aberto, não existe socket, e a escrita não acontece.
-
-<img src="redis-desk/docs/img/escrita-da-llm.png" alt="Pedido de escrita vindo do Claude, esperando o dono digitar o nome do host para liberar" width="820" />
-
-Vale em **qualquer ambiente**, inclusive desenvolvimento: a confirmação de
-produção pergunta *onde* a mudança cai; esta trava pergunta *quem* pediu.
+> **The interface is in Portuguese today.** Multi-language support is being
+> built; this README is ahead of the app. Button names below appear exactly
+> as the screen shows them, with the English in parentheses.
 
 ---
 
-## Instalar
+## The problem
 
-> **[⬇️  Baixe aqui](https://github.com/suga/suga-redis/releases/latest)** — depois volte para o passo da sua plataforma.
+You open a Redis tool with five identical tabs. One of them is production.
+Which one?
+
+You need the customer whose e-mail is `ana@empresa.com`, but it lives inside
+a JSON, inside a key, among fifty thousand of them.
+
+You hit save. It was the wrong key. Now what?
+
+Suga-Redis answers those three questions by construction.
+
+## What it does
+
+### 🚦 The environment shouts before you make a mistake
+
+The whole window changes color according to the open host, with the word
+stamped at the top: `PRODUÇÃO` (production), `HOMOLOGAÇÃO` (staging),
+`DESENVOLVIMENTO` (development).
+
+ALL CAPS means **one thing only** across the entire app — the environment.
+No other label shouts alongside it, so the stamp never gets diluted.
+
+In the host column, every row carries the colored mark of its environment:
+you can see how many production hosts exist without reading a single name.
+
+<img src="redis-desk/docs/img/ambientes.png" alt="Host column with environment marks: two production rows, one staging and one development" width="820" />
+
+### 🔎 Search that goes inside the value
+
+Search for `arco@emp` and it finds `marco@empresa.com` — inside a hash
+field, a list item, a sorted set member or JSON stored as a string.
+
+A real substring, at any position, not just whole words.
+
+**Measured: 3 ms with 5,000 indexed keys.**
+
+Key names are read from the server on the spot, so searching by name works
+even on a database you just opened, with no scan at all.
+
+<img src="redis-desk/docs/img/busca-no-valor.png" alt="Searching for arco@emp, highlighting marco@empresa.com inside the JSON of several keys" width="820" />
+
+### 🌳 A tree that survives a real database
+
+Keys arrive grouped by prefix (`wallet:`, `cache:`, `session:`), with the
+count for each branch. The list only draws what fits on screen — tens of
+thousands of keys do not freeze the window.
+
+And the reading is deliberately lean: **eleven round trips** to read 50,000
+keys, not three hundred and fifty. On a managed Redis in another region,
+that is the difference between 1.5 seconds and 45.
+
+<img src="redis-desk/docs/img/arvore.png" alt="Tree grouped by prefix, with the key count of each branch" width="820" />
+
+### ✏️ An editor per type, with colored and validated JSON
+
+Each type gets its own screen: `string` with a text area, `hash` with a
+field/value table, `list` with indexes, `zset` with member and score.
+
+A JSON value opens **colored and indented**, ready to be read.
+
+<img src="redis-desk/docs/img/editor-json.png" alt="A JSON value open in the editor, colored and indented" width="820" />
+
+While you edit, a validator points at the **line and column** of the error —
+and does not stop you from saving: a Redis string does not have to be JSON,
+and that call is yours.
+
+<img src="redis-desk/docs/img/editor-json-invalido.png" alt="Invalid JSON warning pointing at line 4, column 3" width="820" />
+
+A binary value refuses text editing: what came back from the field would no
+longer be the same bytes.
+
+### ⏱️ Expiry in your hands
+
+See the remaining time counting down, set a new deadline in seconds,
+minutes, hours or days, or remove the expiry altogether.
+
+### ↩️ Undo that actually undoes
+
+Every write stores the previous value **before** it happens. The history
+shows what changed, who changed it and when, with before and after side by
+side — and a button to undo.
+
+<img src="redis-desk/docs/img/historico.png" alt="History with before and after side by side and the undo button" width="820" />
+
+### 🔒 Production asks for confirmation
+
+Saving or deleting on a production host opens a dialog with the exact
+summary of the change. One click. Never type a phrase.
+
+The lock lives in the backend, not in the screen: a button may forget to
+ask, this function cannot be bypassed.
+
+<img src="redis-desk/docs/img/confirmacao-producao.png" alt="Confirmation dialog on a production host, with the exact summary of the change" width="820" />
+
+### 🤖 Claude reads your databases — and asks permission to write
+
+The same binary is an MCP server. Wired to Claude Code, it answers things
+like *"how many session keys are there and when do they expire?"* straight
+from your Redis.
+
+Reading works with the app closed. **Writing does not.** When Claude asks
+for a write, the window comes to the front and you release it by typing the
+host name. With no app open there is no socket, and the write does not
+happen.
+
+<img src="redis-desk/docs/img/escrita-da-llm.png" alt="A write request from Claude, waiting for the owner to type the host name to release it" width="820" />
+
+This holds in **every environment**, development included: the production
+confirmation asks *where* the change lands; this lock asks *who* asked for
+it.
+
+---
+
+## Install
+
+> **[⬇️  Download here](https://github.com/suga/suga-redis/releases/latest)** — then come back to the step for your platform.
 
 ### macOS
 
 ```bash
-# 1. abra o .dmg e arraste o app para Aplicativos
-# 2. rode isto uma única vez:
+# 1. open the .dmg and drag the app into Applications
+# 2. run this exactly once:
 xattr -dr com.apple.quarantine /Applications/Suga-Redis.app
 ```
 
-Pronto. Abre normal daí em diante — inclusive nas atualizações.
+Done. It opens normally from then on — updates included.
 
 <details>
-<summary><b>Por que preciso desse comando?</b> (ou: a Apple quer US$ 99 por ano para confiar em mim)</summary>
+<summary><b>Why do I need that command?</b> (or: Apple wants US$ 99 a year to trust me)</summary>
 
 <br>
 
-Para o macOS abrir um app sem reclamar, o desenvolvedor precisa de um
-**Developer ID** — uma assinatura da Apple que custa **US$ 99 por ano**.
-Esse dinheiro, por ora, segue sendo café.
+For macOS to open an app without complaining, the developer needs a
+**Developer ID** — an Apple signature that costs **US$ 99 a year**. That
+money, for now, is still coffee.
 
-Sem pagar, o sistema não tem como saber de quem veio o programa. Ele não
-está dizendo que o app é perigoso; está dizendo, com toda a sinceridade,
-*"não faço ideia de quem fez isso"*. Justo.
+Without paying, the system has no way of knowing where the program came
+from. It is not saying the app is dangerous; it is saying, quite honestly,
+*"I have no idea who made this"*. Fair enough.
 
-O comando acima tira do app a marca de quarentena que o navegador (ou o
-Slack) carimba em tudo que vem da internet. Na prática você está dizendo ao
-Gatekeeper: **eu sei de onde veio, pode deixar**. Vale o de sempre — só faça
-isso com arquivo de fonte que você conhece. Esta aqui, você conhece: o
-código inteiro está nesta página, e o `.dmg` saiu de um build público que
-você pode [ler linha por linha](.github/workflows/release.yml).
+The command above strips the quarantine mark that your browser (or Slack)
+stamps on everything that comes from the internet. In practice you are
+telling Gatekeeper: **I know where this came from, let it through**. The
+usual caveat applies — only do this with a file whose source you know. This
+one you know: the entire code is on this page, and the `.dmg` came out of a
+public build you can [read line by line](.github/workflows/release.yml).
 
-**Prefere não usar o terminal?** Dá no mesmo pelo caminho oficial: abra o
-app, deixe o aviso aparecer, e vá em **Ajustes do Sistema → Privacidade e
-Segurança**. Lá embaixo aparece o Suga-Redis com um botão **Abrir Mesmo
-Assim**. (A linha só aparece *depois* da tentativa de abrir, e some em mais
-ou menos uma hora. Se não achar, tente abrir de novo e volte correndo.)
+**Rather not use the terminal?** The official path gets you the same place:
+open the app, let the warning appear, then go to **System Settings →
+Privacy & Security**. Near the bottom you will find Suga-Redis with an
+**Open Anyway** button. (That row only appears *after* you try to open the
+app, and it disappears in about an hour. If you cannot find it, try opening
+again and go back quickly.)
 
-O app **é** assinado — em modo *ad-hoc*, que garante que o pacote chegou
-inteiro e não foi adulterado no caminho. O que falta é a parte paga: a que
-diz o *nome* de quem assinou.
+The app **is** signed — in *ad-hoc* mode, which guarantees the bundle
+arrived whole and was not tampered with on the way. What is missing is the
+paid part: the one that states the *name* of who signed it.
 
 </details>
 
 ### Linux
 
-**AppImage** — recomendado, é o formato que se atualiza sozinho:
+**AppImage** — recommended, it is the format that updates itself:
 
 ```bash
 chmod +x Suga-Redis_*.AppImage
 ./Suga-Redis_*.AppImage
 ```
 
-**`.deb`** — para Debian, Ubuntu e derivados:
+**`.deb`** — for Debian, Ubuntu and derivatives:
 
 ```bash
 sudo dpkg -i suga-redis_*.deb
 ```
 
-Nenhum susto de permissão aqui: o Linux simplesmente confia em você para
-decidir o que roda na sua máquina. x86_64 por enquanto.
+No permission scare here: Linux simply trusts you to decide what runs on
+your machine. x86_64 for now.
 
-> O `.deb` avisa quando sai versão nova, mas a troca é na mão. O AppImage
-> faz sozinho.
+> The `.deb` tells you when a new version is out, but the swap is manual.
+> The AppImage does it by itself.
 
-### Atualizar
+### Updating
 
-Depois da primeira instalação, você não precisa acompanhar lançamento
-nenhum.
+After the first install you do not have to follow any release.
 
-Ao abrir, o app pergunta ao GitHub se existe versão mais nova. Se existir,
-aparece um aviso discreto num canto da tela, com o que mudou:
+On launch, the app asks GitHub whether a newer version exists. If it does, a
+discreet notice appears in a corner of the screen, with what changed:
 
-- **Atualizar** — baixa, instala e reabre o app sozinho
-- **Agora não** — some até a próxima vez que você abrir
+- **Atualizar** (update) — downloads, installs and reopens the app by itself
+- **Agora não** (not now) — gone until the next time you open it
 
-Nada é instalado sem você mandar. E o pacote baixado é conferido contra a
-chave de assinatura do projeto antes de substituir qualquer coisa: o que
-não confere é recusado. Se a rede cair no meio, a versão que você já tem
-continua inteira.
+Nothing is installed without you saying so. And the downloaded package is
+checked against the project's signing key before anything is replaced: what
+does not match is refused. If the network drops midway, the version you
+already have stays intact.
 
-### Compilar você mesmo
+### Build it yourself
 
-Veja [`redis-desk/docs/build.md`](redis-desk/docs/build.md). São três comandos.
+See [`redis-desk/docs/build.md`](redis-desk/docs/build.md). Three commands.
 
 ---
 
-## Começar a usar
+## Getting started
 
-1. Abra o app e clique em **Novo host**.
-2. Preencha nome, endereço e porta. **Escolha o ambiente com atenção** — é
-   ele que decide a cor da janela e se a escrita vai pedir confirmação.
-3. Clique em **Conectar**.
+1. Open the app and click **Novo host** (new host).
+2. Fill in name, address and port. **Choose the environment carefully** — it
+   decides the window color and whether writing will ask for confirmation.
+3. Click **Conectar** (connect).
 
-A senha vai para o chaveiro do sistema, nunca para um arquivo.
+The password goes to the system keychain, never to a file.
 
-Para procurar dentro dos valores, clique em **Varrer de novo** uma vez: é o
-que monta o índice de busca local. Procurar por nome de chave já funciona
-sem isso.
+To search inside values, click **Varrer de novo** (rescan) once: that is
+what builds the local search index. Searching by key name already works
+without it.
 
-### Ligar ao Claude Code
+### Wiring it to Claude Code
 
 ```bash
 claude mcp add suga-redis -- /Applications/Suga-Redis.app/Contents/MacOS/suga-redis --mcp
 ```
 
-Detalhes e solução de problemas em [`redis-desk/docs/mcp-setup.md`](redis-desk/docs/mcp-setup.md).
+Details and troubleshooting in [`redis-desk/docs/mcp-setup.md`](redis-desk/docs/mcp-setup.md).
 
 ---
 
-## Onde ficam os dados
+## Where the data lives
 
-| O quê | Onde |
+| What | Where |
 | :- | :- |
-| Cadastro de hosts | `<dados>/hosts.json` |
-| Histórico e índice de busca | `<dados>/suga-redis.sqlite` |
-| Socket de aprovação | `<dados>/suga-redis.sock` (permissão 0600) |
-| **Senhas** | **Chaveiro do sistema, nunca em arquivo** |
+| Host registry | `<data>/hosts.json` |
+| History and search index | `<data>/suga-redis.sqlite` |
+| Approval socket | `<data>/suga-redis.sock` (mode 0600) |
+| **Passwords** | **System keychain, never in a file** |
 
-`<dados>` é `~/Library/Application Support/com.sugamele.sugaredis` no mac e
-`~/.local/share/com.sugamele.sugaredis` no linux. A variável
-`SUGA_REDIS_DATA_DIR` reposiciona tudo, se quiser uma segunda instalação lado
-a lado.
+`<data>` is `~/Library/Application Support/com.sugamele.sugaredis` on macOS
+and `~/.local/share/com.sugamele.sugaredis` on Linux. The
+`SUGA_REDIS_DATA_DIR` variable moves all of it, if you want a second
+installation side by side.
 
-O índice de busca guarda os valores **em claro**, sem cifrar: é uma cópia
-local do que já está no Redis, e cifrá-la só mudaria o problema de lugar.
-Quem tem acesso à sua conta de usuário tem acesso a ele.
-
----
-
-## O que ele não faz, de propósito
-
-- **Nunca roda `KEYS`, `FLUSHALL` ou `FLUSHDB`.** Varredura só com `SCAN` e
-  família, que não bloqueia o servidor.
-- **Não edita `set`, `stream` nem RedisJSON.** Abrem em modo leitura:
-  editá-los exigiria operações que este produto não sabe fazer de forma
-  atômica.
-- **Não reordena itens de lista.** Não existe troca atômica de posições, e
-  fazer em duas escritas deixaria a lista errada se a segunda falhasse.
-  Ausente é melhor que silenciosamente corrompido.
-- **Não mascara valor nenhum.** Nem na tela, nem para o Claude. Decisão
-  registrada do dono.
+The search index stores values **in the clear**, unencrypted: it is a local
+copy of what is already in Redis, and encrypting it would only move the
+problem elsewhere. Whoever has access to your user account has access to it.
 
 ---
 
-## Linha de comando
+## What it does not do, on purpose
+
+- **It never runs `KEYS`, `FLUSHALL` or `FLUSHDB`.** Scanning happens only
+  through `SCAN` and family, which does not block the server.
+- **It does not edit `set`, `stream` or RedisJSON.** They open read-only:
+  editing them would require operations this product cannot perform
+  atomically.
+- **It does not reorder list items.** There is no atomic swap of positions,
+  and doing it in two writes would leave the list wrong if the second one
+  failed. Absent beats silently corrupted.
+- **It masks no value.** Not on screen, not for Claude. A recorded decision
+  by the owner.
+
+---
+
+## Command line
 
 ```
-suga-redis              abre a janela
-suga-redis --mcp        roda como servidor MCP em stdio
-suga-redis --version    mostra a versão
-suga-redis --help       mostra a ajuda
+suga-redis              opens the window
+suga-redis --mcp        runs as an MCP server over stdio
+suga-redis --version    prints the version
+suga-redis --help       prints the help
 ```
 
-## Contribuir
+## Contributing
 
-Achou um bug, ou ele fez algo que você não esperava? [Abra uma
-issue](https://github.com/suga/suga-redis/issues) — principalmente se
-envolveu um banco de produção. Esse é o caso que mais importa aqui.
+Found a bug, or did it do something you did not expect? [Open an
+issue](https://github.com/suga/suga-redis/issues) — especially if a
+production database was involved. That is the case that matters most here.
 
-Se for mexer no código:
+If you are going to touch the code:
 
 ```bash
 git clone https://github.com/suga/suga-redis.git
@@ -305,21 +316,22 @@ npm install
 npm run tauri dev
 ```
 
-[`redis-desk/docs/CONTEXTO.md`](redis-desk/docs/CONTEXTO.md) é a leitura que poupa tempo: estado
-atual, arquitetura, invariantes e as armadilhas que já quebraram este
-projeto. [`redis-desk/docs/build.md`](redis-desk/docs/build.md) cobre testes, empacotamento e como
-sai uma versão nova.
+[`redis-desk/docs/CONTEXTO.md`](redis-desk/docs/CONTEXTO.md) is the reading
+that saves time: current state, architecture, invariants and the traps that
+have already broken this project. It is written in Portuguese, like the rest
+of the code comments. [`redis-desk/docs/build.md`](redis-desk/docs/build.md)
+covers tests, packaging and how a new version ships.
 
-Antes de abrir um PR, o CI vai rodar isto — então vale rodar antes:
+Before opening a PR, CI will run this — so it is worth running first:
 
 ```bash
 npm test && npm run check          # interface
-cd src-tauri && cargo test         # núcleo (precisa do Redis de teste: ./scripts/test-redis.sh up)
+cd src-tauri && cargo test         # core (needs the test Redis: ./scripts/test-redis.sh up)
 ```
 
-## Licença
+## License
 
-MIT. Use, copie, modifique, distribua.
+MIT. Use it, copy it, modify it, distribute it.
 
-A única coisa que este projeto não pode te dar é a assinatura paga da
-Apple — mas você já sabe o comando.
+The only thing this project cannot give you is Apple's paid signature — but
+you already know the command.
