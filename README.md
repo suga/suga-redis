@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="static/suga-redis-logo.png" alt="Suga-Redis" width="420" />
+<img src="redis-desk/static/suga-redis-logo.png" alt="Suga-Redis" width="420" />
 
 **Conecte · Gerencie · Acelere**
 
@@ -19,7 +19,7 @@ e precisa saber *onde está pisando* antes de apertar qualquer coisa.
 
 <br>
 
-<img src="docs/img/hero.gif" alt="Abrir um host de produção, a árvore de chaves montando sozinha e um valor em JSON aberto no editor" width="900" />
+<img src="redis-desk/docs/img/hero.gif" alt="Abrir um host de produção, a árvore de chaves montando sozinha e um valor em JSON aberto no editor" width="900" />
 
 </div>
 
@@ -49,7 +49,7 @@ outro rótulo grita junto, então o carimbo nunca se dilui.
 Na coluna de hosts, cada linha carrega a marca colorida do seu ambiente: dá
 para ver quantos hosts de produção existem sem ler um nome sequer.
 
-<img src="docs/img/ambientes.png" alt="Coluna de hosts com as marcas de ambiente: duas linhas de produção, uma de homologação e uma de desenvolvimento" width="820" />
+<img src="redis-desk/docs/img/ambientes.png" alt="Coluna de hosts com as marcas de ambiente: duas linhas de produção, uma de homologação e uma de desenvolvimento" width="820" />
 
 ### 🔎 Busca que entra dentro do valor
 
@@ -63,7 +63,7 @@ Substring de verdade, em qualquer posição, não só palavra inteira.
 O nome das chaves é lido do servidor na hora, então a busca por nome funciona
 mesmo num banco recém-aberto, sem varredura nenhuma.
 
-<img src="docs/img/busca-no-valor.png" alt="Busca por arco@emp destacando marco@empresa.com dentro do JSON de várias chaves" width="820" />
+<img src="redis-desk/docs/img/busca-no-valor.png" alt="Busca por arco@emp destacando marco@empresa.com dentro do JSON de várias chaves" width="820" />
 
 ### 🌳 Árvore que aguenta um banco de verdade
 
@@ -75,7 +75,7 @@ E a leitura é enxuta de propósito: **onze idas e voltas** para ler 50 mil
 chaves, não trezentas e cinquenta. Num Redis gerenciado em outra região, isso
 é a diferença entre 1,5 segundo e 45.
 
-<img src="docs/img/arvore.png" alt="Árvore agrupada por prefixo, com a contagem de chaves de cada galho" width="820" />
+<img src="redis-desk/docs/img/arvore.png" alt="Árvore agrupada por prefixo, com a contagem de chaves de cada galho" width="820" />
 
 ### ✏️ Editor por tipo, com JSON colorido e validado
 
@@ -84,12 +84,12 @@ campo/valor, `list` com índice, `zset` com membro e pontuação.
 
 Valor em JSON abre **colorido e indentado**, pronto para conferir.
 
-<img src="docs/img/editor-json.png" alt="Valor em JSON aberto no editor, colorido e indentado" width="820" />
+<img src="redis-desk/docs/img/editor-json.png" alt="Valor em JSON aberto no editor, colorido e indentado" width="820" />
 
 Ao editar, um validador aponta **linha e coluna** do erro — e não te impede de
 salvar: uma string no Redis não precisa ser JSON, e quem decide isso é você.
 
-<img src="docs/img/editor-json-invalido.png" alt="Aviso de JSON inválido apontando linha 4, coluna 3" width="820" />
+<img src="redis-desk/docs/img/editor-json-invalido.png" alt="Aviso de JSON inválido apontando linha 4, coluna 3" width="820" />
 
 Valor binário recusa edição por texto: o que voltasse do campo já não seriam
 os mesmos bytes.
@@ -105,7 +105,7 @@ Toda escrita guarda o valor anterior **antes** de acontecer. O histórico
 mostra o que mudou, quem mudou e quando, com antes e depois lado a lado — e
 um botão para desfazer.
 
-<img src="docs/img/historico.png" alt="Histórico com antes e depois lado a lado e o botão Voltar atrás" width="820" />
+<img src="redis-desk/docs/img/historico.png" alt="Histórico com antes e depois lado a lado e o botão Voltar atrás" width="820" />
 
 ### 🔒 Produção pede confirmação
 
@@ -115,7 +115,7 @@ mudança. Um clique. Nunca digitar frase.
 A trava mora no backend, não na tela: um botão pode esquecer de perguntar,
 essa função não pode ser contornada.
 
-<img src="docs/img/confirmacao-producao.png" alt="Diálogo de confirmação em host de produção, com o resumo exato da mudança" width="820" />
+<img src="redis-desk/docs/img/confirmacao-producao.png" alt="Diálogo de confirmação em host de produção, com o resumo exato da mudança" width="820" />
 
 ### 🤖 O Claude lê seus bancos — e pede licença para escrever
 
@@ -127,7 +127,7 @@ Ler funciona sem o app aberto. **Escrever, não.** Quando o Claude pede uma
 escrita, a janela vem para a frente e você libera digitando o nome do host.
 Sem app aberto, não existe socket, e a escrita não acontece.
 
-<img src="docs/img/escrita-da-llm.png" alt="Pedido de escrita vindo do Claude, esperando o dono digitar o nome do host para liberar" width="820" />
+<img src="redis-desk/docs/img/escrita-da-llm.png" alt="Pedido de escrita vindo do Claude, esperando o dono digitar o nome do host para liberar" width="820" />
 
 Vale em **qualquer ambiente**, inclusive desenvolvimento: a confirmação de
 produção pergunta *onde* a mudança cai; esta trava pergunta *quem* pediu.
@@ -219,7 +219,7 @@ continua inteira.
 
 ### Compilar você mesmo
 
-Veja [`docs/build.md`](docs/build.md). São três comandos.
+Veja [`redis-desk/docs/build.md`](redis-desk/docs/build.md). São três comandos.
 
 ---
 
@@ -242,7 +242,7 @@ sem isso.
 claude mcp add suga-redis -- /Applications/Suga-Redis.app/Contents/MacOS/suga-redis --mcp
 ```
 
-Detalhes e solução de problemas em [`docs/mcp-setup.md`](docs/mcp-setup.md).
+Detalhes e solução de problemas em [`redis-desk/docs/mcp-setup.md`](redis-desk/docs/mcp-setup.md).
 
 ---
 
@@ -305,9 +305,9 @@ npm install
 npm run tauri dev
 ```
 
-[`docs/CONTEXTO.md`](docs/CONTEXTO.md) é a leitura que poupa tempo: estado
+[`redis-desk/docs/CONTEXTO.md`](redis-desk/docs/CONTEXTO.md) é a leitura que poupa tempo: estado
 atual, arquitetura, invariantes e as armadilhas que já quebraram este
-projeto. [`docs/build.md`](docs/build.md) cobre testes, empacotamento e como
+projeto. [`redis-desk/docs/build.md`](redis-desk/docs/build.md) cobre testes, empacotamento e como
 sai uma versão nova.
 
 Antes de abrir um PR, o CI vai rodar isto — então vale rodar antes:
