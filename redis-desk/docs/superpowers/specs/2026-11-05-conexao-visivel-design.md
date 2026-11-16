@@ -27,7 +27,7 @@ estourou e o `catch` engoliu, ou servidor respondeu vazio de verdade a
 ver a resposta crua do servidor, e não existe lugar nenhum onde ela apareça:
 o projeto inteiro tem **dois `eprintln!`** e nenhum registro.
 
-**A causa raiz do Hub segue aberta.** Este desenho não a conserta — constrói
+**A causa raiz daquele host segue aberta.** Este desenho não a conserta — constrói
 o instrumento que permite achá-la, e fecha o buraco que a escondeu.
 
 Durante a investigação foi encontrado e **já corrigido** (commit `c0ee59f`)
@@ -121,7 +121,7 @@ Quatro estados, não dois:
 | conectado | `conectado · 5679 ms · banco 0` | verde |
 | falhou | `falhou · TLS: certificado não confere` | âmbar escuro |
 
-O quarto estado é a razão de existir desta tela. O Hub **conectou**; um
+O quarto estado é a razão de existir desta tela. Aquele host **conectou**; um
 indicador de dois estados teria dito "conectado" e deixado a dúvida de pé.
 
 O motivo da falha reusa a classificação que `ConnError` já faz (TLS, DNS,
@@ -187,7 +187,7 @@ serverless vivem cortados.
 
 `Workspace.svelte:130` (`listDbs`) e `Workspace.svelte:111` (`scanStatus`)
 transformam erro em estado vazio, sem dizer nada. Os dois passam a registrar
-no log e a mostrar o estado de falha. Foi esse silêncio que escondeu o Hub.
+no log e a mostrar o estado de falha. Foi esse silêncio que escondeu o incidente.
 
 ---
 
@@ -216,7 +216,7 @@ conectou — e saber, olhando, qual das duas hipóteses está de pé:
   respondeu vazio de verdade — e aí a hipótese que sobra é a do
   proxy/ACL/shard.
 
-É a distinção entre as duas que decide, e com ela a causa raiz do Hub vira
+É a distinção entre as duas que decide, e com ela a causa raiz daquele host vira
 um bug comum: com evidência.
 
 > **Correção de 2026-11-05, depois da implementação.** A redação anterior

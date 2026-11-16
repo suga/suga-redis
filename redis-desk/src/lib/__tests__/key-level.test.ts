@@ -160,11 +160,11 @@ test("galho aberto acompanha a varredura em vez de congelar no que viu", async (
 
 test("um galho de um filho só não obriga a abrir degrau por degrau", async () => {
 	const user = userEvent.setup();
-	// Na tela: evento > 88123 > 77 > Goal > 80 > 0 > 4591,
+	// Na tela: evento > 88123 > 77 > Marca > 80 > 0 > 4591,
 	// cada degrau com UM filho e um clique. O caminho é um só; mostrá-lo
 	// inteiro poupa seis cliques que não decidem nada.
 	arvore({
-		"goal:": [galho("88123", "goal:", 2)],
+		"evento:": [galho("88123", "evento:", 2)],
 		"evento:88123:": [galho("77", "evento:88123:", 2)],
 		"evento:88123:77:": [
 			galho("MarcaA", "evento:88123:77:", 1),
@@ -176,7 +176,7 @@ test("um galho de um filho só não obriga a abrir degrau por degrau", async () 
 		props: {
 			hostId: "h1",
 			db: 0,
-			root: [galho("goal", "", 2)],
+			root: [galho("evento", "", 2)],
 			version: 0,
 			selectedKey: null,
 			onSelect: vi.fn(),
@@ -184,7 +184,7 @@ test("um galho de um filho só não obriga a abrir degrau por degrau", async () 
 		},
 	});
 
-	await user.click(screen.getByRole("button", { name: /goal/ }));
+	await user.click(screen.getByRole("button", { name: /evento/ }));
 
 	// Um clique desce o corredor inteiro, até onde ele se divide.
 	expect(await screen.findByRole("button", { name: /88123/ })).toBeInTheDocument();

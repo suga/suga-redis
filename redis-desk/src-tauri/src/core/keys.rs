@@ -1148,8 +1148,8 @@ mod tests {
 
     #[test]
     fn um_nivel_cheio_demais_e_cortado_e_diz_que_foi() {
-        // O caso real: `pedido:tokens:` com mil UUIDs.
-        // Mostrar vinte e marcar 1.078 ao lado, calado, faz o número
+        // Caso visto em uso: um nível com mais de mil UUIDs irmãos.
+        // Mostrar vinte e marcar o total ao lado, calado, faz o número
         // parecer errado quando na verdade a LISTA é que está incompleta.
         let mut trie = KeyTrie::new();
         for i in 0..(MAX_CHILDREN + 500) {
@@ -1271,8 +1271,8 @@ mod tests {
             // Uma varredura só constrói a árvore inteira: abrir qualquer
             // galho daqui em diante é consulta em memória.
             let api = trie.level("passo_rs_test:api:").unwrap().children;
-            let fixtures = api.iter().find(|b| b.label == "fixtures").unwrap();
-            assert_eq!(fixtures.count, 2);
+            let lotes = api.iter().find(|b| b.label == "lotes").unwrap();
+            assert_eq!(lotes.count, 2);
             assert_eq!(
                 trie.level("passo_rs_test:auth:").unwrap().children[0]
                     .leaf_key
