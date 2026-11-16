@@ -31,6 +31,8 @@ rusqlite = { version = "0.41.1", features = ["bundled"] }
 rmcp = { version = "3", features = ["server", "transport-io", "macros", "schemars"] }
 schemars = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+tauri-plugin-updater = "2.14.1"
+tauri-plugin-process = "2.4.0"
 
 # `keyring` sem um backend de plataforma cai no mock (não persistente) por
 # padrão — inclusive em builds de release. Cada SO precisa do seu backend

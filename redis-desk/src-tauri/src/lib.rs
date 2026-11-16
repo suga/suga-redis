@@ -54,6 +54,11 @@ feito para ser lido por gente. Veja docs/mcp-setup.md para ligá-lo ao Claude.",
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // O par updater/process anda junto: o primeiro busca e instala a
+        // versão nova, o segundo reabre o app depois — sem ele a pessoa
+        // atualiza e fica olhando uma janela que não existe mais.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| commands::setup(app))
         .invoke_handler(tauri::generate_handler![
             commands::cmd_list_hosts,

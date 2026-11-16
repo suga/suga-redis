@@ -10,7 +10,10 @@
 	import EnvBand from "$lib/EnvBand.svelte";
 	import HostForm from "$lib/HostForm.svelte";
 	import HostList from "$lib/HostList.svelte";
+	import UpdateBanner from "$lib/UpdateBanner.svelte";
 	import Workspace from "$lib/Workspace.svelte";
+	import { getVersion } from "@tauri-apps/api/app";
+	import { procurar, type Achado } from "$lib/atualizacao";
 	import {
 		errorMessage,
 		listHosts,
@@ -87,6 +90,21 @@
 			clearInterval(relogio);
 			parar.then((fn) => fn());
 		};
+	});
+
+	// ------------------------------------------ versão nova no GitHub
+
+	let atualizacao = $state<Achado | null>(null);
+	let versaoAtual = $state("");
+
+	// Uma vez, ao abrir. Não há relógio refazendo a pergunta: quem deixa o
+	// app aberto o dia inteiro não precisa ser lembrado de hora em hora, e
+	// a próxima abertura pergunta de novo de graça.
+	onMount(async () => {
+		const achado = await procurar();
+		if (!achado) return;
+		versaoAtual = await getVersion();
+		atualizacao = achado;
 	});
 
 	function salvou(hostId: string) {
@@ -180,6 +198,14 @@
      atenção, e o resto da fila continua esperando sem risco. -->
 {#if pedidos.length > 0}
 	<ApprovalDialog request={pedidos[0]} onSettled={lerPedidos} />
+{/if}
+
+{#if atualizacao}
+	<UpdateBanner
+		achado={atualizacao}
+		atual={versaoAtual}
+		onDispensar={() => (atualizacao = null)}
+	/>
 {/if}
 
 <style>
