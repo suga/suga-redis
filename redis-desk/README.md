@@ -110,8 +110,24 @@ produção pergunta *onde* a mudança cai; esta trava pergunta *quem* pediu.
 Gere os pacotes com `npm run dist` (veja [`docs/build.md`](docs/build.md)) e
 abra o `.dmg` que aparece em `dist/`, arrastando o app para `Aplicativos`.
 
-Na primeira vez o macOS vai reclamar que o app não é assinado. Clique nele
-com o botão direito → **Abrir** → **Abrir**.
+O app é assinado só em modo *ad-hoc*: não tem Developer ID nem passou pela
+notarização da Apple. Então, na primeira vez, o macOS vai barrar — ele não
+tem como saber de quem veio o programa.
+
+Abra o app, deixe o aviso aparecer, e vá em **Ajustes do Sistema →
+Privacidade e Segurança**. Lá embaixo vai estar o Suga-Redis, com um botão
+**Abrir Mesmo Assim**. Daí em diante ele abre normal.
+
+Se preferir resolver de uma vez pelo terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Suga-Redis.app
+```
+
+Esse comando tira a marca de quarentena que o navegador (ou o Slack) põe no
+arquivo baixado — ou seja, você está dispensando a checagem do Gatekeeper
+para este app, confiando em quem te mandou o `.dmg`. Faça isso só com um
+pacote que veio de uma fonte que você conhece.
 
 ### Linux
 

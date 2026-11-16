@@ -76,10 +76,20 @@ Para instalar o que acabou de sair:
 ditto dist/Suga-Redis.app /Applications/Suga-Redis.app
 ```
 
-> O build **não é assinado nem notarizado**. Na primeira abertura o macOS
-> bloqueia: botão direito no app → **Abrir** → **Abrir**. Para distribuir a
-> outras pessoas sem esse atrito, é preciso uma conta de desenvolvedor Apple
-> e configurar `signingIdentity` em `src-tauri/tauri.conf.json`.
+> O build é assinado em modo **ad-hoc** (`signingIdentity: "-"` em
+> `src-tauri/tauri.conf.json`) e **não é notarizado**. A assinatura ad-hoc
+> não diz de quem o app veio; ela só garante que o bundle está íntegro. Sem
+> ela, o `.app` chega quebrado na máquina de quem baixa e o macOS diz que o
+> app *"está danificado"* — sem nenhuma forma de abrir mesmo assim.
+>
+> Com ela, o bloqueio vira o aviso normal de desenvolvedor não identificado,
+> que a pessoa libera em **Ajustes do Sistema → Privacidade e Segurança →
+> Abrir Mesmo Assim**. Veja a seção *Instalar* do [`README.md`](../README.md).
+>
+> Para distribuir sem atrito nenhum, é preciso uma conta de desenvolvedor
+> Apple: trocar o `-` por um certificado Developer ID e notarizar o pacote
+> (as variáveis `APPLE_ID`, `APPLE_PASSWORD` e `APPLE_TEAM_ID` no ambiente
+> fazem o `tauri build` notarizar sozinho).
 
 ### Linux, a partir do mac
 
