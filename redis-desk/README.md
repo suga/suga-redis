@@ -7,6 +7,16 @@
 Um cliente de mesa para Redis feito para quem opera banco de produção —
 e precisa saber *onde está pisando* antes de apertar qualquer coisa.
 
+[![Release](https://img.shields.io/github/v/release/suga/suga-redis?label=vers%C3%A3o&color=f2a33c)](https://github.com/suga/suga-redis/releases/latest)
+[![CI](https://github.com/suga/suga-redis/actions/workflows/ci.yml/badge.svg)](https://github.com/suga/suga-redis/actions/workflows/ci.yml)
+[![macOS](https://img.shields.io/badge/macOS-Apple%20Silicon%20%2B%20Intel-999)](#macos)
+[![Linux](https://img.shields.io/badge/Linux-x86__64-999)](#linux)
+[![Licença](https://img.shields.io/badge/licen%C3%A7a-MIT-blue)](#licença)
+
+### [⬇️  Baixar a última versão](https://github.com/suga/suga-redis/releases/latest)
+
+`.dmg` para macOS · `.AppImage` e `.deb` para Linux · atualiza sozinho depois
+
 </div>
 
 ---
@@ -105,73 +115,90 @@ produção pergunta *onde* a mudança cai; esta trava pergunta *quem* pediu.
 
 ## Instalar
 
+> **[⬇️  Baixe aqui](https://github.com/suga/suga-redis/releases/latest)** — depois volte para o passo da sua plataforma.
+
 ### macOS
 
-Baixe o `.dmg` da [página de releases][releases] e arraste o app para
-`Aplicativos`. O mesmo arquivo serve para Apple Silicon e para Intel.
-
-O app é assinado só em modo *ad-hoc*: não tem Developer ID nem passou pela
-notarização da Apple. Então, na primeira vez, o macOS vai barrar — ele não
-tem como saber de quem veio o programa.
-
-Abra o app, deixe o aviso aparecer, e vá em **Ajustes do Sistema →
-Privacidade e Segurança**. Lá embaixo vai estar o Suga-Redis, com um botão
-**Abrir Mesmo Assim**. Daí em diante ele abre normal.
-
-Se preferir resolver de uma vez pelo terminal:
-
 ```bash
+# 1. abra o .dmg e arraste o app para Aplicativos
+# 2. rode isto uma única vez:
 xattr -dr com.apple.quarantine /Applications/Suga-Redis.app
 ```
 
-Esse comando tira a marca de quarentena que o navegador (ou o Slack) põe no
-arquivo baixado — ou seja, você está dispensando a checagem do Gatekeeper
-para este app, confiando em quem te mandou o `.dmg`. Faça isso só com um
-pacote que veio de uma fonte que você conhece.
+Pronto. Abre normal daí em diante — inclusive nas atualizações.
+
+<details>
+<summary><b>Por que preciso desse comando?</b> (ou: a Apple quer US$ 99 por ano para confiar em mim)</summary>
+
+<br>
+
+Para o macOS abrir um app sem reclamar, o desenvolvedor precisa de um
+**Developer ID** — uma assinatura da Apple que custa **US$ 99 por ano**.
+Esse dinheiro, por ora, segue sendo café.
+
+Sem pagar, o sistema não tem como saber de quem veio o programa. Ele não
+está dizendo que o app é perigoso; está dizendo, com toda a sinceridade,
+*"não faço ideia de quem fez isso"*. Justo.
+
+O comando acima tira do app a marca de quarentena que o navegador (ou o
+Slack) carimba em tudo que vem da internet. Na prática você está dizendo ao
+Gatekeeper: **eu sei de onde veio, pode deixar**. Vale o de sempre — só faça
+isso com arquivo de fonte que você conhece. Esta aqui, você conhece: o
+código inteiro está nesta página, e o `.dmg` saiu de um build público que
+você pode [ler linha por linha](.github/workflows/release.yml).
+
+**Prefere não usar o terminal?** Dá no mesmo pelo caminho oficial: abra o
+app, deixe o aviso aparecer, e vá em **Ajustes do Sistema → Privacidade e
+Segurança**. Lá embaixo aparece o Suga-Redis com um botão **Abrir Mesmo
+Assim**. (A linha só aparece *depois* da tentativa de abrir, e some em mais
+ou menos uma hora. Se não achar, tente abrir de novo e volte correndo.)
+
+O app **é** assinado — em modo *ad-hoc*, que garante que o pacote chegou
+inteiro e não foi adulterado no caminho. O que falta é a parte paga: a que
+diz o *nome* de quem assinou.
+
+</details>
 
 ### Linux
 
-Baixe o `.AppImage` da [página de releases][releases] (x86_64):
+**AppImage** — recomendado, é o formato que se atualiza sozinho:
 
 ```bash
 chmod +x Suga-Redis_*.AppImage
 ./Suga-Redis_*.AppImage
 ```
 
-Ou o `.deb`:
+**`.deb`** — para Debian, Ubuntu e derivados:
 
 ```bash
 sudo dpkg -i suga-redis_*.deb
 ```
 
-Prefira o **AppImage** se quiser atualização automática: é o formato que o
-app sabe trocar sozinho. O `.deb` funciona igual, mas cada versão nova você
-instala na mão.
+Nenhum susto de permissão aqui: o Linux simplesmente confia em você para
+decidir o que roda na sua máquina. x86_64 por enquanto.
+
+> O `.deb` avisa quando sai versão nova, mas a troca é na mão. O AppImage
+> faz sozinho.
 
 ### Atualizar
 
-Não precisa acompanhar lançamento nenhum. Ao abrir, o app pergunta ao
-GitHub se existe versão mais nova e, se existir, avisa num canto da tela
-com o que mudou. Você decide: **Atualizar** baixa e reabre o app sozinho,
-**Agora não** fecha o aviso até a próxima abertura.
+Depois da primeira instalação, você não precisa acompanhar lançamento
+nenhum.
 
-Nada é instalado sem você mandar, e o pacote baixado é verificado contra a
-chave do projeto antes de substituir qualquer coisa — um pacote que não
-confira é recusado. Se a atualização falhar no meio (rede caiu, por
-exemplo), a versão instalada continua intacta.
+Ao abrir, o app pergunta ao GitHub se existe versão mais nova. Se existir,
+aparece um aviso discreto num canto da tela, com o que mudou:
 
-O `.deb` é a exceção: ele avisa, mas a troca é manual.
+- **Atualizar** — baixa, instala e reabre o app sozinho
+- **Agora não** — some até a próxima vez que você abrir
 
-[releases]: https://github.com/suga/suga-redis/releases/latest
+Nada é instalado sem você mandar. E o pacote baixado é conferido contra a
+chave de assinatura do projeto antes de substituir qualquer coisa: o que
+não confere é recusado. Se a rede cair no meio, a versão que você já tem
+continua inteira.
 
 ### Compilar você mesmo
 
-Veja [`docs/build.md`](docs/build.md).
-
-### Mexer no código
-
-Comece por [`docs/CONTEXTO.md`](docs/CONTEXTO.md): estado atual, arquitetura,
-invariantes e as armadilhas que já quebraram este projeto.
+Veja [`docs/build.md`](docs/build.md). São três comandos.
 
 ---
 
@@ -242,6 +269,36 @@ suga-redis --version    mostra a versão
 suga-redis --help       mostra a ajuda
 ```
 
+## Contribuir
+
+Achou um bug, ou ele fez algo que você não esperava? [Abra uma
+issue](https://github.com/suga/suga-redis/issues) — principalmente se
+envolveu um banco de produção. Esse é o caso que mais importa aqui.
+
+Se for mexer no código:
+
+```bash
+git clone https://github.com/suga/suga-redis.git
+cd suga-redis/redis-desk
+npm install
+npm run tauri dev
+```
+
+[`docs/CONTEXTO.md`](docs/CONTEXTO.md) é a leitura que poupa tempo: estado
+atual, arquitetura, invariantes e as armadilhas que já quebraram este
+projeto. [`docs/build.md`](docs/build.md) cobre testes, empacotamento e como
+sai uma versão nova.
+
+Antes de abrir um PR, o CI vai rodar isto — então vale rodar antes:
+
+```bash
+npm test && npm run check          # interface
+cd src-tauri && cargo test         # núcleo (precisa do Redis de teste: ./scripts/test-redis.sh up)
+```
+
 ## Licença
 
-MIT.
+MIT. Use, copie, modifique, distribua.
+
+A única coisa que este projeto não pode te dar é a assinatura paga da
+Apple — mas você já sabe o comando.
