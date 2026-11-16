@@ -53,6 +53,16 @@ para ver quantos hosts de produção existem sem ler um nome sequer.
 
 <img src="redis-desk/docs/img/ambientes.png" alt="Coluna de hosts com as marcas de ambiente: duas linhas de produção, uma de homologação e uma de desenvolvimento" width="820" />
 
+### 🌐 Três idiomas, e ele abre no seu
+
+A interface fala **português, inglês e espanhol**. Na primeira abertura ele
+segue o idioma do sistema; depois disso, o que você escolher no pé da coluna
+de hosts. Número e data acompanham — `1.234.567` e `1,234,567` são o mesmo
+número, e o separador errado faz quem lê conferir duas vezes.
+
+O carimbo de ambiente é traduzido junto: uma janela gritando `PRODUÇÃO` para
+quem lê em inglês está gritando justamente o aviso que a pessoa não entende.
+
 ### 🔎 Busca que entra dentro do valor
 
 Procure `arco@emp` e ele acha `marco@empresa.com` — dentro de campo de hash,

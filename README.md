@@ -25,12 +25,6 @@ and need to know *where they are standing* before pressing anything.
 
 </div>
 
-> **The interface is in Portuguese today.** Multi-language support is being
-> built; this README is ahead of the app. Button names below appear exactly
-> as the screen shows them, with the English in parentheses.
-
----
-
 ## The problem
 
 You open a Redis tool with five identical tabs. One of them is production.
@@ -48,8 +42,7 @@ Suga-Redis answers those three questions by construction.
 ### 🚦 The environment shouts before you make a mistake
 
 The whole window changes color according to the open host, with the word
-stamped at the top: `PRODUÇÃO` (production), `HOMOLOGAÇÃO` (staging),
-`DESENVOLVIMENTO` (development).
+stamped at the top: `PRODUCTION`, `STAGING`, `DEVELOPMENT`.
 
 ALL CAPS means **one thing only** across the entire app — the environment.
 No other label shouts alongside it, so the stamp never gets diluted.
@@ -58,6 +51,18 @@ In the host column, every row carries the colored mark of its environment:
 you can see how many production hosts exist without reading a single name.
 
 <img src="redis-desk/docs/img/ambientes.png" alt="Host column with environment marks: two production rows, one staging and one development" width="820" />
+
+### 🌐 Three languages, and it opens in yours
+
+The interface speaks **English, Portuguese and Spanish**. On the first run
+it follows the language of your system; from then on, whatever you pick at
+the foot of the host column. Numbers and dates follow it too — `1,234,567`
+and `1.234.567` are the same number, and the wrong separator makes you count
+the digits twice.
+
+The environment stamp is translated with everything else: a window shouting
+`PRODUÇÃO` at someone reading English is shouting the one warning they
+cannot read.
 
 ### 🔎 Search that goes inside the value
 
@@ -220,8 +225,8 @@ After the first install you do not have to follow any release.
 On launch, the app asks GitHub whether a newer version exists. If it does, a
 discreet notice appears in a corner of the screen, with what changed:
 
-- **Atualizar** (update) — downloads, installs and reopens the app by itself
-- **Agora não** (not now) — gone until the next time you open it
+- **Update** — downloads, installs and reopens the app by itself
+- **Not now** — gone until the next time you open it
 
 Nothing is installed without you saying so. And the downloaded package is
 checked against the project's signing key before anything is replaced: what
@@ -236,14 +241,14 @@ See [`redis-desk/docs/build.md`](redis-desk/docs/build.md). Three commands.
 
 ## Getting started
 
-1. Open the app and click **Novo host** (new host).
+1. Open the app and click **New host**.
 2. Fill in name, address and port. **Choose the environment carefully** — it
    decides the window color and whether writing will ask for confirmation.
-3. Click **Conectar** (connect).
+3. Click **Connect**.
 
 The password goes to the system keychain, never to a file.
 
-To search inside values, click **Varrer de novo** (rescan) once: that is
+To search inside values, click **Rescan** once: that is
 what builds the local search index. Searching by key name already works
 without it.
 

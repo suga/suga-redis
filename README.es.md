@@ -25,13 +25,6 @@ producción — y necesita saber *dónde está pisando* antes de tocar nada.
 
 </div>
 
-> **La interfaz está hoy en portugués.** El soporte multiidioma se está
-> construyendo; este README va por delante de la aplicación. Los nombres de
-> los botones aparecen tal como los muestra la pantalla, con la traducción
-> entre paréntesis.
-
----
-
 ## El problema
 
 Abres una herramienta de Redis con cinco pestañas idénticas. Una es
@@ -49,8 +42,7 @@ Suga-Redis responde a esas tres preguntas por construcción.
 ### 🚦 El entorno grita antes de que te equivoques
 
 La ventana entera cambia de color según el host abierto, con la palabra
-estampada arriba: `PRODUÇÃO` (producción), `HOMOLOGAÇÃO` (homologación),
-`DESENVOLVIMENTO` (desarrollo).
+estampada arriba: `PRODUCCIÓN`, `PREPRODUCCIÓN`, `DESARROLLO`.
 
 Las MAYÚSCULAS significan **una sola cosa** en toda la aplicación: el
 entorno. Ninguna otra etiqueta grita a su lado, así que el sello nunca se
@@ -60,6 +52,18 @@ En la columna de hosts, cada fila lleva la marca de color de su entorno: se
 ve cuántos hosts de producción hay sin leer un solo nombre.
 
 <img src="redis-desk/docs/img/ambientes.png" alt="Columna de hosts con las marcas de entorno: dos filas de producción, una de homologación y una de desarrollo" width="820" />
+
+### 🌐 Tres idiomas, y abre en el tuyo
+
+La interfaz habla **español, portugués e inglés**. En la primera apertura
+sigue el idioma del sistema; a partir de ahí, el que elijas al pie de la
+columna de hosts. Los números y las fechas lo acompañan — `1.234.567` y
+`1,234,567` son el mismo número, y el separador equivocado hace que lo
+cuentes dos veces.
+
+El sello de entorno se traduce con todo lo demás: una ventana gritando
+`PRODUÇÃO` a quien lee en español está gritando justo el aviso que no
+entiende.
 
 ### 🔎 Búsqueda que entra dentro del valor
 
@@ -225,8 +229,8 @@ Al abrirse, la aplicación le pregunta a GitHub si hay una versión más nueva.
 Si la hay, aparece un aviso discreto en una esquina de la pantalla, con lo
 que cambió:
 
-- **Atualizar** (actualizar) — descarga, instala y reabre la aplicación sola
-- **Agora não** (ahora no) — desaparece hasta la próxima vez que la abras
+- **Actualizar** — descarga, instala y reabre la aplicación sola
+- **Ahora no** — desaparece hasta la próxima vez que la abras
 
 Nada se instala sin que tú lo mandes. Y el paquete descargado se comprueba
 contra la clave de firma del proyecto antes de reemplazar nada: lo que no
@@ -241,16 +245,15 @@ Mira [`redis-desk/docs/build.md`](redis-desk/docs/build.md). Son tres comandos.
 
 ## Empezar a usarlo
 
-1. Abre la aplicación y pulsa **Novo host** (nuevo host).
+1. Abre la aplicación y pulsa **Nuevo host**.
 2. Rellena nombre, dirección y puerto. **Elige el entorno con cuidado** — es
    lo que decide el color de la ventana y si la escritura pedirá
    confirmación.
-3. Pulsa **Conectar** (conectar).
+3. Pulsa **Conectar**.
 
 La contraseña va al llavero del sistema, nunca a un archivo.
 
-Para buscar dentro de los valores, pulsa **Varrer de novo** (volver a
-barrer) una vez: eso es lo que construye el índice de búsqueda local. Buscar
+Para buscar dentro de los valores, pulsa **Recorrer de nuevo** una vez: eso es lo que construye el índice de búsqueda local. Buscar
 por nombre de clave ya funciona sin eso.
 
 ### Conectarlo a Claude Code
