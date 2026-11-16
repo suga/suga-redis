@@ -665,7 +665,10 @@ pub async fn read_value_more(
             .await
         }
         Err(err) => {
-            registrar(state, operation, host_id, None, Some(db), async { Err(err) }).await
+            registrar(state, operation, host_id, None, Some(db), async {
+                Err(err)
+            })
+            .await
         }
     }
 }
@@ -793,7 +796,10 @@ pub async fn rollback(state: &AppState, entry_id: i64, confirmed: bool) -> Resul
             .await
         }
         Err(err) => {
-            registrar(state, "rollback", &host_id, None, Some(db), async { Err(err) }).await
+            registrar(state, "rollback", &host_id, None, Some(db), async {
+                Err(err)
+            })
+            .await
         }
     }
 }
@@ -1755,7 +1761,11 @@ mod tests {
 
         del(&mut conn, vizinha).await;
 
-        assert_eq!(rotulos, vec!["fica"], "a apagada não pode continuar na árvore");
+        assert_eq!(
+            rotulos,
+            vec!["fica"],
+            "a apagada não pode continuar na árvore"
+        );
     }
 
     /// Uma chave que expirou entre a varredura e o clique também sai da
