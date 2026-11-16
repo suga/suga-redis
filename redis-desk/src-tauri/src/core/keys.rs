@@ -1149,7 +1149,7 @@ mod tests {
     #[test]
     fn um_nivel_cheio_demais_e_cortado_e_diz_que_foi() {
         // Caso visto em uso: um nível com mais de mil UUIDs irmãos.
-        // Mostrar vinte e marcar o total ao lado, calado, faz o número
+        // Entregar o teto e marcar o total ao lado, calado, faz o número
         // parecer errado quando na verdade a LISTA é que está incompleta.
         let mut trie = KeyTrie::new();
         for i in 0..(MAX_CHILDREN + 500) {

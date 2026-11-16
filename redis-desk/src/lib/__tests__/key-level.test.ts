@@ -160,9 +160,9 @@ test("galho aberto acompanha a varredura em vez de congelar no que viu", async (
 
 test("um galho de um filho só não obriga a abrir degrau por degrau", async () => {
 	const user = userEvent.setup();
-	// Na tela: evento > 88123 > 77 > Marca > 80 > 0 > 4591,
-	// cada degrau com UM filho e um clique. O caminho é um só; mostrá-lo
-	// inteiro poupa seis cliques que não decidem nada.
+	// Um corredor: evento > 88123 > 77, cada degrau com UM filho e um
+	// clique, até o ponto em que ele se divide em dois. O caminho até ali
+	// é um só; mostrá-lo inteiro poupa cliques que não decidem nada.
 	arvore({
 		"evento:": [galho("88123", "evento:", 2)],
 		"evento:88123:": [galho("77", "evento:88123:", 2)],
