@@ -147,7 +147,7 @@
 
 					<div class="meta">
 						<span class="chave mono">{entrada.key}</span>
-						<span>banco {entrada.db}</span>
+						<span>{t("banco.rotulo", { n: entrada.db })}</span>
 						<span data-testid="autor">
 							{entrada.actor === "llm" ? t("autor.claude") : t("autor.voce")}
 						</span>

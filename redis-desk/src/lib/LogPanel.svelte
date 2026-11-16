@@ -144,7 +144,7 @@
 					<div class="linha">
 						<span class="host">{entrada.host}</span>
 						{#if entrada.db !== null}
-							<span class="banco" data-testid="banco">banco {entrada.db}</span>
+							<span class="banco" data-testid="banco">{t("banco.rotulo", { n: entrada.db })}</span>
 						{/if}
 						<span class="operacao">
 							{entrada.operation}{entrada.duration_ms !== null

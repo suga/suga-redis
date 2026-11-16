@@ -201,3 +201,24 @@ test("o tipo de cada linha do log é traduzido", async () => {
 
 	expect(await screen.findByText("fallo")).toBeInTheDocument();
 });
+
+test("o rótulo do banco na linha do log segue o idioma", async () => {
+	const { logs } = await import("$lib/api");
+	vi.mocked(logs).mockResolvedValue([
+		{
+			at_ms: 0,
+			kind: "connection",
+			host: "pagamentos-prod",
+			db: 3,
+			operation: "connect",
+			duration_ms: 2,
+			detail: null,
+		},
+	]);
+
+	definirIdioma("en");
+	const LogPanel = (await import("$lib/LogPanel.svelte")).default;
+	render(LogPanel, { props: {} });
+
+	expect(await screen.findByTestId("banco")).toHaveTextContent("database 3");
+});

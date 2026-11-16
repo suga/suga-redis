@@ -195,6 +195,7 @@ export const ptBR = {
 	"log.tipoFalha": "falha",
 	"log.tipoLento": "lento",
 	"historico.chaveNaoExistia": "a chave não existia",
+	"banco.rotulo": "banco {n}",
 	"estado.conectado": "conectado · {ms} ms · banco {banco}",
 	"acao.conectar": "Conectar",
 };

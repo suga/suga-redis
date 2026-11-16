@@ -197,6 +197,7 @@ export const es: Catalogo = {
 	"log.tipoFalha": "fallo",
 	"log.tipoLento": "lento",
 	"historico.chaveNaoExistia": "la clave no existía",
+	"banco.rotulo": "base {n}",
 	"estado.conectado": "conectado · {ms} ms · base {banco}",
 	"acao.conectar": "Conectar",
 };

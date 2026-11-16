@@ -197,6 +197,7 @@ export const en: Catalogo = {
 	"log.tipoFalha": "failure",
 	"log.tipoLento": "slow",
 	"historico.chaveNaoExistia": "the key did not exist",
+	"banco.rotulo": "database {n}",
 	"estado.conectado": "connected · {ms} ms · database {banco}",
 	"acao.conectar": "Connect",
 };
