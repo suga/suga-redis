@@ -79,7 +79,7 @@
 	 * pessoa teria que interpretar.
 	 */
 	function resumoDoValor(json: string | null): string {
-		if (json === null) return "a chave não existia";
+		if (json === null) return t("historico.chaveNaoExistia");
 		try {
 			const snapshot = JSON.parse(json) as {
 				kind: string;

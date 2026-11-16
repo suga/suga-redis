@@ -48,13 +48,13 @@
 
 	/** A primeira coisa errada, ou `null` se está tudo certo. */
 	function primeiroProblema(): string | null {
-		if (!name.trim()) return "Informe um nome para o host.";
-		if (!addr.trim()) return "Informe o endereço do host.";
+		if (!name.trim()) return t("form.nomeObrigatorio");
+		if (!addr.trim()) return t("form.enderecoObrigatorio");
 		if (!Number.isInteger(port) || port < 1 || port > 65535) {
-			return "A porta precisa estar entre 1 e 65535.";
+			return t("form.portaInvalida");
 		}
 		if (!Number.isInteger(db) || db < 0 || db > 15) {
-			return "O banco precisa estar entre 0 e 15.";
+			return t("form.bancoInvalido");
 		}
 		return null;
 	}

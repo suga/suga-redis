@@ -89,11 +89,11 @@
 		return `${(ms / 1000).toFixed(1)} s`;
 	}
 
-	const ROTULO: Record<LogEntry["kind"], string> = {
-		connection: "conexão",
-		failure: "falha",
-		slow: "lento",
-	};
+	const CHAVE_DO_TIPO = {
+		connection: "log.tipoConexao",
+		failure: "log.tipoFalha",
+		slow: "log.tipoLento",
+	} as const satisfies Record<LogEntry["kind"], Parameters<typeof t>[0]>;
 </script>
 
 <section>
@@ -138,7 +138,7 @@
 			{#each entradas as entrada, i (i)}
 				<li data-testid="entrada">
 					<div class="cabeca">
-						<span class="tipo tipo--{entrada.kind}">{ROTULO[entrada.kind]}</span>
+						<span class="tipo tipo--{entrada.kind}">{t(CHAVE_DO_TIPO[entrada.kind])}</span>
 						<span class="hora mono">{hora(entrada.at_ms)}</span>
 					</div>
 					<div class="linha">

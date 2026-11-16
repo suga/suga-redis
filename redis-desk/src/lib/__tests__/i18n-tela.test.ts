@@ -188,3 +188,17 @@ test("o aviso de valor binário também segue o idioma", async () => {
 	// da tela já seguia o idioma escolhido.
 	expect(screen.getByText("(binary, 3,072 bytes)")).toBeInTheDocument();
 });
+
+test("a validação do formulário de host fala o idioma", async () => {
+	const userEvent = (await import("@testing-library/user-event")).default;
+	const user = userEvent.setup();
+	definirIdioma("en");
+	const HostForm = (await import("$lib/HostForm.svelte")).default;
+
+	render(HostForm, { props: { host: null, onSaved: vi.fn(), onCancel: vi.fn() } });
+	await user.click(screen.getByRole("button", { name: "Save" }));
+
+	expect(await screen.findByRole("alert")).toHaveTextContent(
+		"Give the host a name.",
+	);
+});

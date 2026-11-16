@@ -158,3 +158,46 @@ test("o histórico redige a frase no idioma de quem lê, e respeita o que é vel
 	// A antiga não tem como ser redigida de novo: mostra o que foi gravado.
 	expect(entradas[1]).toHaveTextContent("Definir o valor de user:1001");
 });
+
+test("o botão de varrer dentro do aviso de índice velho também fala o idioma", async () => {
+	const { search } = await import("$lib/api");
+	vi.mocked(search).mockResolvedValue({
+		hits: [],
+		// Índice velho: é o estado que faz aparecer o aviso com o botão.
+		index_age_secs: 10_800,
+		stale_keys_removed: 0,
+		scanned: 0,
+		elapsed_ms: 1,
+	});
+
+	definirIdioma("en");
+	const SearchPanel = (await import("$lib/SearchPanel.svelte")).default;
+	const user = (await import("@testing-library/user-event")).default.setup();
+	render(SearchPanel, { props: { hostId: "h1", db: 0, onOpenKey: vi.fn() } });
+
+	await user.type(screen.getByPlaceholderText("text inside any key or value"), "x");
+	await user.click(screen.getByRole("button", { name: "Search" }));
+
+	expect(await screen.findByRole("button", { name: "Rescan" })).toBeInTheDocument();
+});
+
+test("o tipo de cada linha do log é traduzido", async () => {
+	const { logs } = await import("$lib/api");
+	vi.mocked(logs).mockResolvedValue([
+		{
+			at_ms: 0,
+			kind: "failure",
+			host: "pagamentos-prod",
+			db: 0,
+			operation: "connect",
+			duration_ms: 12,
+			detail: "connection refused",
+		},
+	]);
+
+	definirIdioma("es");
+	const LogPanel = (await import("$lib/LogPanel.svelte")).default;
+	render(LogPanel, { props: {} });
+
+	expect(await screen.findByText("fallo")).toBeInTheDocument();
+});

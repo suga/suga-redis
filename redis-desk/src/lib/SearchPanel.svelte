@@ -117,7 +117,7 @@
 							})}
 				</span>
 				<button onclick={varrerEBuscar} disabled={varrendo}>
-					{varrendo ? "Varrendo" : "Varrer de novo"}
+					{varrendo ? t("varredura.semTotal") : t("acao.varrerDeNovo")}
 				</button>
 			</div>
 		{/if}
