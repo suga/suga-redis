@@ -8,7 +8,7 @@ são o mesmo pixel na tela.
 
 ## O que aconteceu
 
-O host **host-serverless** (Valkey serverless, produção, TLS) foi aberto na
+Um host **Valkey serverless** de produção, por TLS, foi aberto na
 janela. A árvore mostrou *"Nenhuma chave neste banco"*. O cache **tem dado em
 produção**, confirmado pelo dono.
 
@@ -52,7 +52,7 @@ lugar onde ela possa ler o motivo depois.
 
 ## Não-objetivos
 
-- Não resolve o host-serverless. Dá a ferramenta para resolver.
+- Não resolve o incidente daquele host. Dá a ferramenta para resolver.
 - Não registra todo comando que sai — decisão do dono, ver Restrições.
 - Não guarda log em disco. Fechou o aplicativo, perdeu o log.
 - Não mexe na trie, na varredura nem na busca.
@@ -207,7 +207,7 @@ no log e a mostrar o estado de falha. Foi esse silêncio que escondeu o Hub.
 
 ## Como se sabe que funcionou
 
-Abrir o host-serverless e, em vez de uma árvore muda, ler na tela se ele
+Abrir aquele host e, em vez de uma árvore muda, ler na tela se ele
 conectou — e saber, olhando, qual das duas hipóteses está de pé:
 
 - se `db_sizes` estourou, a mensagem do erro aparece ao lado do seletor de

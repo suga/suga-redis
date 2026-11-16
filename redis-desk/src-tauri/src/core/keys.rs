@@ -1112,7 +1112,7 @@ mod tests {
         assert_eq!(api.full_prefix, "catalogo:");
 
         // Abrir um galho é consulta em memória, não varredura nova.
-        assert_eq!(rotulos(&trie, "catalogo:"), vec!["events", "fixtures"]);
+        assert_eq!(rotulos(&trie, "catalogo:"), vec!["eventos", "precos"]);
         assert_eq!(
             trie.level("catalogo:precos:").unwrap().children.len(),
             2,

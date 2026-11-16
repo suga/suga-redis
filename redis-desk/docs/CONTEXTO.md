@@ -20,8 +20,8 @@ posterior foi correção e desempenho em cima de uso real.
 
 Um segundo desenho, fechado nesta sessão (`docs/superpowers/specs/2026-11-05-conexao-visivel-design.md`
 e o plano que o segue), resolveu um problema mais estrutural do que
-desempenho: o aplicativo não dizia se estava conectado. Abrir o host
-**host-serverless** (Valkey serverless, produção, TLS) mostrou uma árvore
+desempenho: o aplicativo não dizia se estava conectado. Abrir um host
+**Valkey serverless** de produção, por TLS, mostrou uma árvore
 vazia, e não havia como saber, olhando a tela, se aquilo era um banco sem
 chaves ou uma pergunta que falhou. A causa desse incidente **segue aberta**
 (ver **Onde está incompleto**); o que esta leva de dez tarefas construiu foi
@@ -221,9 +221,9 @@ quando metadados inúteis eram coletados junto).
 
 ## Onde está incompleto
 
-### 1. O host-serverless: a causa raiz segue aberta
+### 1. O host serverless: a causa raiz segue aberta
 
-O host **host-serverless** (Valkey serverless, produção, TLS) respondeu
+Um host **Valkey serverless** de produção, por TLS, respondeu
 árvore vazia a uma pergunta cujo banco o dono confirma que **tem dado**.
 `PING` respondia; `SCAN` voltava cursor `0` com lote vazio, sem erro; o
 seletor de banco aparecia pelado, sem contagem. Duas hipóteses sobreviveram
@@ -249,13 +249,13 @@ Quem decide entre as duas hipóteses é a tela do `Workspace`:
 - nenhum erro na tela e o seletor com `0` chaves → o servidor **respondeu
   vazio de verdade**, e a hipótese que sobra é a do proxy/ACL/shard.
 
-**Ninguém ainda abriu o host-serverless no binário empacotado para olhar
+**Ninguém ainda abriu esse host no binário empacotado para olhar
 essas duas coisas** — essa leitura é o próximo passo, não um resultado
 desta sessão. Até lá, a causa raiz continua em aberto.
 
 ### 2. Nível com milhões de nomes distintos
 
-`sessao:token:` tem ~3,4 milhões de filhos distintos. O teto por nível é
+Um nível visto em uso tinha ~3,4 milhões de filhos distintos. O teto por nível é
 50.000; além dele, o botão **Carregar mais** revarre só aquele prefixo e
 estende a lista. São ~68 levas de ~45 s. Alcançável, **não fluido**.
 

@@ -36,7 +36,7 @@ function arvore(mapa: Record<string, Branch[]>, cortados: string[] = []) {
 	);
 }
 
-const RAIZ: Branch[] = [galho("catalogo", "", 24), galho("scheduler", "", 3_479_578)];
+const RAIZ: Branch[] = [galho("catalogo", "", 24), galho("sessao", "", 3_400_000)];
 
 function montar(raiz: Branch[] = RAIZ) {
 	return render(KeyTree, {
@@ -59,8 +59,8 @@ beforeEach(() => {
 test("a raiz vem pronta de fora, sem a árvore pedir nada", () => {
 	montar();
 
-	expect(screen.getByRole("button", { name: /scheduler/ })).toHaveTextContent(
-		"3.479.578",
+	expect(screen.getByRole("button", { name: /sessao/ })).toHaveTextContent(
+		"3.400.000",
 	);
 	// A raiz chega pelos retratos da varredura; abrir um galho é que consulta.
 	expect(nivel).not.toHaveBeenCalled();
@@ -69,14 +69,14 @@ test("a raiz vem pronta de fora, sem a árvore pedir nada", () => {
 test("abrir um galho lê a árvore em memória, sem varredura nova", async () => {
 	const user = userEvent.setup();
 	arvore({
-		"catalogo:": [galho("events", "catalogo:", 2), folha("total", "catalogo:")],
+		"catalogo:": [galho("eventos", "catalogo:", 2), folha("total", "catalogo:")],
 	});
 	montar();
 
 	await user.click(screen.getByRole("button", { name: /catalogo/ }));
 
 	await waitFor(() => expect(nivel).toHaveBeenCalledWith("h1", 0, "catalogo:"));
-	expect(await screen.findByRole("button", { name: /events/ })).toBeInTheDocument();
+	expect(await screen.findByRole("button", { name: /eventos/ })).toBeInTheDocument();
 });
 
 test("clicar numa folha entrega a chave inteira", async () => {
@@ -117,18 +117,18 @@ test("erro ao abrir um galho fica no galho, sem derrubar a árvore", async () =>
 	await user.click(screen.getByRole("button", { name: /catalogo/ }));
 
 	expect(await screen.findByRole("alert")).toHaveTextContent("Valkey");
-	expect(screen.getByRole("button", { name: /scheduler/ })).toBeInTheDocument();
+	expect(screen.getByRole("button", { name: /sessao/ })).toBeInTheDocument();
 });
 
 test("galho aberto acompanha a varredura em vez de congelar no que viu", async () => {
 	const user = userEvent.setup();
-	// Foi assim na tela: `fixtures` foi aberto quando tinha 1 chave; a
+	// Foi assim na tela: `precos` foi aberto quando tinha 1 chave; a
 	// varredura seguiu até 11, a contagem subiu, mas a lista continuou com 1.
 	let filhos = [folha("id=1", "catalogo:precos:")];
 	nivel.mockImplementation(async (_h, _db, prefix) => ({
 		children:
 			prefix === "catalogo:"
-				? [galho("fixtures", "catalogo:", filhos.length)]
+				? [galho("precos", "catalogo:", filhos.length)]
 				: filhos,
 		truncated: false,
 	}));
@@ -149,7 +149,7 @@ test("galho aberto acompanha a varredura em vez de congelar no que viu", async (
 	await user.click(screen.getByRole("button", { name: /catalogo/ }));
 	expect(await screen.findByRole("button", { name: /id=1/ })).toBeInTheDocument();
 
-	// A varredura avança: agora são 11 chaves sob `fixtures`.
+	// A varredura avança: agora são 11 chaves sob `precos`.
 	filhos = Array.from({ length: 11 }, (_, i) => folha(`id=${i + 1}`, "catalogo:precos:"));
 	await rerender({ root: [galho("catalogo", "", 11)], version: 1 });
 
