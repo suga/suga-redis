@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { t } from "$lib/i18n.svelte";
+	import { resumoDaOperacao } from "$lib/resumo";
 	/**
 	 * O pedido de escrita que o Claude mandou, esperando a decisão do dono.
 	 *
@@ -94,7 +95,9 @@
 			</div>
 		</dl>
 
-		<p class="resumo">{request.summary}</p>
+		<p class="resumo" data-testid="resumo-pedido">
+			{resumoDaOperacao(request.key, request.op)}
+		</p>
 
 		<label>
 			<span>{t("aprovacao.digiteNome")}</span>

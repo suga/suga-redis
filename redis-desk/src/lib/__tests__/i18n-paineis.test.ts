@@ -10,7 +10,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 vi.mock("$lib/api", () => ({
 	errorMessage: (err: unknown) => String(err),
 	search: vi.fn(async () => ({ hits: [], index_age_secs: -1, stale_keys_removed: 0 })),
-	history: vi.fn(async () => []),
+	listHistory: vi.fn(async () => []),
 	rollback: vi.fn(),
 	logs: vi.fn(async () => []),
 	approve: vi.fn(),
@@ -84,4 +84,77 @@ test("o pedido de escrita da LLM fala espanhol", async () => {
 	// A frase do título é o que diz a quem lê que quem pediu não foi ela.
 	expect(screen.getByRole("heading")).toHaveTextContent("Claude pidió una escritura");
 	expect(screen.getByRole("button", { name: "Rechazar" })).toBeInTheDocument();
+});
+
+test("o pedido da LLM descreve a escrita no idioma de quem lê", async () => {
+	definirIdioma("en");
+	const ApprovalDialog = (await import("$lib/ApprovalDialog.svelte")).default;
+
+	render(ApprovalDialog, {
+		props: {
+			request: {
+				id: "p1",
+				host_id: "h1",
+				host_name: "pagamentos-prod",
+				env: "prod",
+				db: 0,
+				key: "config:limite-diario",
+				// A frase que veio do Rust está em português; a tela não a usa.
+				summary: "Definir o valor de config:limite-diario",
+				op: { op: "set_string", value: { text: "8000", base64: null, truncated: false } },
+				asked_at: 0,
+			},
+			onSettled: vi.fn(),
+		},
+	});
+
+	expect(screen.getByTestId("resumo-pedido")).toHaveTextContent(
+		"Set the value of config:limite-diario",
+	);
+});
+
+test("o histórico redige a frase no idioma de quem lê, e respeita o que é velho", async () => {
+	const { listHistory } = await import("$lib/api");
+	vi.mocked(listHistory).mockResolvedValue([
+		{
+			id: 2,
+			host_id: "h1",
+			host_name: "pagamentos-prod",
+			env: "prod",
+			db: 0,
+			key: "wallet:1001",
+			summary: "Definir o campo \"saldo\" de wallet:1001",
+			op: { op: "set_hash_field", field: "saldo", value: { text: "10", base64: null, truncated: false } },
+			before_json: null,
+			after_json: null,
+			actor: "human",
+			at: 0,
+			rolled_back: false,
+		},
+		{
+			// Entrada gravada antes da coluna existir: só resta a frase.
+			id: 1,
+			host_id: "h1",
+			host_name: "pagamentos-prod",
+			env: "prod",
+			db: 0,
+			key: "user:1001",
+			summary: "Definir o valor de user:1001",
+			op: null,
+			before_json: null,
+			after_json: null,
+			actor: "human",
+			at: 0,
+			rolled_back: false,
+		},
+	]);
+
+	definirIdioma("en");
+	const HistoryPanel = (await import("$lib/HistoryPanel.svelte")).default;
+	render(HistoryPanel, { props: { hostId: "h1", onRolledBack: vi.fn() } });
+
+	const entradas = await screen.findAllByTestId("entrada");
+	expect(entradas[0]).toHaveTextContent("Set the field “saldo” of wallet:1001");
+	// A antiga não tem como ser redigida de novo: mostra o que foi gravado.
+	expect(entradas[1]).toHaveTextContent("Definir o valor de user:1001");
 });

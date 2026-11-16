@@ -32,6 +32,7 @@ function entrada(partes: Partial<HistoryEntry> = {}): HistoryEntry {
 		db: 0,
 		key: "sessao:alpha",
 		summary: "Definir o valor de sessao:alpha",
+		op: null,
 		before_json: instantaneo("antes"),
 		after_json: instantaneo("depois"),
 		actor: "human",

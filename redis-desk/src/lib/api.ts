@@ -169,7 +169,13 @@ export interface HistoryEntry {
 	env: Env;
 	db: number;
 	key: string;
+	/** A frase gravada quando a escrita aconteceu, em português. */
 	summary: string;
+	/**
+	 * A operação que gerou a entrada. A tela monta a frase a partir dela, no
+	 * idioma de quem lê; `null` nas entradas antigas, que só têm `summary`.
+	 */
+	op: WriteOp | null;
 	before_json: string | null;
 	after_json: string | null;
 	actor: Actor;

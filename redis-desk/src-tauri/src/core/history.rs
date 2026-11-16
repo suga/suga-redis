@@ -65,6 +65,10 @@ pub struct HistoryEntry {
     pub db: u8,
     pub key: String,
     pub summary: String,
+    /// A operação que gerou a entrada, para a tela montar a frase no idioma
+    /// de quem lê. `None` nas entradas gravadas antes desta coluna existir —
+    /// nelas só resta a frase em português de `summary`.
+    pub op: Option<WriteOp>,
     pub before_json: Option<String>,
     pub after_json: Option<String>,
     pub actor: Actor,
@@ -369,6 +373,10 @@ impl History {
     pub fn open(db_path: &Path) -> Result<History> {
         let conn = super::sqlite::open_shared(db_path)?;
         conn.execute_batch(SCHEMA)?;
+        // Bancos criados antes desta coluna existirem continuam abrindo: o
+        // erro de "duplicate column name" é o único sinal que o SQLite dá
+        // de que a migração já rodou, e ignorá-lo é o idioma da casa.
+        let _ = conn.execute("ALTER TABLE history ADD COLUMN op_json TEXT", []);
 
         Ok(History {
             conn: Mutex::new(conn),
@@ -384,6 +392,7 @@ impl History {
         db: u8,
         key: &str,
         summary: &str,
+        op_json: Option<&str>,
         before_json: Option<&str>,
         actor: Actor,
         at: i64,
@@ -391,8 +400,8 @@ impl History {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO history
-                (host_id, host_name, env, db, key, summary, before_json, after_json, actor, at, rolled_back)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, 0)",
+                (host_id, host_name, env, db, key, summary, op_json, before_json, after_json, actor, at, rolled_back)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10, 0)",
             params![
                 host.id,
                 host.name,
@@ -400,6 +409,7 @@ impl History {
                 db as i64,
                 key,
                 summary,
+                op_json,
                 before_json,
                 actor_to_str(actor),
                 at,
@@ -465,7 +475,19 @@ impl History {
         };
 
         let summary = op_summary(key, op);
-        let id = self.insert_entry(host, db, key, &summary, before_json.as_deref(), actor, now)?;
+        // A operação vai junto da frase: a frase é o registro do que foi
+        // feito, a operação é o que deixa a tela redizê-lo noutro idioma.
+        let op_json = serde_json::to_string(op).ok();
+        let id = self.insert_entry(
+            host,
+            db,
+            key,
+            &summary,
+            op_json.as_deref(),
+            before_json.as_deref(),
+            actor,
+            now,
+        )?;
 
         if let Err(err) = apply_write(pool, host, pw, db, key, op).await {
             self.delete_row(id)?;
@@ -485,7 +507,7 @@ impl History {
     pub fn list(&self, host_id: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, host_id, host_name, env, db, key, summary, before_json, after_json, actor, at, rolled_back
+            "SELECT id, host_id, host_name, env, db, key, summary, op_json, before_json, after_json, actor, at, rolled_back
              FROM history WHERE host_id = ?1 ORDER BY at DESC LIMIT ?2",
         )?;
         let rows = stmt
@@ -499,7 +521,7 @@ impl History {
     pub fn get(&self, id: i64) -> Result<HistoryEntry> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, host_id, host_name, env, db, key, summary, before_json, after_json, actor, at, rolled_back
+            "SELECT id, host_id, host_name, env, db, key, summary, op_json, before_json, after_json, actor, at, rolled_back
              FROM history WHERE id = ?1",
         )?;
         let raw = stmt
@@ -592,6 +614,7 @@ struct RawEntry {
     db: u8,
     key: String,
     summary: String,
+    op_json: Option<String>,
     before_json: Option<String>,
     after_json: Option<String>,
     actor: String,
@@ -609,6 +632,12 @@ impl RawEntry {
             db: self.db,
             key: self.key,
             summary: self.summary,
+            // Uma operação que não decodifica não derruba a leitura do
+            // histórico: a entrada ainda vale pelo resto do que guarda.
+            op: self
+                .op_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str(j).ok()),
             before_json: self.before_json,
             after_json: self.after_json,
             actor: actor_from_str(&self.actor)?,
@@ -627,11 +656,12 @@ fn row_to_raw_entry(row: &rusqlite::Row) -> rusqlite::Result<RawEntry> {
         db: row.get::<_, i64>(4)? as u8,
         key: row.get(5)?,
         summary: row.get(6)?,
-        before_json: row.get(7)?,
-        after_json: row.get(8)?,
-        actor: row.get(9)?,
-        at: row.get(10)?,
-        rolled_back: row.get::<_, i64>(11)? != 0,
+        op_json: row.get(7)?,
+        before_json: row.get(8)?,
+        after_json: row.get(9)?,
+        actor: row.get(10)?,
+        at: row.get(11)?,
+        rolled_back: row.get::<_, i64>(12)? != 0,
     })
 }
 
@@ -953,6 +983,37 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let history = History::open(&dir.path().join("suga-redis.sqlite")).unwrap();
         (dir, history)
+    }
+
+    #[tokio::test]
+    async fn a_entrada_guarda_a_operacao_e_nao_so_a_frase() {
+        // A frase nasce aqui em português; quem a mostra é a tela, no
+        // idioma de quem está lendo. Para isso ela precisa da operação, e
+        // não do texto pronto — que fica como registro do que foi feito.
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_test:guarda_a_operacao";
+        del(&mut conn, &[key]).await;
+
+        let (_dir, history) = open_history();
+        let op = WriteOp::SetHashField {
+            field: "saldo".to_string(),
+            value: text("10"),
+        };
+
+        let id = history
+            .write_with_backup(&pool, &host, None, host.db, key, &op, Actor::Human)
+            .await
+            .unwrap();
+        del(&mut conn, &[key]).await;
+
+        let entry = history.get(id).unwrap();
+        let guardada = entry.op.expect("a entrada precisa carregar a operação");
+        match guardada {
+            WriteOp::SetHashField { field, .. } => assert_eq!(field, "saldo"),
+            outra => panic!("operação errada no histórico: {outra:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1599,6 +1660,7 @@ mod tests {
                     &format!("chave_recente_{i}"),
                     "resumo",
                     None,
+                    None,
                     Actor::Human,
                     now - i * 1000,
                 )
@@ -1613,6 +1675,7 @@ mod tests {
                     host.db,
                     &format!("chave_antiga_{i}"),
                     "resumo",
+                    None,
                     None,
                     Actor::Human,
                     now - 40 * DAY_MS - i * 1000,
@@ -1636,6 +1699,7 @@ mod tests {
                     other_host.db,
                     &format!("chave_b_{i}"),
                     "resumo",
+                    None,
                     None,
                     Actor::Human,
                     now - i * 1000,
@@ -1687,10 +1751,10 @@ mod tests {
         let now = now_unix_ms_for_test();
 
         let human_id = history
-            .insert_entry(&host, host.db, "chave", "resumo", None, Actor::Human, now)
+            .insert_entry(&host, host.db, "chave", "resumo", None, None, Actor::Human, now)
             .unwrap();
         let llm_id = history
-            .insert_entry(&host, host.db, "chave", "resumo", None, Actor::Llm, now)
+            .insert_entry(&host, host.db, "chave", "resumo", None, None, Actor::Llm, now)
             .unwrap();
 
         assert_eq!(history.get(human_id).unwrap().actor, Actor::Human);

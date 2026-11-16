@@ -14,6 +14,7 @@
 	import ValuePanel from "$lib/ValuePanel.svelte";
 	import { haQuantoTempo, numero } from "$lib/formato";
 	import { t } from "$lib/i18n.svelte";
+	import { resumoDaOperacao } from "$lib/resumo";
 	import {
 		errorMessage,
 		listDbs,
@@ -558,7 +559,7 @@
 
 {#if criacaoPendente}
 	<ConfirmDialog
-		summary={criacaoPendente.summary}
+		summary={resumoDaOperacao(criacaoPendente.key, criacaoPendente.op)}
 		onConfirm={() =>
 			criacaoPendente &&
 			aplicarCriacao(criacaoPendente.key, criacaoPendente.op, true)}

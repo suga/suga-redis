@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { t } from "$lib/i18n.svelte";
+	import { resumoDaOperacao } from "$lib/resumo";
 	/**
 	 * Põe o editor do tipo na tela e cuida de TUDO que envolve escrever.
 	 *
@@ -157,7 +158,7 @@
 
 {#if pendente}
 	<ConfirmDialog
-		summary={pendente.summary}
+		summary={resumoDaOperacao(view.key, pendente.op)}
 		onConfirm={confirmar}
 		onCancel={() => (pendente = null)}
 		busy={salvando}

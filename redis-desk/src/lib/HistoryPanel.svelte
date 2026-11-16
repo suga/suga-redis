@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { idioma, t } from "$lib/i18n.svelte";
+	import { resumoDaOperacao } from "$lib/resumo";
 	/**
 	 * O histórico de mudanças do host, mais recente primeiro.
 	 *
@@ -127,7 +128,11 @@
 			{#each entradas as entrada (entrada.id)}
 				<li data-testid="entrada" class:revertida={entrada.rolled_back}>
 					<div class="cabeca">
-						<span class="resumo">{entrada.summary}</span>
+						<span class="resumo">
+							{entrada.op
+								? resumoDaOperacao(entrada.key, entrada.op)
+								: entrada.summary}
+						</span>
 						{#if entrada.rolled_back}
 							<span class="marca">{t("historico.jaRevertida")}</span>
 						{:else}
