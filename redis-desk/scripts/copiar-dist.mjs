@@ -13,6 +13,11 @@ const PASTAS = ["macos", "dmg", "appimage", "deb"];
  *  imagem — artefatos de build, não coisas para alguém baixar. */
 const NAO_SAO_PACOTES = new Set(["bundle_dmg.sh", "icon.icns"]);
 
+/** Ninguém instala um `.sig` nem o `.app.tar.gz`: são o pacote de
+ *  atualização e a assinatura dele, lidos pelo updater dentro do app. Quem
+ *  publica a release é o workflow, que os pega direto do `bundle/`. */
+const SAO_DO_UPDATER = (nome) => nome.endsWith(".sig") || nome.endsWith(".app.tar.gz");
+
 if (!existsSync(ORIGEM)) {
 	console.error(`Nada em ${ORIGEM}. Rode o build antes: npm run tauri build`);
 	process.exit(1);
@@ -27,7 +32,7 @@ for (const pasta of PASTAS) {
 	if (!existsSync(caminho)) continue;
 
 	for (const item of await readdir(caminho)) {
-		if (NAO_SAO_PACOTES.has(item)) continue;
+		if (NAO_SAO_PACOTES.has(item) || SAO_DO_UPDATER(item)) continue;
 		await cp(join(caminho, item), join(DESTINO, item), { recursive: true });
 		console.log(`  ${item}`);
 		copiados += 1;

@@ -57,7 +57,70 @@ cargo fmt --check
 cargo clippy --all-targets
 ```
 
-## Gerar os pacotes
+## Soltar uma versão
+
+O caminho normal. Não compile na sua máquina para distribuir: o GitHub
+Actions constrói as duas plataformas a partir da mesma tag.
+
+```bash
+npm run versao 0.2.0     # sobe a versão nos 4 lugares, roda os testes, commita, cria a tag
+git push && git push origin v0.2.0
+```
+
+O `npm run versao` para antes do `push` de propósito: até ali tudo é local
+e desfazível (ele mesmo diz como desfazer). Empurrar a tag é o gesto que
+publica uma release pública e dispara o aviso de atualização em todo app
+instalado.
+
+O que o workflow faz, em `../.github/workflows/release.yml`:
+
+| Máquina | Sai de lá |
+|---|---|
+| `macos-latest` | `.dmg` universal (Apple Silicon + Intel) |
+| `ubuntu-22.04` | `.AppImage` e `.deb`, x86_64 |
+
+Mais o `latest.json` — o manifesto que o app lê para saber que existe versão
+nova — e a assinatura de cada pacote de atualização.
+
+O Ubuntu é o 22.04, e não o mais recente, porque o AppImage exige em quem o
+roda a mesma glibc contra a qual foi compilado: construir no mais antigo que
+ainda tenha `webkit2gtk-4.1` é o que faz o pacote abrir em mais lugares.
+
+### A chave que assina as atualizações
+
+O updater não instala o que não estiver assinado com a chave do projeto. É
+isso que permite servir a atualização de uma URL pública sem risco: o
+endereço qualquer um alcança, mas só quem tem a chave privada produz algo
+que o app aceite.
+
+- **Pública** — está em `src-tauri/tauri.conf.json`, commitada. É o lugar
+  dela: serve só para verificar.
+- **Privada** — foi gerada em `~/.suga-redis/updater.key` e **não** está no
+  repositório. O workflow a lê de dois Secrets do GitHub
+  (*Settings → Secrets and variables → Actions*):
+
+| Secret | Valor |
+|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | o conteúdo do arquivo `~/.suga-redis/updater.key` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | vazio (a chave foi gerada sem senha) |
+
+> **Guarde a chave privada em outro lugar também.** Perdê-la não quebra
+> quem já tem o app, mas nenhuma atualização futura será aceita por quem
+> está instalado: a chave pública que eles carregam não vai mais conferir
+> com nada. O conserto seria todo mundo reinstalar na mão.
+
+Para gerar outro par (só se a chave atual se perder ou vazar):
+
+```bash
+npx tauri signer generate -w ~/.suga-redis/updater.key
+```
+
+...e trocar `pubkey` no `tauri.conf.json` pelo conteúdo do `.pub`.
+
+## Compilar na mão
+
+Para testar localmente antes de soltar uma versão. Para distribuir, use
+*Soltar uma versão* acima — não mande um pacote compilado na sua máquina.
 
 ### macOS
 

@@ -1,0 +1,102 @@
+# O portão de todo dia: roda a cada push e a cada pull request.
+#
+# Não empacota nada — compilar o aplicativo inteiro leva minutos e não é o
+# que responde "esta mudança quebrou alguma coisa?". O build de verdade
+# acontece em `release.yml`, quando já se decidiu soltar uma versão.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+jobs:
+  interface:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: redis-desk/package-lock.json
+
+      - name: instalar dependências
+        working-directory: redis-desk
+        run: npm ci
+
+      - name: tipos
+        working-directory: redis-desk
+        run: npm run check
+
+      - name: testes
+        working-directory: redis-desk
+        run: npm test
+
+  nucleo:
+    runs-on: ubuntu-22.04
+
+    # Os testes de Rust falam com um Redis de verdade — é a escolha do
+    # projeto, e é o que dá confiança neles. Na porta 6399, a mesma que o
+    # `scripts/test-redis.sh` usa na máquina de quem desenvolve.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: dependências do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: redis-desk/src-tauri -> target
+
+      # O `tauri::generate_context!` lê o `frontendDist`, que só existe
+      # depois do build da interface. Sem isto o cargo nem compila.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: redis-desk/package-lock.json
+
+      - name: construir a interface
+        working-directory: redis-desk
+        run: |
+          npm ci
+          npm run build
+
+      - name: formato
+        working-directory: redis-desk/src-tauri
+        run: cargo fmt --check
+
+      # Sem `-D warnings` por enquanto: o código tem 3 avisos antigos
+      # (duas funções com argumentos demais, um `assert_eq!` com literal
+      # booleano) que são refatoração de verdade, não ajuste de CI. Com eles
+      # resolvidos, trocar por `-- -D warnings` trava a regressão.
+      - name: clippy
+        working-directory: redis-desk/src-tauri
+        run: cargo clippy --all-targets
+
+      - name: testes
+        working-directory: redis-desk/src-tauri
+        run: cargo test

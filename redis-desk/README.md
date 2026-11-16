@@ -107,8 +107,8 @@ produção pergunta *onde* a mudança cai; esta trava pergunta *quem* pediu.
 
 ### macOS
 
-Gere os pacotes com `npm run dist` (veja [`docs/build.md`](docs/build.md)) e
-abra o `.dmg` que aparece em `dist/`, arrastando o app para `Aplicativos`.
+Baixe o `.dmg` da [página de releases][releases] e arraste o app para
+`Aplicativos`. O mesmo arquivo serve para Apple Silicon e para Intel.
 
 O app é assinado só em modo *ad-hoc*: não tem Developer ID nem passou pela
 notarização da Apple. Então, na primeira vez, o macOS vai barrar — ele não
@@ -131,18 +131,38 @@ pacote que veio de uma fonte que você conhece.
 
 ### Linux
 
-Pegue o `.AppImage` gerado em `dist/`:
+Baixe o `.AppImage` da [página de releases][releases] (x86_64):
 
 ```bash
 chmod +x Suga-Redis_*.AppImage
 ./Suga-Redis_*.AppImage
 ```
 
-Ou instale o `.deb`:
+Ou o `.deb`:
 
 ```bash
 sudo dpkg -i suga-redis_*.deb
 ```
+
+Prefira o **AppImage** se quiser atualização automática: é o formato que o
+app sabe trocar sozinho. O `.deb` funciona igual, mas cada versão nova você
+instala na mão.
+
+### Atualizar
+
+Não precisa acompanhar lançamento nenhum. Ao abrir, o app pergunta ao
+GitHub se existe versão mais nova e, se existir, avisa num canto da tela
+com o que mudou. Você decide: **Atualizar** baixa e reabre o app sozinho,
+**Agora não** fecha o aviso até a próxima abertura.
+
+Nada é instalado sem você mandar, e o pacote baixado é verificado contra a
+chave do projeto antes de substituir qualquer coisa — um pacote que não
+confira é recusado. Se a atualização falhar no meio (rede caiu, por
+exemplo), a versão instalada continua intacta.
+
+O `.deb` é a exceção: ele avisa, mas a troca é manual.
+
+[releases]: https://github.com/marco-sugamele/suga-redis/releases/latest
 
 ### Compilar você mesmo
 
