@@ -101,15 +101,29 @@ jobs:
       # A senha do host mora no chaveiro do sistema, e os testes exercitam
       # esse caminho de verdade em vez de dublê. No Linux o chaveiro é o
       # `org.freedesktop.secrets`, que fala por D-Bus — e um runner de CI
-      # não tem sessão gráfica, logo não tem nenhum dos dois. Sem isto, 17
-      # testes morrem com `ServiceUnknown` por falta de ambiente, não por
-      # defeito no código.
+      # não tem sessão gráfica, logo não tem nenhum dos dois.
       #
-      # `--unlock` lendo stdin vazio abre um chaveiro com senha vazia: ele
-      # nasce e morre dentro deste job, e nunca guardou nada de ninguém.
+      # Subir o daemon não basta: sem um chaveiro de login já existente ele
+      # tenta CRIAR um, e criar passa por um prompt gráfico (`gcr-prompter`)
+      # que morre com "cannot open display". Por isso o arquivo é escrito
+      # antes, à mão: um chaveiro sem senha, em texto puro, que o daemon
+      # encontra pronto e simplesmente abre.
+      #
+      # Ele nasce e morre dentro deste job, e nunca guardou nada de ninguém.
       - name: testes
         working-directory: redis-desk/src-tauri
         run: |
+          mkdir -p "$HOME/.local/share/keyrings"
+          cat > "$HOME/.local/share/keyrings/login.keyring" <<'EOF'
+          [keyring]
+          display-name=login
+          ctime=0
+          mtime=0
+          lock-on-idle=false
+          lock-after=false
+          EOF
+          printf 'login' > "$HOME/.local/share/keyrings/default"
+
           dbus-run-session -- bash -c '
             echo -n "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1 &
             sleep 3
