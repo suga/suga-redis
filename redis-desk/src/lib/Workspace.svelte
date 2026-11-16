@@ -13,6 +13,7 @@
 	import SearchPanel from "$lib/SearchPanel.svelte";
 	import ValuePanel from "$lib/ValuePanel.svelte";
 	import { haQuantoTempo, numero } from "$lib/formato";
+	import { t } from "$lib/i18n.svelte";
 	import {
 		errorMessage,
 		listDbs,
@@ -135,12 +136,12 @@
 
 	type Aba = "valor" | "busca" | "historico" | "logs";
 	let aba = $state<Aba>("valor");
-	const ABAS: { id: Aba; label: string }[] = [
-		{ id: "valor", label: "Valor" },
-		{ id: "busca", label: "Busca" },
-		{ id: "historico", label: "Histórico" },
-		{ id: "logs", label: "Logs" },
-	];
+	const ABAS = [
+		{ id: "valor", chave: "aba.valor" },
+		{ id: "busca", chave: "aba.busca" },
+		{ id: "historico", chave: "aba.historico" },
+		{ id: "logs", chave: "aba.logs" },
+	] as const satisfies { id: Aba; chave: Parameters<typeof t>[0] }[];
 
 	onMount(() => {
 		const pararVarredura = onRescanProgress((p) => (progresso = p));
@@ -404,13 +405,13 @@
 				escrever qualquer coisa na tela.
 			-->
 			<label class="banco">
-				<span>Banco</span>
+				<span>{t("campo.banco")}</span>
 				<select bind:value={db} disabled={varrendo}>
 					{#if bancos.length === 0}
 						<option value={db}>{db}</option>
 					{:else}
 						{#each bancos as [indice, chaves] (indice)}
-							<option value={indice}>{indice} — {numero(chaves)} chaves</option>
+							<option value={indice}>{t("banco.opcao", { indice, chaves: numero(chaves) })}</option>
 						{/each}
 					{/if}
 				</select>
@@ -423,30 +424,36 @@
 				<input
 					class="filtro"
 					bind:value={filtro}
-					placeholder="Filtrar o que está aberto"
-					aria-label="Filtrar chaves por nome"
+					placeholder={t("filtro.placeholder")}
+					aria-label={t("filtro.rotulo")}
 				/>
-				<button onclick={() => (criando = true)}>Nova chave</button>
+				<button onclick={() => (criando = true)}>{t("acao.novaChave")}</button>
 			</div>
 
 			<div class="varredura">
 				<span class="idade">
 					{#if varrendo && progresso}
-						Varrendo {numero(progresso.scanned)} de
-						{numero(progresso.total_estimate)}
+						{t("varredura.andamento", {
+							lidas: numero(progresso.scanned),
+							total: numero(progresso.total_estimate),
+						})}
 					{:else if varrendo}
-						Varrendo…
+						{t("varredura.semTotal")}
 					{:else if relatorio}
-						Índice de busca: {haQuantoTempo(Math.max(0, Math.round((Date.now() - relatorio.finished_at) / 1000)))}
+						{t("indice.idade", {
+							quando: haQuantoTempo(
+								Math.max(0, Math.round((Date.now() - relatorio.finished_at) / 1000)),
+							),
+						})}
 					{:else if erroIndice}
-						Índice de busca: não foi possível perguntar
+						{t("indice.naoDeu")}
 					{:else if perguntandoIndice}
-						Índice de busca: perguntando ao servidor…
+						{t("indice.perguntando")}
 					{:else}
-						Índice de busca: nunca varrido
+						{t("indice.nunca")}
 					{/if}
 				</span>
-				<button onclick={varrer} disabled={varrendo}>Varrer de novo</button>
+				<button onclick={varrer} disabled={varrendo}>{t("acao.varrerDeNovo")}</button>
 			</div>
 			{#if erroIndice}
 				<p class="erro" role="alert" data-testid="erro-indice">{erroIndice}</p>
@@ -456,7 +463,7 @@
 		{#if lendo}
 			<div class="lendo" data-testid="lendo">
 				<p class="lendo-linha">
-					Lendo as chaves em segundo plano
+					{t("leitura.emSegundoPlano")}
 					{#if lendo.total_estimate > 0}
 						<span class="mono">
 							{porcentagem}% ({numero(lendo.scanned)} de {numero(lendo.total_estimate)})
@@ -469,7 +476,7 @@
 					aria-valuenow={porcentagem}
 					aria-valuemin="0"
 					aria-valuemax="100"
-					aria-label="Progresso da leitura das chaves"
+					aria-label={t("leitura.rotulo")}
 				>
 					<div class="barra-cheia" style="width: {porcentagem}%"></div>
 				</div>
@@ -504,7 +511,7 @@
 					aria-current={aba === item.id ? "page" : undefined}
 					onclick={() => (aba = item.id)}
 				>
-					{item.label}
+					{t(item.chave)}
 				</button>
 			{/each}
 		</nav>
@@ -539,7 +546,7 @@
 				</ValuePanel>
 			{/key}
 		{:else}
-			<p class="aviso">Escolha uma chave na árvore.</p>
+			<p class="aviso">{t("arvore.escolhaChave")}</p>
 		{/if}
 		</div>
 	</div>

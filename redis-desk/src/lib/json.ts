@@ -6,6 +6,8 @@
  * token custaria mais do que resolve.
  */
 
+import { t } from "$lib/i18n.svelte";
+
 /** Um pedaço do texto, com o papel dele — ou `null` para pontuação e espaço. */
 export interface TokenJson {
 	classe: "chave" | "texto" | "numero" | "booleano" | "nulo" | null;
@@ -202,13 +204,13 @@ export function validarJson(texto: string): string | null {
 	} catch {
 		const posicao = localizarFalha(texto);
 		if (posicao === null) {
-			return "JSON inválido: o conteúdo não pôde ser interpretado.";
+			return t("json.invalido");
 		}
 
 		const ate = texto.slice(0, posicao);
 		const linha = ate.split("\n").length;
 		const coluna = posicao - ate.lastIndexOf("\n");
-		return `JSON inválido na linha ${linha}, coluna ${coluna}.`;
+		return t("json.invalidoEm", { linha, coluna });
 	}
 }
 

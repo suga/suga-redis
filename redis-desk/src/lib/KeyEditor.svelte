@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * Põe o editor do tipo na tela e cuida de TUDO que envolve escrever.
 	 *
@@ -60,10 +61,10 @@
 
 	/** Unidades oferecidas, da mais curta para a mais longa. */
 	const UNIDADES = [
-		{ id: "s", label: "segundos", ms: 1000 },
-		{ id: "min", label: "minutos", ms: 60_000 },
-		{ id: "h", label: "horas", ms: 3_600_000 },
-		{ id: "d", label: "dias", ms: 86_400_000 },
+		{ id: "s", chave: "unidade.s", ms: 1000 },
+		{ id: "min", chave: "unidade.min", ms: 60_000 },
+		{ id: "h", chave: "unidade.h", ms: 3_600_000 },
+		{ id: "d", chave: "unidade.d", ms: 86_400_000 },
 	] as const;
 
 	// `bind:value` num input numérico entrega número (ou `null` quando o
@@ -113,14 +114,14 @@
 
 			<div class="prazo-campos">
 				<label class="quanto">
-					<span>Novo prazo</span>
+					<span>{t("prazo.novo")}</span>
 					<input type="number" min="1" bind:value={quanto} class="mono" />
 				</label>
 				<label class="unidade">
-					<span>Unidade do prazo</span>
+					<span>{t("prazo.unidade")}</span>
 					<select bind:value={unidade}>
 						{#each UNIDADES as u (u.id)}
-							<option value={u.id}>{u.label}</option>
+							<option value={u.id}>{t(u.chave)}</option>
 						{/each}
 					</select>
 				</label>

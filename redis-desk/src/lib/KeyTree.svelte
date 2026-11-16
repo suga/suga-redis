@@ -15,6 +15,7 @@
 	import { SvelteMap, SvelteSet } from "svelte/reactivity";
 	import { errorMessage, loadMoreChildren, treeLevel, type Branch } from "$lib/api";
 	import { numero } from "$lib/formato";
+	import { t } from "$lib/i18n.svelte";
 
 	interface Props {
 		hostId: string;
@@ -205,7 +206,7 @@
 			if (!estado) return null;
 			if (estado.situacao === "pronto") return estado.filhos;
 			if (estado.situacao === "carregando") {
-				out.push({ tipo: "aviso", depth, aberto: false, texto: "Lendo…", papel: "carregando" });
+				out.push({ tipo: "aviso", depth, aberto: false, texto: t("arvore.lendo"), papel: "carregando" });
 			} else if (estado.situacao === "ainda-nao") {
 				out.push({
 					tipo: "aviso",
@@ -292,7 +293,7 @@
 	onscroll={(e) => (scrollTop = e.currentTarget.scrollTop)}
 >
 	{#if linhas.length === 0}
-		<p class="vazio">Nenhuma chave neste banco.</p>
+		<p class="vazio">{t("arvore.bancoVazio")}</p>
 	{:else}
 		<div class="pista" style="height: {linhas.length * ROW_HEIGHT}px">
 			<div class="janela" style="transform: translateY({inicio * ROW_HEIGHT}px)">
@@ -327,7 +328,7 @@
 								disabled={buscandoMais.has(alvoPrefixo)}
 								onclick={() => carregarMais(alvoPrefixo)}
 							>
-								{buscandoMais.has(alvoPrefixo) ? "Carregando…" : "Carregar mais"}
+								{buscandoMais.has(alvoPrefixo) ? t("acao.carregando") : t("acao.carregarMais")}
 							</button>
 						</div>
 					{:else}

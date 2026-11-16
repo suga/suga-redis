@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	import { untrack } from "svelte";
 	import { textBytes, type Bytes, type ValueView, type WriteOp } from "$lib/api";
 
@@ -38,19 +39,19 @@
 					<th class="mono" scope="row">{item.indice}</th>
 					<td>
 						{#if item.original === null}
-							<span class="binario">Valor binário: não editável como texto</span>
+							<span class="binario">{t("binario.naoEditavel")}</span>
 						{:else}
 							<input
 								class="mono"
 								bind:value={item.texto}
-								aria-label="Valor do item {item.indice}"
+								aria-label={t("lista.valorDoItem", { indice: item.indice })}
 							/>
 						{/if}
 					</td>
 					<td class="acoes-linha">
 						<button
 							type="button"
-							aria-label="Salvar item {item.indice}"
+							aria-label={t("lista.salvarItem", { indice: item.indice })}
 							disabled={busy || item.original === null || item.texto === item.original}
 							onclick={() =>
 								onSubmit({
@@ -64,7 +65,7 @@
 						<button
 							type="button"
 							class="danger"
-							aria-label="Remover item {item.indice}"
+							aria-label={t("lista.removerItem", { indice: item.indice })}
 							disabled={busy}
 							onclick={() => onSubmit({ op: "remove_list_item", index: item.indice })}
 						>
@@ -77,10 +78,10 @@
 	</table>
 
 	<div class="novo">
-		<input bind:value={novo} class="mono" aria-label="Novo item" placeholder="valor" />
+		<input bind:value={novo} class="mono" aria-label={t("lista.novoItem")} placeholder={t("hash.placeholderValor")} />
 		<label class="ponta">
 			<input type="checkbox" bind:checked={naFrente} />
-			<span>No começo da lista</span>
+			<span>{t("lista.noComeco")}</span>
 		</label>
 		<button
 			type="button"
@@ -90,7 +91,7 @@
 				novo = "";
 			}}
 		>
-			Adicionar item
+			{t("lista.adicionarItem")}
 		</button>
 	</div>
 </div>

@@ -114,3 +114,44 @@ test("o diálogo de nova chave fala espanhol", async () => {
 	expect(screen.getByRole("heading")).toHaveTextContent("Nueva clave");
 	expect(screen.getByRole("button", { name: "Crear" })).toBeInTheDocument();
 });
+
+test("o editor de string e a validação de JSON falam inglês", async () => {
+	definirIdioma("en");
+	const StringEditor = (await import("$lib/editors/StringEditor.svelte")).default;
+	const { validarJson } = await import("$lib/json");
+
+	render(StringEditor, {
+		props: {
+			view: {
+				key: "user:1001",
+				kind: "string",
+				ttl_ms: null,
+				size_bytes: 7,
+				value: {
+					kind: "string",
+					data: { text: '{"a":1}', base64: null, truncated: false },
+				},
+				total_elements: 1,
+				truncated: false,
+			},
+			onSubmit: vi.fn(),
+			busy: false,
+		},
+	});
+
+	expect(screen.getByRole("button", { name: "Format JSON" })).toBeInTheDocument();
+	expect(screen.getByRole("button", { name: "Save" })).toBeInTheDocument();
+	// A mensagem do validador é texto de tela como qualquer outro.
+	expect(validarJson('{"a": 1,}')).toBe("Invalid JSON at line 1, column 9.");
+});
+
+test("o painel de valor fala espanhol", async () => {
+	definirIdioma("es");
+	const ValuePanel = (await import("$lib/ValuePanel.svelte")).default;
+
+	render(ValuePanel, {
+		props: { hostId: "h1", db: 0, keyName: "user:1001", onKeyGone: vi.fn() },
+	});
+
+	expect(screen.getByText("Cargando la clave…")).toBeInTheDocument();
+});

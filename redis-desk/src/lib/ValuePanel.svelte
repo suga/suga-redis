@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * O painel de uma chave: cabeçalho com tipo, tamanho e prazo, e o
 	 * conteúdo abaixo.
@@ -166,29 +167,29 @@
 	{#if erro}
 		<p class="erro" role="alert">{erro}</p>
 	{:else if carregando && !view}
-		<p class="aviso">Carregando a chave…</p>
+		<p class="aviso">{t("valor.carregando")}</p>
 	{:else if view}
 		<header>
 			<h2 class="mono">{view.key}</h2>
 			<dl>
 				<div>
-					<dt>Tipo</dt>
+					<dt>{t("valor.tipo")}</dt>
 					<dd class="mono" data-testid="kind">{nomeDoTipo(view.kind)}</dd>
 				</div>
 				<div>
-					<dt>Tamanho</dt>
+					<dt>{t("valor.tamanho")}</dt>
 					<dd class="mono">{formatarTamanho(view.size_bytes)}</dd>
 				</div>
 				{#if restanteMs !== null}
 					<div>
-						<dt>Expira em</dt>
+						<dt>{t("valor.expiraEm")}</dt>
 						<dd class="mono" data-testid="ttl">{formatarPrazo(restanteMs)}</dd>
 					</div>
 				{/if}
 				{#if !editavel}
 					<div>
-						<dt>Edição</dt>
-						<dd>Somente leitura</dd>
+						<dt>{t("valor.edicao")}</dt>
+						<dd>{t("valor.somenteLeitura")}</dd>
 					</div>
 				{/if}
 			</dl>
@@ -203,11 +204,13 @@
 		{#if view.truncated}
 			<footer data-testid="truncado">
 				<span>
-					Mostrando {numero(mostrados)} de
-					{numero(view.total_elements)}
+					{t("valor.mostrando", {
+						mostrados: numero(mostrados),
+						total: numero(view.total_elements),
+					})}
 				</span>
 				<button onclick={carregarMais} disabled={carregandoMais}>
-					{carregandoMais ? "Carregando" : "Carregar mais"}
+					{carregandoMais ? t("acao.carregandoCurto") : t("acao.carregarMais")}
 				</button>
 			</footer>
 		{/if}

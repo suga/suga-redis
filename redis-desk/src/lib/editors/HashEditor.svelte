@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	import { untrack } from "svelte";
 	import { textBytes, type Bytes, type ValueView, type WriteOp } from "$lib/api";
 
@@ -58,19 +59,19 @@
 					<th class="mono" scope="row">{linha.field}</th>
 					<td>
 						{#if linha.original === null}
-							<span class="binario">Valor binário: não editável como texto</span>
+							<span class="binario">{t("binario.naoEditavel")}</span>
 						{:else}
 							<input
 								class="mono"
 								bind:value={linha.texto}
-								aria-label="Valor do campo {linha.field}"
+								aria-label={t("hash.valorDoCampo", { campo: linha.field })}
 							/>
 						{/if}
 					</td>
 					<td class="acoes-linha">
 						<button
 							type="button"
-							aria-label="Salvar campo {linha.field}"
+							aria-label={t("hash.salvarCampo", { campo: linha.field })}
 							disabled={busy || linha.original === null || linha.texto === linha.original}
 							onclick={() =>
 								onSubmit({
@@ -84,7 +85,7 @@
 						<button
 							type="button"
 							class="danger"
-							aria-label="Remover campo {linha.field}"
+							aria-label={t("hash.removerCampo", { campo: linha.field })}
 							disabled={busy}
 							onclick={() => onSubmit({ op: "delete_hash_field", field: linha.field })}
 						>
@@ -97,9 +98,9 @@
 	</table>
 
 	<div class="novo">
-		<input bind:value={novoCampo} class="mono" aria-label="Novo campo" placeholder="campo" />
-		<input bind:value={novoValor} class="mono" aria-label="Valor do novo campo" placeholder="valor" />
-		<button type="button" onclick={adicionar} disabled={busy}>Adicionar campo</button>
+		<input bind:value={novoCampo} class="mono" aria-label={t("hash.novoCampo")} placeholder={t("hash.placeholderCampo")} />
+		<input bind:value={novoValor} class="mono" aria-label={t("hash.valorDoNovoCampo")} placeholder={t("hash.placeholderValor")} />
+		<button type="button" onclick={adicionar} disabled={busy}>{t("hash.adicionarCampo")}</button>
 	</div>
 
 	{#if erroNovo}

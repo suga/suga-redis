@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * Editor de valor do tipo `string`, colorido ENQUANTO se edita.
 	 *
@@ -150,7 +151,7 @@
 	</p>
 {:else}
 	<div class="editor">
-		<label for="valor-chave">Valor</label>
+		<label for="valor-chave">{t("campo.valor")}</label>
 
 		<div class="campo" class:colorido={colorir}>
 			{#if colorir}
@@ -200,7 +201,7 @@
 						texto = indentado;
 					}}
 				>
-					Formatar JSON
+					{t("acao.formatarJson")}
 				</button>
 			{/if}
 			<button
@@ -209,7 +210,7 @@
 				disabled={busy || !mudou || cortado}
 				onclick={() => onSubmit({ op: "set_string", value: textBytes(aSalvar) })}
 			>
-				Salvar
+				{t("acao.salvar")}
 			</button>
 		</div>
 	</div>

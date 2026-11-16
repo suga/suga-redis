@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	import { untrack } from "svelte";
 	import { textBytes, type Bytes, type ValueView, type WriteOp } from "$lib/api";
 
@@ -52,13 +53,13 @@
 							class="mono"
 							bind:value={membro.score}
 							disabled={membro.binario}
-							aria-label="Pontuação de {membro.nome}"
+							aria-label={t("zset.pontuacaoDe", { membro: membro.nome })}
 						/>
 					</td>
 					<td class="acoes-linha">
 						<button
 							type="button"
-							aria-label="Salvar membro {membro.nome}"
+							aria-label={t("zset.salvarMembro", { membro: membro.nome })}
 							disabled={busy || membro.binario || membro.score === membro.original}
 							onclick={() =>
 								onSubmit({
@@ -72,7 +73,7 @@
 						<button
 							type="button"
 							class="danger"
-							aria-label="Remover membro {membro.nome}"
+							aria-label={t("zset.removerMembro", { membro: membro.nome })}
 							disabled={busy || membro.binario}
 							onclick={() =>
 								onSubmit({ op: "remove_zset_member", member: textBytes(membro.nome) })}
@@ -86,13 +87,13 @@
 	</table>
 
 	<div class="novo">
-		<input bind:value={novoMembro} class="mono" aria-label="Novo membro" placeholder="membro" />
+		<input bind:value={novoMembro} class="mono" aria-label={t("zset.novoMembro")} placeholder={t("zset.placeholderMembro")} />
 		<input
 			type="number"
 			step="any"
 			bind:value={novaPontuacao}
 			class="mono pontuacao-nova"
-			aria-label="Pontuação do novo membro"
+			aria-label={t("zset.pontuacaoDoNovo")}
 		/>
 		<button
 			type="button"
@@ -107,7 +108,7 @@
 				novaPontuacao = 0;
 			}}
 		>
-			Adicionar membro
+			{t("zset.adicionarMembro")}
 		</button>
 	</div>
 </div>
