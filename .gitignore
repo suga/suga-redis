@@ -3,3 +3,7 @@ node_modules/
 target/
 dist/
 .DS_Store
+
+# Cache das ferramentas de edição: guarda caminhos da máquina de quem rodou
+# e ids de sessão. Num repositório público isso é vazamento à toa.
+.impeccable/
