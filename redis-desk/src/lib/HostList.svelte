@@ -7,6 +7,7 @@
 	 * hosts de produção existem sem ler nome nenhum.
 	 */
 	import { envChrome } from "$lib/env";
+	import { t } from "$lib/i18n.svelte";
 	import { connect, disconnect, errorMessage, removeHost, testHost, type Host } from "$lib/api";
 
 	/**
@@ -181,12 +182,12 @@
 
 <nav>
 	<div class="topo">
-		<h2>Hosts</h2>
-		<button onclick={onNew}>Novo host</button>
+		<h2>{t("titulo.hosts")}</h2>
+		<button onclick={onNew}>{t("acao.novoHost")}</button>
 	</div>
 
 	{#if hosts.length === 0}
-		<p class="vazio">Cadastre um host para começar.</p>
+		<p class="vazio">{t("hosts.vazio")}</p>
 	{:else}
 		<ul>
 			{#each hosts as host (host.id)}
@@ -233,7 +234,7 @@
 								onclick={() => desconectar(host)}
 								disabled={desconectando === host.id}
 							>
-								{desconectando === host.id ? "Desconectando…" : "Desconectar"}
+								{desconectando === host.id ? t("acao.desconectando") : t("acao.desconectar")}
 							</button>
 						{:else}
 							<button
@@ -241,23 +242,23 @@
 								onclick={() => conectar(host)}
 								disabled={estado.tipo === "conectando"}
 							>
-								{estado.tipo === "conectando" ? "Conectando…" : "Conectar"}
+								{estado.tipo === "conectando" ? t("acao.conectando") : t("acao.conectar")}
 							</button>
 						{/if}
 						<button onclick={() => testar(host)} disabled={testando === host.id}>
-							{testando === host.id ? "Testando" : "Testar"}
+							{testando === host.id ? t("acao.testando") : t("acao.testar")}
 						</button>
-						<button onclick={() => onEdit(host)}>Editar</button>
-						<button class="danger" onclick={() => remover(host)}>Remover</button>
+						<button onclick={() => onEdit(host)}>{t("acao.editar")}</button>
+						<button class="danger" onclick={() => remover(host)}>{t("acao.remover")}</button>
 					</div>
 
 					<p class="estado" data-testid="estado-conexao" data-tipo={estado.tipo}>
 						{#if estado.tipo === "desligado"}
-							nunca conectado
+							{t("estado.nuncaConectado")}
 						{:else if estado.tipo === "conectando"}
-							conectando…
+							{t("estado.conectando")}
 						{:else if estado.tipo === "conectado"}
-							conectado · {estado.ms} ms · banco {host.db}
+							{t("estado.conectado", { ms: estado.ms, banco: host.db })}
 						{:else}
 							{estado.motivo}
 						{/if}
@@ -269,7 +270,7 @@
 					     se pergunta "mas dá para alcançar?". Testar responde outra
 					     pergunta que a linha de estado, e as duas cabem juntas. -->
 					{#if resultado && "ms" in resultado}
-						<p class="resultado mono">Respondeu em {resultado.ms} ms</p>
+						<p class="resultado mono">{t("teste.respondeu", { ms: resultado.ms })}</p>
 					{:else if resultado}
 						<p class="resultado falha" role="alert">{resultado.erro}</p>
 					{/if}

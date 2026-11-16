@@ -8,6 +8,7 @@
 	 */
 	import { untrack } from "svelte";
 	import { addHost, errorMessage, updateHost, type Env, type Host } from "$lib/api";
+	import { t } from "$lib/i18n.svelte";
 
 	interface Props {
 		/** `null` cadastra um host novo; um host edita aquele. */
@@ -27,11 +28,11 @@
 	 */
 	const inicial = untrack(() => host);
 
-	const AMBIENTES: { value: Env; label: string }[] = [
-		{ value: "dev", label: "Desenvolvimento" },
-		{ value: "homolog", label: "Homologação" },
-		{ value: "prod", label: "Produção" },
-	];
+	const AMBIENTES = [
+		{ value: "dev", chave: "ambienteOpcao.dev" },
+		{ value: "homolog", chave: "ambienteOpcao.homolog" },
+		{ value: "prod", chave: "ambienteOpcao.prod" },
+	] as const satisfies { value: Env; chave: Parameters<typeof t>[0] }[];
 
 	let name = $state(inicial?.name ?? "");
 	let addr = $state(inicial?.addr ?? "");
@@ -96,56 +97,56 @@
 </script>
 
 <form onsubmit={salvar}>
-	<h2>{host ? "Editar host" : "Novo host"}</h2>
+	<h2>{host ? t("host.editar") : t("acao.novoHost")}</h2>
 
 	<label>
-		<span>Nome</span>
+		<span>{t("campo.nome")}</span>
 		<input bind:value={name} autocomplete="off" />
 	</label>
 
 	<div class="row">
 		<label class="grow">
-			<span>Endereço</span>
+			<span>{t("campo.endereco")}</span>
 			<input bind:value={addr} class="mono" autocomplete="off" />
 		</label>
 		<label class="narrow">
-			<span>Porta</span>
+			<span>{t("campo.porta")}</span>
 			<input type="number" bind:value={port} class="mono" min="1" max="65535" />
 		</label>
 		<label class="narrow">
-			<span>Banco</span>
+			<span>{t("campo.banco")}</span>
 			<input type="number" bind:value={db} class="mono" min="0" max="15" />
 		</label>
 	</div>
 
 	<div class="row">
 		<label class="grow">
-			<span>Usuário</span>
+			<span>{t("campo.usuario")}</span>
 			<input bind:value={username} autocomplete="off" />
 		</label>
 		<label class="grow">
-			<span>Senha</span>
+			<span>{t("campo.senha")}</span>
 			<input
 				type="password"
 				bind:value={password}
 				autocomplete="new-password"
-				placeholder={host ? "Manter a senha atual" : ""}
+				placeholder={host ? t("campo.manterSenha") : ""}
 			/>
 		</label>
 	</div>
 
 	<div class="row">
 		<label class="grow">
-			<span>Ambiente</span>
+			<span>{t("campo.ambiente")}</span>
 			<select bind:value={env}>
 				{#each AMBIENTES as ambiente (ambiente.value)}
-					<option value={ambiente.value}>{ambiente.label}</option>
+					<option value={ambiente.value}>{t(ambiente.chave)}</option>
 				{/each}
 			</select>
 		</label>
 		<label class="check">
 			<input type="checkbox" bind:checked={tls} />
-			<span>Conexão por TLS</span>
+			<span>{t("campo.tls")}</span>
 		</label>
 	</div>
 
@@ -155,9 +156,9 @@
 
 	<div class="acoes">
 		{#if onCancel}
-			<button type="button" onclick={onCancel}>Cancelar</button>
+			<button type="button" onclick={onCancel}>{t("acao.cancelar")}</button>
 		{/if}
-		<button type="submit" class="primary" disabled={salvando}>Salvar</button>
+		<button type="submit" class="primary" disabled={salvando}>{t("acao.salvar")}</button>
 	</div>
 </form>
 

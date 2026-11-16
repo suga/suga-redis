@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * O último portão antes de uma mudança em produção.
 	 *
@@ -40,14 +41,14 @@
 	}}
 >
 	<div class="caixa" role="dialog" aria-modal="true" aria-labelledby="confirmar-titulo">
-		<p class="stamp">PRODUÇÃO</p>
-		<h2 id="confirmar-titulo">Confirmar a mudança</h2>
+		<p class="stamp">{t("ambiente.prod")}</p>
+		<h2 id="confirmar-titulo">{t("confirmar.titulo")}</h2>
 		<p class="resumo">{summary}</p>
 
 		<div class="acoes">
-			<button type="button" onclick={onCancel} use:focar>Cancelar</button>
+			<button type="button" onclick={onCancel} use:focar>{t("acao.cancelar")}</button>
 			<button type="button" class="primary" onclick={onConfirm} disabled={busy}>
-				{busy ? "Aplicando" : "Confirmar"}
+				{busy ? t("acao.aplicando") : t("acao.confirmar")}
 			</button>
 		</div>
 	</div>

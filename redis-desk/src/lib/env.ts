@@ -1,4 +1,5 @@
 import type { Env } from "$lib/api";
+import { t as traduzir } from "$lib/i18n.svelte";
 
 /**
  * As três coisas que o ambiente decide na tela: a cor que pinta a barra do
@@ -12,18 +13,29 @@ import type { Env } from "$lib/api";
 export interface EnvChrome {
 	/** Fundo da barra do topo. */
 	band: string;
-	/** A palavra carimbada. É o único lugar do app com caixa alta. */
+	/**
+	 * A palavra carimbada. É o único lugar do app com caixa alta.
+	 *
+	 * Vem do catálogo de idiomas: num app que fala três línguas, o carimbo
+	 * que não acompanha é justamente o aviso que mais importa perdido.
+	 */
 	label: string;
 	/** A linha sob a barra — o mesmo tom, mais fundo, para dar peso a ela. */
 	border: string;
 }
 
-const CHROME: Record<Env, EnvChrome> = {
-	prod: { band: "#8E2B24", label: "PRODUÇÃO", border: "#6B201B" },
-	homolog: { band: "#C98A20", label: "HOMOLOGAÇÃO", border: "#976818" },
-	dev: { band: "#4E7A4A", label: "DESENVOLVIMENTO", border: "#3B5C38" },
+const CORES: Record<Env, Omit<EnvChrome, "label">> = {
+	prod: { band: "#8E2B24", border: "#6B201B" },
+	homolog: { band: "#C98A20", border: "#976818" },
+	dev: { band: "#4E7A4A", border: "#3B5C38" },
 };
 
+const CHAVE_DO_AMBIENTE = {
+	prod: "ambiente.prod",
+	homolog: "ambiente.homolog",
+	dev: "ambiente.dev",
+} as const;
+
 export function envChrome(env: Env): EnvChrome {
-	return CHROME[env];
+	return { ...CORES[env], label: traduzir(CHAVE_DO_AMBIENTE[env]) };
 }

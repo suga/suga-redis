@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * Criar chave: nome e tipo.
 	 *
@@ -19,12 +20,12 @@
 
 	let { onCreate, onCancel, busy = false }: Props = $props();
 
-	const TIPOS: { value: NovaChave["kind"]; label: string }[] = [
-		{ value: "string", label: "string — um texto só" },
-		{ value: "hash", label: "hash — campos e valores" },
-		{ value: "list", label: "list — itens em ordem" },
-		{ value: "zset", label: "zset — membros com pontuação" },
-	];
+	const TIPOS = [
+		{ value: "string", chave: "tipo.string" },
+		{ value: "hash", chave: "tipo.hash" },
+		{ value: "list", chave: "tipo.list" },
+		{ value: "zset", chave: "tipo.zset" },
+	] as const satisfies { value: NovaChave["kind"]; chave: Parameters<typeof t>[0] }[];
 
 	let nome = $state("");
 	let tipo = $state<NovaChave["kind"]>("string");
@@ -60,20 +61,20 @@
 	}}
 >
 	<div class="caixa" role="dialog" aria-modal="true" aria-labelledby="nova-titulo">
-		<h2 id="nova-titulo">Nova chave</h2>
+		<h2 id="nova-titulo">{t("novaChave.titulo")}</h2>
 
 		<form onsubmit={criar}>
 
 			<label>
-				<span>Nome da chave</span>
+				<span>{t("novaChave.nome")}</span>
 				<input bind:value={nome} class="mono" autocomplete="off" use:focar />
 			</label>
 
 			<label>
-				<span>Tipo</span>
+				<span>{t("campo.tipo")}</span>
 				<select bind:value={tipo}>
 					{#each TIPOS as opcao (opcao.value)}
-						<option value={opcao.value}>{opcao.label}</option>
+						<option value={opcao.value}>{t(opcao.chave)}</option>
 					{/each}
 				</select>
 			</label>
@@ -83,8 +84,8 @@
 			{/if}
 
 			<div class="acoes">
-				<button type="button" onclick={onCancel}>Cancelar</button>
-				<button type="submit" class="primary" disabled={busy}>Criar</button>
+				<button type="button" onclick={onCancel}>{t("acao.cancelar")}</button>
+				<button type="submit" class="primary" disabled={busy}>{t("acao.criar")}</button>
 			</div>
 		</form>
 	</div>

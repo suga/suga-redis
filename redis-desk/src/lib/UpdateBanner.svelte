@@ -11,6 +11,7 @@
 	 * sessão seria insistência, não aviso.
 	 */
 	import { instalar, tamanho, type Achado, type Progresso } from "$lib/atualizacao";
+	import { t } from "$lib/i18n.svelte";
 
 	interface Props {
 		achado: Achado;
@@ -48,15 +49,15 @@
 
 <div class="aviso" role="status" aria-live="polite">
 	{#if erro}
-		<p class="titulo">Não deu para atualizar</p>
+		<p class="titulo">{t("atualizacao.falhou")}</p>
 		<p class="motivo">{erro}</p>
-		<p class="tranquilize">A versão {atual} continua instalada e funcionando.</p>
+		<p class="tranquilize">{t("atualizacao.continuaInstalada", { versao: atual })}</p>
 		<div class="acoes">
-			<button type="button" onclick={onDispensar}>Fechar</button>
-			<button type="button" class="primary" onclick={atualizar}>Tentar de novo</button>
+			<button type="button" onclick={onDispensar}>{t("acao.fechar")}</button>
+			<button type="button" class="primary" onclick={atualizar}>{t("acao.tentarDeNovo")}</button>
 		</div>
 	{:else if baixando}
-		<p class="titulo">Baixando a {achado.versao}</p>
+		<p class="titulo">{t("atualizacao.baixando", { versao: achado.versao })}</p>
 		{#if pct !== null}
 			<div class="barra">
 				<div class="cheio" style="transform: scaleX({pct / 100})"></div>
@@ -65,20 +66,20 @@
 		{:else if progresso}
 			<!-- Sem Content-Length não existe porcentagem honesta; mostrar
 			     quanto já veio é o que dá para afirmar de verdade. -->
-			<p class="progresso">{tamanho(progresso.baixado)} baixados</p>
+			<p class="progresso">{t("atualizacao.baixados", { tamanho: tamanho(progresso.baixado) })}</p>
 		{:else}
-			<p class="progresso">Começando…</p>
+			<p class="progresso">{t("atualizacao.comecando")}</p>
 		{/if}
-		<p class="tranquilize">O app reabre sozinho quando terminar.</p>
+		<p class="tranquilize">{t("atualizacao.reabreSozinho")}</p>
 	{:else}
-		<p class="titulo">Versão {achado.versao} disponível</p>
-		<p class="motivo">Você está na {atual}.</p>
+		<p class="titulo">{t("atualizacao.disponivel", { versao: achado.versao })}</p>
+		<p class="motivo">{t("atualizacao.vocEstaNa", { versao: atual })}</p>
 		{#if achado.notas}
 			<p class="notas">{achado.notas}</p>
 		{/if}
 		<div class="acoes">
-			<button type="button" onclick={onDispensar}>Agora não</button>
-			<button type="button" class="primary" onclick={atualizar}>Atualizar</button>
+			<button type="button" onclick={onDispensar}>{t("acao.agoraNao")}</button>
+			<button type="button" class="primary" onclick={atualizar}>{t("acao.atualizar")}</button>
 		</div>
 	{/if}
 </div>

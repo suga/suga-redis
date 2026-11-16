@@ -6,6 +6,7 @@
 	 * conteúdo.
 	 */
 	import { envChrome } from "$lib/env";
+	import { t } from "$lib/i18n.svelte";
 	import type { Host } from "$lib/api";
 
 	interface Props {
@@ -35,7 +36,7 @@
 	</header>
 {:else}
 	<header class="band band--empty" data-testid="env-band">
-		<span class="name">Nenhum host aberto</span>
+		<span class="name">{t("faixa.semHost")}</span>
 	</header>
 {/if}
 
