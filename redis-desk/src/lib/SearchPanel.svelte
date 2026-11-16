@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * A busca por texto dentro dos valores.
 	 *
@@ -90,16 +91,16 @@
 		}}
 	>
 		<label class="grow">
-			<span class="rotulo">Buscar no banco</span>
+			<span class="rotulo">{t("busca.titulo")}</span>
 			<input
 				bind:value={agulha}
 				class="mono"
 				autocomplete="off"
-				placeholder="texto dentro de qualquer chave ou valor"
+				placeholder={t("busca.placeholder")}
 			/>
 		</label>
 		<button type="submit" class="primary" disabled={buscando || !agulha.trim()}>
-			{buscando ? "Buscando" : "Buscar"}
+			{buscando ? t("acao.buscando") : t("acao.buscar")}
 		</button>
 	</form>
 
@@ -110,8 +111,10 @@
 			<div class="velho" data-testid="indice-velho">
 				<span>
 					{resultado.index_age_secs === NEVER_SCANNED
-						? "Este banco nunca foi varrido: a busca encontra pelo NOME da chave, mas ainda não enxerga o conteúdo dos valores."
-						: `O índice foi varrido ${haQuantoTempo(resultado.index_age_secs)}. Valores mudados desde então ainda aparecem como estavam.`}
+						? t("busca.nuncaVarrido")
+						: t("busca.indiceVelho", {
+								quando: haQuantoTempo(resultado.index_age_secs),
+							})}
 				</span>
 				<button onclick={varrerEBuscar} disabled={varrendo}>
 					{varrendo ? "Varrendo" : "Varrer de novo"}
@@ -121,9 +124,7 @@
 
 		{#if resultado.hits.length === 0}
 			<p class="sem-acerto" data-testid="sem-acerto">
-				Nenhuma chave com esse texto. Confira a grafia ou tente um pedaço
-				menor. Os nomes das chaves são lidos do servidor agora; para procurar
-				DENTRO dos valores, varra o banco de novo.
+				{t("busca.semAcerto")}
 			</p>
 		{:else}
 			<ul>
@@ -135,10 +136,10 @@
 							<span class="meta">
 								<span class="tipo mono">{nomeDoTipo(hit.kind)}</span>
 								{#if hit.ttl_ms !== null}
-									<span class="prazo mono">expira em {formatarPrazo(hit.ttl_ms)}</span>
+									<span class="prazo mono">{t("busca.expiraEm", { prazo: formatarPrazo(hit.ttl_ms) })}</span>
 								{/if}
 								<span class="onde">
-									{hit.where_found === "key_name" ? "achado no nome" : "achado no valor"}
+									{hit.where_found === "key_name" ? t("busca.achadoNoNome") : t("busca.achadoNoValor")}
 								</span>
 							</span>
 							<span class="trecho mono" data-testid="trecho"
@@ -151,23 +152,24 @@
 		{/if}
 
 		<p class="aviso" data-testid="aviso">
-			Conferiu {numero(resultado.scanned)} chaves em {resultado.elapsed_ms} ms.
+			{t("busca.conferiu", {
+				chaves: numero(resultado.scanned),
+				ms: resultado.elapsed_ms,
+			})}
 			{#if resultado.index_age_secs !== NEVER_SCANNED}
-				Índice varrido {haQuantoTempo(resultado.index_age_secs)}.
+				{t("busca.indiceVarrido", { quando: haQuantoTempo(resultado.index_age_secs) })}
 			{/if}
 			{#if resultado.stale_keys_removed > 0}
-				{numero(resultado.stale_keys_removed)}
-				{resultado.stale_keys_removed === 1 ? "chave tinha" : "chaves tinham"} sumido
-				desde a varredura e {resultado.stale_keys_removed === 1 ? "saiu" : "saíram"}
-				do índice.
+				{resultado.stale_keys_removed === 1
+					? t("busca.sumidaUma", { quantas: numero(resultado.stale_keys_removed) })
+					: t("busca.sumidasVarias", {
+							quantas: numero(resultado.stale_keys_removed),
+						})}
 			{/if}
 		</p>
 	{:else}
 		<p class="convite">
-			Procure por um pedaço de texto. O nome das chaves é lido do servidor na
-			hora; dentro dos valores — campo de hash, item de lista, membro de
-			sorted set, JSON guardado como string — a busca usa o índice local, que
-			o botão "Varrer de novo" atualiza.
+			{t("busca.convite")}
 		</p>
 	{/if}
 </section>

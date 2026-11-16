@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * O pedido de escrita que o Claude mandou, esperando a decisão do dono.
 	 *
@@ -76,19 +77,19 @@
 		style="--env-band: {chrome.band}; --env-border: {chrome.border}"
 	>
 		<p class="stamp">{chrome.label}</p>
-		<h2 id="pedido-titulo">O Claude pediu uma escrita</h2>
+		<h2 id="pedido-titulo">{t("aprovacao.titulo")}</h2>
 
 		<dl>
 			<div>
-				<dt>Host</dt>
+				<dt>{t("campo.host")}</dt>
 				<dd class="mono">{request.host_name}</dd>
 			</div>
 			<div>
-				<dt>Banco</dt>
+				<dt>{t("campo.banco")}</dt>
 				<dd class="mono">{request.db}</dd>
 			</div>
 			<div>
-				<dt>Chave</dt>
+				<dt>{t("campo.chave")}</dt>
 				<dd class="mono">{request.key}</dd>
 			</div>
 		</dl>
@@ -96,13 +97,13 @@
 		<p class="resumo">{request.summary}</p>
 
 		<label>
-			<span>Digite o nome do host para liberar</span>
+			<span>{t("aprovacao.digiteNome")}</span>
 			<input bind:value={digitado} class="mono" autocomplete="off" use:focar />
 		</label>
 
 		{#if digitado && !confere}
 			<p class="dica" role="status">
-				Para liberar, digite exatamente: <span class="mono">{request.host_name}</span>
+				{t("aprovacao.digiteExatamente")} <span class="mono">{request.host_name}</span>
 			</p>
 		{/if}
 
@@ -111,14 +112,14 @@
 		{/if}
 
 		<div class="acoes">
-			<button type="button" onclick={recusar} disabled={ocupado}>Recusar</button>
+			<button type="button" onclick={recusar} disabled={ocupado}>{t("aprovacao.recusar")}</button>
 			<button
 				type="button"
 				class="primary"
 				onclick={liberar}
 				disabled={!confere || ocupado}
 			>
-				Liberar a escrita
+				{t("aprovacao.liberar")}
 			</button>
 		</div>
 	</div>

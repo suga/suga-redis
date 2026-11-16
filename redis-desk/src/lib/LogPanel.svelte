@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * O log do aplicativo inteiro, mais recente primeiro: conexões, falhas e
 	 * operações lentas de TODOS os hosts, não só o que está aberto.
@@ -102,14 +103,14 @@
 		     uma lista vazia de acontecimentos. -->
 		<p class="aviso">
 			{#if lidoEm > 0}
-				Atualizado às {hora(lidoEm)}
+				{t("log.atualizadoAs", { hora: hora(lidoEm) })}
 			{:else if carregando}
-				Lendo o log…
+				{t("log.lendo")}
 			{:else}
-				Nenhuma leitura concluída
+				{t("log.semLeitura")}
 			{/if}
 		</p>
-		<button onclick={carregar} disabled={carregando}>Atualizar</button>
+		<button onclick={carregar} disabled={carregando}>{t("acao.recarregar")}</button>
 	</div>
 
 	{#if erro}
@@ -119,8 +120,7 @@
 	{#if entradas.length === 0}
 		{#if lidoEm > 0 && !erro}
 			<p class="vazio" data-testid="vazio">
-				Nenhum evento registrado ainda. Conexões, falhas e operações lentas de
-				qualquer host aparecem aqui assim que acontecerem.
+				{t("log.vazio")}
 			</p>
 		{/if}
 	{:else}

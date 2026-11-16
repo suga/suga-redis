@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * O histórico de mudanças do host, mais recente primeiro.
 	 *
@@ -116,11 +117,10 @@
 	{/if}
 
 	{#if carregando && entradas.length === 0}
-		<p class="aviso">Lendo o histórico…</p>
+		<p class="aviso">{t("historico.lendo")}</p>
 	{:else if entradas.length === 0}
 		<p class="vazio" data-testid="vazio">
-			Nenhuma mudança ainda. Edite uma chave e ela aparece aqui, com o valor
-			anterior guardado para você poder voltar atrás.
+			{t("historico.vazio")}
 		</p>
 	{:else}
 		<ul>
@@ -129,13 +129,13 @@
 					<div class="cabeca">
 						<span class="resumo">{entrada.summary}</span>
 						{#if entrada.rolled_back}
-							<span class="marca">Já revertida</span>
+							<span class="marca">{t("historico.jaRevertida")}</span>
 						{:else}
 							<button
 								disabled={desfazendo}
 								onclick={() => desfazer(entrada.id, false)}
 							>
-								Voltar atrás
+								{t("historico.voltarAtras")}
 							</button>
 						{/if}
 					</div>
@@ -144,20 +144,20 @@
 						<span class="chave mono">{entrada.key}</span>
 						<span>banco {entrada.db}</span>
 						<span data-testid="autor">
-							{entrada.actor === "llm" ? "Claude" : "Você"}
+							{entrada.actor === "llm" ? t("autor.claude") : t("autor.voce")}
 						</span>
 						<span>{quando(entrada.at)}</span>
 					</div>
 
 					<div class="lados">
 						<div class="lado">
-							<p class="rotulo">Antes</p>
+							<p class="rotulo">{t("historico.antes")}</p>
 							<pre class="mono" data-testid="antes">{resumoDoValor(
 									entrada.before_json,
 								)}</pre>
 						</div>
 						<div class="lado">
-							<p class="rotulo">Depois</p>
+							<p class="rotulo">{t("historico.depois")}</p>
 							<pre class="mono" data-testid="depois">{resumoDoValor(
 									entrada.after_json,
 								)}</pre>
