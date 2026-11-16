@@ -61,7 +61,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
-            libayatana-appindicator3-dev libxdo-dev libssl-dev
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            gnome-keyring dbus-x11
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -97,6 +98,20 @@ jobs:
         working-directory: redis-desk/src-tauri
         run: cargo clippy --all-targets
 
+      # A senha do host mora no chaveiro do sistema, e os testes exercitam
+      # esse caminho de verdade em vez de dublê. No Linux o chaveiro é o
+      # `org.freedesktop.secrets`, que fala por D-Bus — e um runner de CI
+      # não tem sessão gráfica, logo não tem nenhum dos dois. Sem isto, 17
+      # testes morrem com `ServiceUnknown` por falta de ambiente, não por
+      # defeito no código.
+      #
+      # `--unlock` lendo stdin vazio abre um chaveiro com senha vazia: ele
+      # nasce e morre dentro deste job, e nunca guardou nada de ninguém.
       - name: testes
         working-directory: redis-desk/src-tauri
-        run: cargo test
+        run: |
+          dbus-run-session -- bash -c '
+            echo -n "" | gnome-keyring-daemon --unlock --components=secrets >/dev/null 2>&1 &
+            sleep 3
+            cargo test
+          '
