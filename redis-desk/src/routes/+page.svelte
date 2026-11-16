@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { iniciarIdioma, t } from "$lib/i18n.svelte";
 	/**
 	 * A casca: barra do ambiente em cima, coluna de hosts à esquerda, área de
 	 * trabalho à direita. A área de trabalho ganha a árvore de chaves e o
@@ -66,6 +67,11 @@
 	// `onMount` e não `$effect`: `carregar` lê e escreve `aberto`, e um
 	// efeito que depende do que ele mesmo escreve se chamaria em laço.
 	onMount(carregar);
+
+	// O idioma é decidido uma vez, na abertura: escolha guardada, senão o
+	// idioma do sistema. Aqui e não no módulo porque `localStorage` só
+	// existe depois que a janela existe.
+	onMount(iniciarIdioma);
 
 	// ------------------------------- escritas pedidas pelo Claude
 
@@ -187,7 +193,7 @@
 				     atenção com ela. -->
 				<div class="vazio">
 					<img src="/suga-redis-logo.png" alt="Suga-Redis" width="340" />
-					<p>Escolha um host na coluna ao lado, ou cadastre o primeiro.</p>
+					<p>{t("pagina.escolhaHost")}</p>
 				</div>
 			{/if}
 		</main>

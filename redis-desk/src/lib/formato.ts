@@ -1,15 +1,22 @@
-/** Formatação de números e tempo para a tela, em português do Brasil. */
+/**
+ * Formatação de números e tempo para a tela.
+ *
+ * As palavras vêm do catálogo e os separadores do `Intl`, os dois guiados
+ * pelo idioma em uso: "1.234.567" e "1,234,567" são o mesmo número, e
+ * mostrar o separador errado faz quem lê conferir duas vezes.
+ */
+import { idioma, t } from "$lib/i18n.svelte";
 
 /** Quanto falta para a chave expirar, em palavras curtas. */
 export function formatarPrazo(ms: number): string {
-	if (ms <= 0) return "expirada";
+	if (ms <= 0) return t("prazo.expirada");
 	const segundos = Math.floor(ms / 1000);
 	const s = segundos % 60;
 	const m = Math.floor(segundos / 60) % 60;
 	const h = Math.floor(segundos / 3600);
-	if (h > 0) return `${h} h ${m} min`;
-	if (m > 0) return `${m} min ${s} s`;
-	return `${s} s`;
+	if (h > 0) return t("prazo.horasMinutos", { h, m });
+	if (m > 0) return t("prazo.minutosSegundos", { m, s });
+	return t("prazo.segundos", { s });
 }
 
 /** Tamanho em bytes na unidade que couber. */
@@ -21,17 +28,17 @@ export function formatarTamanho(bytes: number): string {
 
 /** Há quanto tempo, a partir de uma duração em segundos. */
 export function haQuantoTempo(segundos: number): string {
-	if (segundos < 60) return "agora há pouco";
+	if (segundos < 60) return t("tempo.agora");
 	const minutos = Math.round(segundos / 60);
-	if (minutos < 60) return `há ${minutos} min`;
+	if (minutos < 60) return t("tempo.haMinutos", { n: minutos });
 	const horas = Math.round(minutos / 60);
-	if (horas < 24) return `há ${horas} h`;
-	return `há ${Math.round(horas / 24)} dias`;
+	if (horas < 24) return t("tempo.haHoras", { n: horas });
+	return t("tempo.haDias", { n: Math.round(horas / 24) });
 }
 
-/** Número com os separadores do português do Brasil. */
+/** Número com os separadores do idioma em uso. */
 export function numero(valor: number): string {
-	return valor.toLocaleString("pt-BR");
+	return valor.toLocaleString(idioma());
 }
 
 /**

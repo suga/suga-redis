@@ -146,8 +146,7 @@
 
 {#if binario}
 	<p class="aviso">
-		Valor binário: editar como texto corromperia o conteúdo. Use o painel de
-		leitura para conferi-lo.
+		{t("binario.editarCorromperia")}
 	</p>
 {:else}
 	<div class="editor">
@@ -186,8 +185,7 @@
 			</p>
 		{:else if pareceJson(texto) && !colorir}
 			<p class="aviso">
-				Valor grande demais para colorir enquanto se digita. O conteúdo e a
-				validação continuam valendo.
+				{t("editor.grandeDemaisParaColorir")}
 			</p>
 		{/if}
 

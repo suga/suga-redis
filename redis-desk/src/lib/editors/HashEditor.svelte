@@ -80,7 +80,7 @@
 									value: textBytes(linha.texto),
 								})}
 						>
-							Salvar
+							{t("acao.salvar")}
 						</button>
 						<button
 							type="button"
@@ -89,7 +89,7 @@
 							disabled={busy}
 							onclick={() => onSubmit({ op: "delete_hash_field", field: linha.field })}
 						>
-							Remover
+							{t("acao.remover")}
 						</button>
 					</td>
 				</tr>

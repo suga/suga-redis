@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { t } from "$lib/i18n.svelte";
+	import { idioma, t } from "$lib/i18n.svelte";
 	/**
 	 * O histórico de mudanças do host, mais recente primeiro.
 	 *
@@ -107,7 +107,7 @@
 	}
 
 	function quando(ms: number): string {
-		return new Date(ms).toLocaleString("pt-BR");
+		return new Date(ms).toLocaleString(idioma());
 	}
 </script>
 

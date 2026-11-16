@@ -68,7 +68,7 @@
 									score: membro.score,
 								})}
 						>
-							Salvar
+							{t("acao.salvar")}
 						</button>
 						<button
 							type="button"
@@ -78,7 +78,7 @@
 							onclick={() =>
 								onSubmit({ op: "remove_zset_member", member: textBytes(membro.nome) })}
 						>
-							Remover
+							{t("acao.remover")}
 						</button>
 					</td>
 				</tr>

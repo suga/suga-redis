@@ -7,7 +7,7 @@
 	 * hosts de produção existem sem ler nome nenhum.
 	 */
 	import { envChrome } from "$lib/env";
-	import { t } from "$lib/i18n.svelte";
+	import { IDIOMAS, definirIdioma, idioma, t, type Idioma } from "$lib/i18n.svelte";
 	import { connect, disconnect, errorMessage, removeHost, testHost, type Host } from "$lib/api";
 
 	/**
@@ -284,9 +284,44 @@
 			{/each}
 		</ul>
 	{/if}
+
+	<div class="rodape">
+		<label class="idioma">
+			<span>{t("idioma.rotulo")}</span>
+			<select
+				value={idioma()}
+				onchange={(e) => definirIdioma(e.currentTarget.value as Idioma)}
+			>
+				{#each IDIOMAS as tag (tag)}
+					<option value={tag}>{t(`idioma.${tag}`)}</option>
+				{/each}
+			</select>
+		</label>
+	</div>
 </nav>
 
 <style>
+	.rodape {
+		/* Empurrado para o fim da coluna: é controle de preferência, não de
+		   operação — fica à mão sem competir com a lista de hosts. */
+		margin-top: auto;
+		padding: 0.6rem 0.75rem;
+		border-top: 1px solid var(--rule);
+	}
+
+	.idioma {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: 0.8rem;
+		color: var(--muted);
+	}
+
+	.idioma select {
+		flex: 1;
+		min-width: 0;
+	}
+
 	nav {
 		display: flex;
 		flex-direction: column;

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { t } from "$lib/i18n.svelte";
 	/**
 	 * A alça entre duas colunas de um layout em grade: arrasta para
 	 * redimensionar, e lembra a largura escolhida entre uma sessão e outra
@@ -162,7 +163,7 @@
 	style="left: {largura}px"
 	role="separator"
 	aria-orientation="vertical"
-	aria-label="Redimensionar coluna"
+	aria-label={t("divisor.redimensionar")}
 	aria-valuenow={largura}
 	aria-valuemin={min}
 	aria-valuemax={maximo}

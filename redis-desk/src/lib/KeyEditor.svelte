@@ -104,11 +104,11 @@
 		<div class="prazo">
 			<p class="prazo-atual">
 				{#if view.ttl_ms !== null}
-					Expira em <span class="mono" data-testid="prazo-atual"
+					{t("prazo.atual")} <span class="mono" data-testid="prazo-atual"
 						>{formatarPrazo(view.ttl_ms)}</span
 					>
 				{:else}
-					Esta chave não expira.
+					{t("prazo.naoExpira")}
 				{/if}
 			</p>
 
@@ -130,7 +130,7 @@
 					disabled={salvando || prazoMs === null}
 					onclick={() => prazoMs !== null && enviar({ op: "set_ttl", ttl_ms: prazoMs }, false)}
 				>
-					Definir prazo
+					{t("prazo.definir")}
 				</button>
 				{#if view.ttl_ms !== null}
 					<button
@@ -138,7 +138,7 @@
 						disabled={salvando}
 						onclick={() => enviar({ op: "set_ttl", ttl_ms: null }, false)}
 					>
-						Tirar o prazo
+						{t("prazo.tirar")}
 					</button>
 				{/if}
 			</div>
@@ -150,7 +150,7 @@
 			disabled={salvando}
 			onclick={() => enviar({ op: "delete_key" }, false)}
 		>
-			Apagar a chave
+			{t("acao.apagarChave")}
 		</button>
 	</div>
 </div>

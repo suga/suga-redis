@@ -155,3 +155,18 @@ test("o painel de valor fala espanhol", async () => {
 
 	expect(screen.getByText("Cargando la clave…")).toBeInTheDocument();
 });
+
+test("dá para trocar o idioma pela tela, e a escolha fica guardada", async () => {
+	const userEvent = (await import("@testing-library/user-event")).default;
+	const user = userEvent.setup();
+	localStorage.clear();
+	montarHostList();
+
+	// O seletor vive na coluna de hosts: é a única parte da janela que está
+	// na tela antes de qualquer host abrir.
+	const seletor = screen.getByRole("combobox", { name: "Idioma" });
+	await user.selectOptions(seletor, "en");
+
+	expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
+	expect(localStorage.getItem("idioma")).toBe("en");
+});

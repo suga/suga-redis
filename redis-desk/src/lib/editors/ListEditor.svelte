@@ -60,7 +60,7 @@
 									value: textBytes(item.texto),
 								})}
 						>
-							Salvar
+							{t("acao.salvar")}
 						</button>
 						<button
 							type="button"
@@ -69,7 +69,7 @@
 							disabled={busy}
 							onclick={() => onSubmit({ op: "remove_list_item", index: item.indice })}
 						>
-							Remover
+							{t("acao.remover")}
 						</button>
 					</td>
 				</tr>

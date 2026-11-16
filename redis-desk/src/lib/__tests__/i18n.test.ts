@@ -7,6 +7,7 @@
  * num idioma só.
  */
 import { beforeEach, describe, expect, test } from "vitest";
+import { formatarPrazo, haQuantoTempo, numero } from "$lib/formato";
 import { CATALOGOS, definirIdioma, idioma, iniciarIdioma, t } from "$lib/i18n.svelte";
 
 beforeEach(() => {
@@ -105,4 +106,30 @@ describe("os catálogos", () => {
 			expect(vazias).toEqual([]);
 		});
 	}
+});
+
+describe("número, tempo e data", () => {
+	test("o separador de milhar segue o idioma", () => {
+		expect(numero(1234567)).toBe("1.234.567");
+
+		definirIdioma("en");
+		expect(numero(1234567)).toBe("1,234,567");
+	});
+
+	test("quanto falta para expirar é texto traduzido", () => {
+		expect(formatarPrazo(0)).toBe("expirada");
+		expect(formatarPrazo(90_000)).toBe("1 min 30 s");
+
+		definirIdioma("en");
+		expect(formatarPrazo(0)).toBe("expired");
+		expect(formatarPrazo(90_000)).toBe("1 min 30 s");
+	});
+
+	test("há quanto tempo também", () => {
+		expect(haQuantoTempo(30)).toBe("agora há pouco");
+
+		definirIdioma("es");
+		expect(haQuantoTempo(30)).toBe("hace un momento");
+		expect(haQuantoTempo(7200)).toBe("hace 2 h");
+	});
 });

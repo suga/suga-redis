@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { t } from "$lib/i18n.svelte";
+	import { idioma, t } from "$lib/i18n.svelte";
 	/**
 	 * O log do aplicativo inteiro, mais recente primeiro: conexões, falhas e
 	 * operações lentas de TODOS os hosts, não só o que está aberto.
@@ -71,13 +71,13 @@
 
 	function hora(ms: number): string {
 		const quando = new Date(ms);
-		const relogio = quando.toLocaleTimeString("pt-BR", { hour12: false });
+		const relogio = quando.toLocaleTimeString(idioma(), { hour12: false });
 		// Este é um aplicativo de mesa que fica dias aberto: sem a data, a
 		// entrada de segunda-feira se lê como "agora há pouco".
 		if (quando.toDateString() === new Date().toDateString()) {
 			return relogio;
 		}
-		const dia = quando.toLocaleDateString("pt-BR", {
+		const dia = quando.toLocaleDateString(idioma(), {
 			day: "2-digit",
 			month: "2-digit",
 		});
