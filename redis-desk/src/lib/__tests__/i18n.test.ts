@@ -1,0 +1,108 @@
+/**
+ * O mecanismo de idioma da interface.
+ *
+ * O catálogo em português é a base: é o idioma em que o produto foi escrito
+ * e o único que está completo por construção. Os outros caem nele quando
+ * lhes falta uma chave — meia tela traduzida é pior que uma tela inteira
+ * num idioma só.
+ */
+import { beforeEach, describe, expect, test } from "vitest";
+import { CATALOGOS, definirIdioma, idioma, iniciarIdioma, t } from "$lib/i18n.svelte";
+
+beforeEach(() => {
+	definirIdioma("pt-BR");
+	localStorage.clear();
+});
+
+describe("tradução", () => {
+	test("devolve o texto do idioma escolhido", () => {
+		expect(t("acao.conectar")).toBe("Conectar");
+
+		definirIdioma("en");
+		expect(t("acao.conectar")).toBe("Connect");
+
+		definirIdioma("es");
+		expect(t("acao.conectar")).toBe("Conectar");
+	});
+
+	test("o idioma atual é legível", () => {
+		definirIdioma("en");
+		expect(idioma()).toBe("en");
+	});
+});
+
+describe("de onde vem o idioma inicial", () => {
+	/** Finge o idioma do navegador, que no app é o idioma do sistema. */
+	function sistemaFala(tag: string) {
+		Object.defineProperty(navigator, "language", { value: tag, configurable: true });
+	}
+
+	test("a escolha de quem usa fica gravada", () => {
+		definirIdioma("es");
+		expect(localStorage.getItem("idioma")).toBe("es");
+	});
+
+	test("a escolha guardada vence o idioma do sistema", () => {
+		// Como se uma sessão anterior tivesse escolhido espanhol.
+		localStorage.setItem("idioma", "es");
+		sistemaFala("en-US");
+
+		iniciarIdioma();
+
+		expect(idioma()).toBe("es");
+	});
+
+	test("sem escolha guardada, segue o idioma do sistema", () => {
+		sistemaFala("es-AR");
+		iniciarIdioma();
+		expect(idioma()).toBe("es");
+	});
+
+	test("idioma de sistema que não falamos cai no inglês", () => {
+		sistemaFala("fr-FR");
+		iniciarIdioma();
+		expect(idioma()).toBe("en");
+	});
+
+	test("escolha guardada inválida não derruba o app", () => {
+		localStorage.setItem("idioma", "klingon");
+		sistemaFala("en-US");
+		iniciarIdioma();
+		expect(idioma()).toBe("en");
+	});
+});
+
+describe("o que o texto carrega dentro", () => {
+	test("os números da frase entram no lugar certo", () => {
+		expect(t("estado.conectado", { ms: 12, banco: 3 })).toBe(
+			"conectado · 12 ms · banco 3",
+		);
+
+		definirIdioma("en");
+		expect(t("estado.conectado", { ms: 12, banco: 3 })).toBe(
+			"connected · 12 ms · database 3",
+		);
+	});
+
+	test("um valor que ninguém mandou aparece como a própria marca", () => {
+		// Melhor um buraco visível que uma frase truncada que parece correta.
+		expect(t("estado.conectado", { ms: 12 })).toContain("{banco}");
+	});
+});
+
+describe("os catálogos", () => {
+	const chavesBase = Object.keys(CATALOGOS["pt-BR"]).sort();
+
+	for (const [nome, catalogo] of Object.entries(CATALOGOS)) {
+		test(`${nome} tem exatamente as chaves do português`, () => {
+			expect(Object.keys(catalogo).sort()).toEqual(chavesBase);
+		});
+
+		test(`${nome} não tem texto vazio`, () => {
+			const vazias = Object.entries(catalogo)
+				.filter(([, texto]) => texto.trim() === "")
+				.map(([chave]) => chave);
+			expect(vazias).toEqual([]);
+		});
+	}
+});

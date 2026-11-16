@@ -56,3 +56,15 @@ Object.defineProperty(globalThis, "localStorage", {
 	configurable: true,
 	writable: true,
 });
+
+/**
+ * Os testes rodam sempre em português.
+ *
+ * Eles procuram botão pelo nome visível ("Conectar", "Salvar"), e sem
+ * travar o idioma passariam a depender do idioma de quem roda — verdes na
+ * máquina de um, vermelhos na de outro, sem nada ter mudado no código.
+ * Quem quiser exercitar outro idioma chama `definirIdioma` no próprio teste.
+ */
+import { definirIdioma } from "$lib/i18n.svelte";
+
+definirIdioma("pt-BR");
