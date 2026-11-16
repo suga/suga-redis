@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	import { t } from "$lib/i18n.svelte";
 	import { resumoDaOperacao } from "$lib/resumo";
 	/**
@@ -111,7 +112,7 @@
 		{/if}
 
 		{#if erro}
-			<p class="erro" role="alert">{erro}</p>
+			<ErroTecnico assunto="erro.aoResponderPedido" detalhe={erro} />
 		{/if}
 
 		<div class="acoes">
@@ -213,14 +214,6 @@
 		font-size: 0.9rem;
 	}
 
-	.erro {
-		margin: 0.5rem 0 0;
-		padding: 0.4rem 0.6rem;
-		border: 1px solid #5e3a38;
-		border-radius: var(--radius);
-		background: #2e2326;
-		color: #e49a94;
-	}
 
 	.acoes {
 		display: flex;

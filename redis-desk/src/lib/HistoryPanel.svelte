@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	import { idioma, t } from "$lib/i18n.svelte";
 	import { resumoDaOperacao } from "$lib/resumo";
 	/**
@@ -31,6 +32,10 @@
 	let entradas = $state<HistoryEntry[]>([]);
 	let carregando = $state(false);
 	let erro = $state("");
+	/** Qual operação produziu o erro que está na tela. */
+	let assuntoErro = $state<"erro.aoLerHistorico" | "erro.aoDesfazer">(
+		"erro.aoLerHistorico",
+	);
 	let pendente = $state<{ id: number; summary: string } | null>(null);
 	let desfazendo = $state(false);
 
@@ -41,6 +46,7 @@
 			entradas = await listHistory(hostId, LIMITE);
 		} catch (err) {
 			entradas = [];
+			assuntoErro = "erro.aoLerHistorico";
 			erro = errorMessage(err);
 		} finally {
 			carregando = false;
@@ -65,6 +71,7 @@
 			}
 		} catch (err) {
 			pendente = null;
+			assuntoErro = "erro.aoDesfazer";
 			erro = errorMessage(err);
 		} finally {
 			desfazendo = false;
@@ -114,7 +121,7 @@
 
 <section>
 	{#if erro}
-		<p class="erro" role="alert">{erro}</p>
+		<ErroTecnico assunto={assuntoErro} detalhe={erro} />
 	{/if}
 
 	{#if carregando && entradas.length === 0}
@@ -276,14 +283,6 @@
 		color: var(--text-faint);
 	}
 
-	.erro {
-		margin: 0 0 0.8rem;
-		padding: 0.4rem 0.6rem;
-		border: 1px solid #5e3a38;
-		border-radius: var(--radius);
-		background: #2e2326;
-		color: #e49a94;
-	}
 
 	@media (max-width: 44rem) {
 		.lados {

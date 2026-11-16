@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	/**
 	 * A coluna de hosts.
 	 *
@@ -272,13 +273,11 @@
 					{#if resultado && "ms" in resultado}
 						<p class="resultado mono">{t("teste.respondeu", { ms: resultado.ms })}</p>
 					{:else if resultado}
-						<p class="resultado falha" role="alert">{resultado.erro}</p>
+						<ErroTecnico assunto="erro.aoTestar" detalhe={resultado.erro} />
 					{/if}
 
 					{#if erroRemocao}
-						<p class="resultado falha" role="alert" data-testid="erro-remocao">
-							{erroRemocao}
-						</p>
+						<ErroTecnico assunto="erro.aoRemoverHost" detalhe={erroRemocao} testid="erro-remocao" />
 					{/if}
 				</li>
 			{/each}
@@ -452,9 +451,6 @@
 		font-size: 0.9rem;
 	}
 
-	.falha {
-		color: #e49a94;
-	}
 
 	/* Verde, âmbar e cinza — nunca vermelho, que neste app só quer dizer
 	   produção, e nunca caixa alta, que só a flag do ambiente usa. Mesmos

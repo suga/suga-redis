@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	import { t } from "$lib/i18n.svelte";
 	/**
 	 * A busca por texto dentro dos valores.
@@ -105,7 +106,7 @@
 	</form>
 
 	{#if erro}
-		<p class="erro" role="alert">{erro}</p>
+		<ErroTecnico assunto="erro.aoBuscar" detalhe={erro} />
 	{:else if resultado}
 		{#if indiceVelho}
 			<div class="velho" data-testid="indice-velho">
@@ -279,12 +280,4 @@
 		color: var(--text-dim);
 	}
 
-	.erro {
-		margin: 0;
-		padding: 0.4rem 0.6rem;
-		border: 1px solid #5e3a38;
-		border-radius: var(--radius);
-		background: #2e2326;
-		color: #e49a94;
-	}
 </style>

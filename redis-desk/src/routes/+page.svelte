@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	import { iniciarIdioma, t } from "$lib/i18n.svelte";
 	/**
 	 * A casca: barra do ambiente em cima, coluna de hosts à esquerda, área de
@@ -166,7 +167,7 @@
 
 		<main>
 			{#if erro}
-				<p class="erro" role="alert">{erro}</p>
+				<ErroTecnico assunto="erro.aoCarregarHosts" detalhe={erro} />
 			{/if}
 
 			{#if editando}
@@ -278,14 +279,6 @@
 		color: var(--text-faint);
 	}
 
-	.erro {
-		margin: 0 0 1rem;
-		padding: 0.4rem 0.6rem;
-		border: 1px solid #5e3a38;
-		border-radius: var(--radius);
-		background: #2e2326;
-		color: #e49a94;
-	}
 
 	@media (max-width: 40rem) {
 		.corpo {

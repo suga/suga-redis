@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	import { t } from "$lib/i18n.svelte";
 	/**
 	 * O painel de uma chave: cabeçalho com tipo, tamanho e prazo, e o
@@ -165,7 +166,7 @@
 
 <section>
 	{#if erro}
-		<p class="erro" role="alert">{erro}</p>
+		<ErroTecnico assunto="erro.aoLerChave" detalhe={erro} />
 	{:else if carregando && !view}
 		<p class="aviso">{t("valor.carregando")}</p>
 	{:else if view}
@@ -278,12 +279,4 @@
 		color: var(--text-faint);
 	}
 
-	.erro {
-		margin: 0;
-		padding: 0.4rem 0.6rem;
-		border: 1px solid #5e3a38;
-		border-radius: var(--radius);
-		background: #2e2326;
-		color: #e49a94;
-	}
 </style>

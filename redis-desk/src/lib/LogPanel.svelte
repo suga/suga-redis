@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	import { idioma, t } from "$lib/i18n.svelte";
 	/**
 	 * O log do aplicativo inteiro, mais recente primeiro: conexões, falhas e
@@ -114,7 +115,7 @@
 	</div>
 
 	{#if erro}
-		<p class="erro" role="alert">{erro}</p>
+		<ErroTecnico assunto="erro.aoLerLog" detalhe={erro} />
 	{/if}
 
 	{#if entradas.length === 0}

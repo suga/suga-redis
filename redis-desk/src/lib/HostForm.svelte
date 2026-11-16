@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	/**
 	 * Cadastro e edição de host.
 	 *
@@ -44,6 +45,8 @@
 	let env = $state<Env>(inicial?.env ?? "dev");
 
 	let erro = $state("");
+	/** Falha vinda do backend, que vem com detalhe técnico junto. */
+	let erroTecnico = $state("");
 	let salvando = $state(false);
 
 	/** A primeira coisa errada, ou `null` se está tudo certo. */
@@ -62,10 +65,12 @@
 	async function salvar(event: Event) {
 		event.preventDefault();
 		erro = "";
+		erroTecnico = "";
 
 		const problema = primeiroProblema();
 		if (problema) {
 			erro = problema;
+			erroTecnico = "";
 			return;
 		}
 
@@ -89,7 +94,8 @@
 				onSaved?.(await addHost(dados, password || null));
 			}
 		} catch (err) {
-			erro = errorMessage(err);
+			erro = "";
+			erroTecnico = errorMessage(err);
 		} finally {
 			salvando = false;
 		}
@@ -152,6 +158,9 @@
 
 	{#if erro}
 		<p class="erro" role="alert">{erro}</p>
+	{/if}
+	{#if erroTecnico}
+		<ErroTecnico assunto="erro.aoSalvarHost" detalhe={erroTecnico} />
 	{/if}
 
 	<div class="acoes">

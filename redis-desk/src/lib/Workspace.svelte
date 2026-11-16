@@ -1,4 +1,5 @@
 <script lang="ts">
+	import ErroTecnico from "$lib/ErroTecnico.svelte";
 	/**
 	 * A área de trabalho de um host aberto: escolha do banco, árvore de
 	 * chaves à esquerda, painel do valor à direita.
@@ -418,7 +419,7 @@
 				</select>
 			</label>
 			{#if erroBancos}
-				<p class="erro" role="alert" data-testid="erro-bancos">{erroBancos}</p>
+				<ErroTecnico assunto="erro.aoListarBancos" detalhe={erroBancos} testid="erro-bancos" />
 			{/if}
 
 			<div class="busca-linha">
@@ -457,7 +458,7 @@
 				<button onclick={varrer} disabled={varrendo}>{t("acao.varrerDeNovo")}</button>
 			</div>
 			{#if erroIndice}
-				<p class="erro" role="alert" data-testid="erro-indice">{erroIndice}</p>
+				<ErroTecnico assunto="erro.aoLerIndice" detalhe={erroIndice} testid="erro-indice" />
 			{/if}
 		</div>
 
@@ -532,7 +533,7 @@
 		{:else if aba === "logs"}
 			<LogPanel />
 		{:else if erro}
-			<p class="erro" role="alert">{erro}</p>
+			<ErroTecnico assunto="erro.aoLerChave" detalhe={erro} />
 		{:else if selecionada}
 			{#key `${selecionada}#${revisao}`}
 				<ValuePanel
@@ -708,14 +709,6 @@
 		transition: width 120ms linear;
 	}
 
-	.erro {
-		margin: 0;
-		padding: 0.4rem 0.6rem;
-		border: 1px solid #5e3a38;
-		border-radius: var(--radius);
-		background: #2e2326;
-		color: #e49a94;
-	}
 
 	@media (max-width: 52rem) {
 		.trabalho {
