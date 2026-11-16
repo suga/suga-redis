@@ -52,10 +52,10 @@ o instrumento para resolvê-la, e de quebra fechou o buraco que a escondia:
 
 | | |
 |:-|-:|
-| Testes Rust | **128**, todos passando |
-| Testes de interface | **165**, todos passando |
+| Testes Rust | **130**, todos passando |
+| Testes de interface | **179**, todos passando |
 | Linhas de código | ~23.000 |
-| Idiomas da interface | **3** (pt-BR, en, es), 176 chaves por catálogo |
+| Idiomas da interface | **3** (pt-BR, en, es), ~220 chaves por catálogo |
 | `cargo clippy` | 3 avisos pré-existentes (`config.rs:246`, `history.rs:381`, `history.rs:443`) |
 | `svelte-check` | 0 erros, 0 avisos |
 
@@ -295,28 +295,25 @@ Quem decide entre as duas hipóteses é a tela do `Workspace`:
 essas duas coisas** — essa leitura é o próximo passo, não um resultado
 desta sessão. Até lá, a causa raiz continua em aberto.
 
-### 2. O binário ainda só fala português
+### 2. As mensagens de erro do Rust continuam em português
 
-A tela fala três idiomas; o que vem do Rust, não. São **37 mensagens de
-erro** (`#[error(...)]` nos módulos de `core/`) que atravessam a fronteira
-do Tauri como texto pronto, mais o `--help` em `lib.rs` e as 10 descrições
-das ferramentas MCP.
+E continuam **de propósito**. São 37 (`#[error(...)]` nos módulos de
+`core/`), e elas atravessam a fronteira do Tauri como texto pronto. A tela
+não as traduz: ela põe acima delas, no idioma de quem lê, a frase que diz
+QUE operação falhou (`ErroTecnico.svelte`), e mostra a mensagem crua
+embaixo, em mono. Traduzir a mensagem técnica a esconderia de quem a cola
+num chamado ou a procura no código.
 
-O caminho decidido para os erros é o barato: frase traduzida na tela com a
-mensagem técnica do Rust embaixo, em fonte mono, como detalhe. Virá-los em
-código + parâmetros é de dois a três dias e mexe em sete módulos — só vale
-se alguém reclamar. As descrições do MCP ficam num idioma só **de
-propósito**: quem as lê é o modelo, não gente.
+Virá-las em código + parâmetros continua possível — de dois a três dias,
+mexendo em sete módulos — e continua não valendo enquanto ninguém reclamar.
 
-### 3. As imagens do README mostram a janela em português
+O `--help` **já segue** o idioma: ele lê `LC_ALL`/`LANG`, a convenção do
+Unix, porque a linha de comando não alcança a escolha guardada na janela.
 
-As nove capturas saíram antes do i18n. O README em inglês afirma que o
-carimbo sai `PRODUCTION` e argumenta justamente que uma janela gritando
-`PRODUÇÃO` para quem lê inglês perde o aviso — com as imagens logo abaixo
-mostrando essa janela. Refazer exige empacotar o binário novo e repetir a
-montagem descrita em *O que mudou*.
+As 10 descrições das ferramentas MCP ficam num idioma só, também de
+propósito: quem as lê é o modelo, não gente.
 
-### 4. Nenhuma release foi cortada
+### 3. Nenhuma release foi cortada
 
 Versão `0.1.0` nos quatro lugares, `git tag` vazio. O `release.yml` nunca
 rodou, então ninguém sabe se ele funciona. Depende de
@@ -324,7 +321,7 @@ rodou, então ninguém sabe se ele funciona. Depende de
 repositório. Enquanto não houver tag, o badge de versão do README aponta
 para uma release que não existe.
 
-### 5. Nível com milhões de nomes distintos
+### 4. Nível com milhões de nomes distintos
 
 Um nível visto em uso tinha ~3,4 milhões de filhos distintos. O teto por nível é
 50.000; além dele, o botão **Carregar mais** revarre só aquele prefixo e
@@ -338,7 +335,7 @@ filtrar só o que está em memória.
 
 **Era a pergunta aberta quando esta sessão terminou.**
 
-### 6. Não implementado, de propósito
+### 5. Não implementado, de propósito
 
 - **Reordenar itens de lista.** Não há troca atômica no conjunto de
   operações; em duas escritas, uma falha deixa a lista errada.
@@ -349,7 +346,7 @@ filtrar só o que está em memória.
   conferidos pelo binário empacotado via MCP, mas o clique humano continua
   devendo.
 
-### 7. Avisos conhecidos
+### 6. Avisos conhecidos
 
 - 3 avisos de clippy pré-existentes, todos de "função com muitos argumentos"
   ou `assert_eq!` com booleano literal. Nenhum é defeito.

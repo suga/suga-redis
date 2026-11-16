@@ -32,10 +32,35 @@ pub fn modo_de<I: IntoIterator<Item = String>>(args: I) -> Modo {
     Modo::Janela
 }
 
-/// O texto de `--help`.
+/// O texto de `--help`, no idioma do sistema.
 pub fn ajuda() -> String {
-    format!(
-        "Suga-Redis {versao}
+    ajuda_em(
+        std::env::var("LC_ALL")
+            .or_else(|_| std::env::var("LANG"))
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// O mesmo texto, para uma etiqueta de idioma qualquer.
+///
+/// A janela guarda a escolha de quem usa no `localStorage`, e a linha de
+/// comando não tem como alcançá-la. Em vez de inventar um terceiro lugar
+/// para guardar a mesma preferência, ela segue a convenção do Unix: `LANG`
+/// (ou `LC_ALL`, que manda mais). Idioma que não falamos cai no inglês,
+/// como no resto do aplicativo.
+pub fn ajuda_em(etiqueta: Option<&str>) -> String {
+    let base = etiqueta
+        .unwrap_or("")
+        .split(['_', '-', '.'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let versao = env!("CARGO_PKG_VERSION");
+    match base.as_str() {
+        "pt" => format!(
+            "Suga-Redis {versao}
 Cliente de mesa para Redis, com servidor MCP embutido.
 
 USO:
@@ -45,9 +70,36 @@ USO:
     suga-redis --help       mostra esta ajuda
 
 O modo --mcp conversa pelo protocolo MCP na entrada e saída padrão; não é
-feito para ser lido por gente. Veja docs/mcp-setup.md para ligá-lo ao Claude.",
-        versao = env!("CARGO_PKG_VERSION")
-    )
+feito para ser lido por gente. Veja docs/mcp-setup.md para ligá-lo ao Claude."
+        ),
+        "es" => format!(
+            "Suga-Redis {versao}
+Cliente de escritorio para Redis, con servidor MCP incorporado.
+
+USO:
+    suga-redis              abre la ventana de la aplicación
+    suga-redis --mcp        corre como servidor MCP en stdio
+    suga-redis --version    muestra la versión
+    suga-redis --help       muestra esta ayuda
+
+El modo --mcp habla el protocolo MCP por la entrada y la salida estándar; no
+está hecho para que lo lea una persona. Mira docs/mcp-setup.md para
+conectarlo a Claude."
+        ),
+        _ => format!(
+            "Suga-Redis {versao}
+A desktop Redis client, with an MCP server built in.
+
+USAGE:
+    suga-redis              opens the application window
+    suga-redis --mcp        runs as an MCP server over stdio
+    suga-redis --version    prints the version
+    suga-redis --help       prints this help
+
+The --mcp mode speaks the MCP protocol over standard input and output; it is
+not meant to be read by a person. See docs/mcp-setup.md to wire it to Claude."
+        ),
+    }
 }
 
 /// Sobe a janela do app. Este é o modo normal, sem argumento nenhum.
@@ -107,6 +159,18 @@ mod tests {
 
     fn modo(args: &[&str]) -> Modo {
         modo_de(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn a_ajuda_segue_o_idioma_do_sistema() {
+        // A janela guarda a escolha de quem usa; a linha de comando não tem
+        // como alcançá-la. Então ela segue a convenção do Unix e olha a
+        // variável de ambiente — e cai no inglês quando não reconhece.
+        assert!(ajuda_em(Some("pt_BR.UTF-8")).contains("abre a janela"));
+        assert!(ajuda_em(Some("es_ES.UTF-8")).contains("abre la ventana"));
+        assert!(ajuda_em(Some("en_US.UTF-8")).contains("opens the application window"));
+        assert!(ajuda_em(Some("fr_FR.UTF-8")).contains("opens the application window"));
+        assert!(ajuda_em(None).contains("opens the application window"));
     }
 
     #[test]
