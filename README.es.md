@@ -21,7 +21,7 @@ producción — y necesita saber *dónde está pisando* antes de tocar nada.
 
 <br>
 
-<img src="redis-desk/docs/img/hero.gif" alt="Abrir un host de producción, el árbol de claves armándose solo y un valor JSON abierto en el editor" width="900" />
+<img src="redis-desk/docs/img/es/hero.gif" alt="Abrir un host de producción, el árbol de claves armándose solo y un valor JSON abierto en el editor" width="900" />
 
 </div>
 
@@ -51,7 +51,7 @@ diluye.
 En la columna de hosts, cada fila lleva la marca de color de su entorno: se
 ve cuántos hosts de producción hay sin leer un solo nombre.
 
-<img src="redis-desk/docs/img/ambientes.png" alt="Columna de hosts con las marcas de entorno: dos filas de producción, una de preproducción y una de desarrollo" width="820" />
+<img src="redis-desk/docs/img/es/ambientes.png" alt="Columna de hosts con las marcas de entorno: dos filas de producción, una de preproducción y una de desarrollo" width="820" />
 
 ### 🌐 Tres idiomas, y abre en el tuyo
 
@@ -78,7 +78,7 @@ Subcadena de verdad, en cualquier posición, no solo palabra completa.
 El nombre de las claves se lee del servidor en el momento, así que buscar
 por nombre funciona incluso en una base recién abierta, sin barrido alguno.
 
-<img src="redis-desk/docs/img/busca-no-valor.png" alt="Búsqueda de arco@emp resaltando marco@empresa.com dentro del JSON de varias claves" width="820" />
+<img src="redis-desk/docs/img/es/busca.png" alt="Búsqueda de arco@emp resaltando marco@empresa.com dentro del JSON de varias claves" width="820" />
 
 ### 🌳 Un árbol que aguanta una base de verdad
 
@@ -90,7 +90,7 @@ Y la lectura es deliberadamente escueta: **once idas y vueltas** para leer
 50.000 claves, no trescientas cincuenta. En un Redis gestionado en otra
 región, esa es la diferencia entre 1,5 segundos y 45.
 
-<img src="redis-desk/docs/img/arvore.png" alt="Árbol agrupado por prefijo, con el recuento de claves de cada rama" width="820" />
+<img src="redis-desk/docs/img/es/arvore.png" alt="Árbol agrupado por prefijo, con el recuento de claves de cada rama" width="820" />
 
 ### ✏️ Un editor por tipo, con JSON coloreado y validado
 
@@ -99,13 +99,13 @@ campo/valor, `list` con índice, `zset` con miembro y puntuación.
 
 Un valor JSON se abre **coloreado e indentado**, listo para revisar.
 
-<img src="redis-desk/docs/img/editor-json.png" alt="Valor JSON abierto en el editor, coloreado e indentado" width="820" />
+<img src="redis-desk/docs/img/es/editor-json.png" alt="Valor JSON abierto en el editor, coloreado e indentado" width="820" />
 
 Al editar, un validador señala la **línea y la columna** del error — y no te
 impide guardar: una string en Redis no tiene por qué ser JSON, y esa
 decisión es tuya.
 
-<img src="redis-desk/docs/img/editor-json-invalido.png" alt="Aviso de JSON inválido señalando la línea 4, columna 3" width="820" />
+<img src="redis-desk/docs/img/es/editor-json-invalido.png" alt="Aviso de JSON inválido señalando la línea 4, columna 3" width="820" />
 
 Un valor binario rechaza la edición por texto: lo que volviera del campo ya
 no serían los mismos bytes.
@@ -121,7 +121,7 @@ Cada escritura guarda el valor anterior **antes** de que ocurra. El
 historial muestra qué cambió, quién lo cambió y cuándo, con el antes y el
 después lado a lado — y un botón para deshacer.
 
-<img src="redis-desk/docs/img/historico.png" alt="Historial con el antes y el después lado a lado y el botón de deshacer" width="820" />
+<img src="redis-desk/docs/img/es/historico.png" alt="Historial con el antes y el después lado a lado y el botón de deshacer" width="820" />
 
 ### 🔒 Producción pide confirmación
 
@@ -131,7 +131,7 @@ exacto del cambio. Un clic. Nunca escribir una frase.
 El cerrojo vive en el backend, no en la pantalla: un botón puede olvidarse
 de preguntar, esta función no se puede esquivar.
 
-<img src="redis-desk/docs/img/confirmacao-producao.png" alt="Diálogo de confirmación en un host de producción, con el resumen exacto del cambio" width="820" />
+<img src="redis-desk/docs/img/es/confirmacao-producao.png" alt="Diálogo de confirmación en un host de producción, con el resumen exacto del cambio" width="820" />
 
 ### 🤖 Claude lee tus bases — y pide permiso para escribir
 
@@ -144,7 +144,7 @@ una escritura, la ventana pasa al frente y tú la liberas escribiendo el
 nombre del host. Sin aplicación abierta no hay socket, y la escritura no
 ocurre.
 
-<img src="redis-desk/docs/img/escrita-da-llm.png" alt="Petición de escritura de Claude, esperando a que el dueño escriba el nombre del host para liberarla" width="820" />
+<img src="redis-desk/docs/img/es/escrita-da-llm.png" alt="Petición de escritura de Claude, esperando a que el dueño escriba el nombre del host para liberarla" width="820" />
 
 Vale en **cualquier entorno**, desarrollo incluido: la confirmación de
 producción pregunta *dónde* cae el cambio; este cerrojo pregunta *quién* lo

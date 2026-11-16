@@ -21,7 +21,7 @@ and need to know *where they are standing* before pressing anything.
 
 <br>
 
-<img src="redis-desk/docs/img/hero.gif" alt="Opening a production host, the key tree assembling itself and a JSON value open in the editor" width="900" />
+<img src="redis-desk/docs/img/en/hero.gif" alt="Opening a production host, the key tree assembling itself and a JSON value open in the editor" width="900" />
 
 </div>
 
@@ -50,7 +50,7 @@ No other label shouts alongside it, so the stamp never gets diluted.
 In the host column, every row carries the colored mark of its environment:
 you can see how many production hosts exist without reading a single name.
 
-<img src="redis-desk/docs/img/ambientes.png" alt="Host column with environment marks: two production rows, one staging and one development" width="820" />
+<img src="redis-desk/docs/img/en/ambientes.png" alt="Host column with environment marks: two production rows, one staging and one development" width="820" />
 
 ### 🌐 Three languages, and it opens in yours
 
@@ -76,7 +76,7 @@ A real substring, at any position, not just whole words.
 Key names are read from the server on the spot, so searching by name works
 even on a database you just opened, with no scan at all.
 
-<img src="redis-desk/docs/img/busca-no-valor.png" alt="Searching for arco@emp, highlighting marco@empresa.com inside the JSON of several keys" width="820" />
+<img src="redis-desk/docs/img/en/busca.png" alt="Searching for arco@emp, highlighting marco@empresa.com inside the JSON of several keys" width="820" />
 
 ### 🌳 A tree that survives a real database
 
@@ -88,7 +88,7 @@ And the reading is deliberately lean: **eleven round trips** to read 50,000
 keys, not three hundred and fifty. On a managed Redis in another region,
 that is the difference between 1.5 seconds and 45.
 
-<img src="redis-desk/docs/img/arvore.png" alt="Tree grouped by prefix, with the key count of each branch" width="820" />
+<img src="redis-desk/docs/img/en/arvore.png" alt="Tree grouped by prefix, with the key count of each branch" width="820" />
 
 ### ✏️ An editor per type, with colored and validated JSON
 
@@ -97,13 +97,13 @@ field/value table, `list` with indexes, `zset` with member and score.
 
 A JSON value opens **colored and indented**, ready to be read.
 
-<img src="redis-desk/docs/img/editor-json.png" alt="A JSON value open in the editor, colored and indented" width="820" />
+<img src="redis-desk/docs/img/en/editor-json.png" alt="A JSON value open in the editor, colored and indented" width="820" />
 
 While you edit, a validator points at the **line and column** of the error —
 and does not stop you from saving: a Redis string does not have to be JSON,
 and that call is yours.
 
-<img src="redis-desk/docs/img/editor-json-invalido.png" alt="Invalid JSON warning pointing at line 4, column 3" width="820" />
+<img src="redis-desk/docs/img/en/editor-json-invalido.png" alt="Invalid JSON warning pointing at line 4, column 3" width="820" />
 
 A binary value refuses text editing: what came back from the field would no
 longer be the same bytes.
@@ -119,7 +119,7 @@ Every write stores the previous value **before** it happens. The history
 shows what changed, who changed it and when, with before and after side by
 side — and a button to undo.
 
-<img src="redis-desk/docs/img/historico.png" alt="History with before and after side by side and the undo button" width="820" />
+<img src="redis-desk/docs/img/en/historico.png" alt="History with before and after side by side and the undo button" width="820" />
 
 ### 🔒 Production asks for confirmation
 
@@ -129,7 +129,7 @@ summary of the change. One click. Never type a phrase.
 The lock lives in the backend, not in the screen: a button may forget to
 ask, this function cannot be bypassed.
 
-<img src="redis-desk/docs/img/confirmacao-producao.png" alt="Confirmation dialog on a production host, with the exact summary of the change" width="820" />
+<img src="redis-desk/docs/img/en/confirmacao-producao.png" alt="Confirmation dialog on a production host, with the exact summary of the change" width="820" />
 
 ### 🤖 Claude reads your databases — and asks permission to write
 
@@ -142,7 +142,7 @@ for a write, the window comes to the front and you release it by typing the
 host name. With no app open there is no socket, and the write does not
 happen.
 
-<img src="redis-desk/docs/img/escrita-da-llm.png" alt="A write request from Claude, waiting for the owner to type the host name to release it" width="820" />
+<img src="redis-desk/docs/img/en/escrita-da-llm.png" alt="A write request from Claude, waiting for the owner to type the host name to release it" width="820" />
 
 This holds in **every environment**, development included: the production
 confirmation asks *where* the change lands; this lock asks *who* asked for

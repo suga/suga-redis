@@ -21,7 +21,7 @@ macOS 用 `.dmg` · Linux 用 `.AppImage` 和 `.deb` · 之后自动更新
 
 <br>
 
-<img src="redis-desk/docs/img/hero.gif" alt="打开一个生产环境主机，键树自动构建，一个 JSON 值在编辑器中打开" width="900" />
+<img src="redis-desk/docs/img/en/hero.gif" alt="打开一个生产环境主机，键树自动构建，一个 JSON 值在编辑器中打开" width="900" />
 
 </div>
 
@@ -50,7 +50,7 @@ Suga-Redis 从设计上回答了这三个问题。
 在主机列表中，每一行都带着所属环境的颜色标记：一个名字都不用读，
 就能看出有多少个生产主机。
 
-<img src="redis-desk/docs/img/ambientes.png" alt="带环境标记的主机列表：两行生产、一行预发布、一行开发" width="820" />
+<img src="redis-desk/docs/img/en/ambientes.png" alt="带环境标记的主机列表：两行生产、一行预发布、一行开发" width="820" />
 
 ### 🌐 三种语言，打开就是你的那一种
 
@@ -73,7 +73,7 @@ list 元素里、sorted set 成员里，还是以字符串形式存放的 JSON �
 键名是当场从服务器读取的，所以哪怕是刚刚打开的库，按名称搜索也能直接用，
 完全不需要预先扫描。
 
-<img src="redis-desk/docs/img/busca-no-valor.png" alt="搜索 arco@emp，在多个键的 JSON 中高亮 marco@empresa.com" width="820" />
+<img src="redis-desk/docs/img/en/busca.png" alt="搜索 arco@emp，在多个键的 JSON 中高亮 marco@empresa.com" width="820" />
 
 ### 🌳 扛得住真实数据库的键树
 
@@ -83,7 +83,7 @@ list 元素里、sorted set 成员里，还是以字符串形式存放的 JSON �
 读取过程是刻意精简的：读 5 万个键只需 **11 次往返**，而不是三百五十次。
 对于部署在另一个区域的托管 Redis，这就是 1.5 秒与 45 秒的差别。
 
-<img src="redis-desk/docs/img/arvore.png" alt="按前缀分组的键树，每个分支带键数量" width="820" />
+<img src="redis-desk/docs/img/en/arvore.png" alt="按前缀分组的键树，每个分支带键数量" width="820" />
 
 ### ✏️ 按类型区分的编辑器，JSON 带高亮与校验
 
@@ -92,12 +92,12 @@ list 元素里、sorted set 成员里，还是以字符串形式存放的 JSON �
 
 JSON 值打开时就是**带高亮、已缩进**的，可以直接读。
 
-<img src="redis-desk/docs/img/editor-json.png" alt="编辑器中打开的 JSON 值，带高亮与缩进" width="820" />
+<img src="redis-desk/docs/img/en/editor-json.png" alt="编辑器中打开的 JSON 值，带高亮与缩进" width="820" />
 
 编辑时，校验器会指出错误所在的**行和列** —— 但不会阻止你保存：
 Redis 的字符串本来就不必是 JSON，这个决定权在你手里。
 
-<img src="redis-desk/docs/img/editor-json-invalido.png" alt="JSON 无效的提示，指向第 4 行第 3 列" width="820" />
+<img src="redis-desk/docs/img/en/editor-json-invalido.png" alt="JSON 无效的提示，指向第 4 行第 3 列" width="820" />
 
 二进制值拒绝以文本方式编辑：从输入框回来的东西已经不是原来那些字节了。
 
@@ -111,7 +111,7 @@ Redis 的字符串本来就不必是 JSON，这个决定权在你手里。
 每一次写入都会在**动手之前**先保存旧值。历史记录会显示改了什么、
 谁改的、什么时候改的，前后并排对照 —— 还有一个撤销按钮。
 
-<img src="redis-desk/docs/img/historico.png" alt="历史记录中前后并排对照，以及撤销按钮" width="820" />
+<img src="redis-desk/docs/img/en/historico.png" alt="历史记录中前后并排对照，以及撤销按钮" width="820" />
 
 ### 🔒 生产环境必须确认
 
@@ -120,7 +120,7 @@ Redis 的字符串本来就不必是 JSON，这个决定权在你手里。
 
 这道锁住在后端，不在界面上：按钮可能忘记询问，而这个函数绕不过去。
 
-<img src="redis-desk/docs/img/confirmacao-producao.png" alt="生产主机上的确认对话框，写明本次改动的确切内容" width="820" />
+<img src="redis-desk/docs/img/en/confirmacao-producao.png" alt="生产主机上的确认对话框，写明本次改动的确切内容" width="820" />
 
 ### 🤖 Claude 能读你的库 —— 写入则要先请你放行
 
@@ -131,7 +131,7 @@ Redis 的字符串本来就不必是 JSON，这个决定权在你手里。
 窗口会跳到前台，你输入主机名才能放行。程序没开就没有 socket，
 写入也就不会发生。
 
-<img src="redis-desk/docs/img/escrita-da-llm.png" alt="来自 Claude 的写入请求，等待主人输入主机名放行" width="820" />
+<img src="redis-desk/docs/img/en/escrita-da-llm.png" alt="来自 Claude 的写入请求，等待主人输入主机名放行" width="820" />
 
 这在**任何环境**都成立，开发环境也不例外：生产确认问的是改动*落在哪里*，
 这道锁问的是*谁*提出的。
