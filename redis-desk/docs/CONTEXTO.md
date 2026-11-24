@@ -213,6 +213,27 @@ Duas regras seguidas de ponta a ponta:
   caminhos não é cosmética — o enumerado tem contagem conferida, cópia de
   segurança, linha de histórico e volta atrás, e o `FLUSHDB` não tem nenhum dos
   quatro.
+- **A cópia de segurança descreve o conjunto TENTADO, nunca o enumerado.** Ela
+  é *tirada* do enumerado — tem de ser, ela nasce antes de a primeira chave
+  sair —, mas a linha que a oferece de volta só pode conter os retratos das
+  chaves que o `UNLINK` chegou a tentar. Uma linha que ofereça mais do que isso
+  escreve, a um clique, valores velhos por cima de valores vivos; e `rollback`
+  **não tira retrato do que sobrescreve**, então não há segunda volta atrás.
+  Quem garante isso é `close_bulk_row` (`core/history.rs`), apoiado na
+  invariante de `bulk::BulkDeleted`: os lotes correm na ORDEM da lista e
+  `cancel` só é conferido entre eles, então o conjunto tentado é sempre um
+  **prefixo** dela e um `attempted: u64` o descreve por completo. Quando nada
+  foi tentado, **a linha é removida** — ela registraria uma mudança que não
+  aconteceu, e isso é pior do que não ter linha (a mesma decisão de
+  `write_with_backup`).
+- **`deleted` é um limite INFERIOR; `attempted` é o número que descreve um
+  conjunto.** `Pool::with_retry` reenvia o `UNLINK` quando a conexão morre, e
+  o comando é idempotente no estado final mas **não no valor de retorno**: um
+  reenvio de algo já aplicado devolve 0 para chaves que saíram. Por isso quem
+  recorta a cópia, a trie e o índice usa `attempted`, e a frase "o resto
+  continua no banco" é dita sobre ele. Usar `deleted` para recortar caches
+  deixa na árvore chaves que já não existem; afirmar sobre `deleted` mente
+  sobre o banco.
 - **Escrita em host `prod` exige confirmação**, decidida em `commands.rs`
   (não na tela — um botão pode esquecer de perguntar).
 - **Escrita pedida pela LLM exige o dono digitar o nome do host**,
@@ -234,12 +255,25 @@ Duas regras seguidas de ponta a ponta:
   custo de errar não cabe num clique. O `ConfirmDialog` não mudou; ganhou um
   irmão.
 - **Número que vive dos dois lados da fronteira do Tauri tem teste que compara
-  os dois.** O teto da cópia de segurança é `MAX_BACKUP_BYTES`, declarado em
-  `core/history.rs` e espelhado em `api.ts`; `delete-prefix.test.ts` lê a
-  constante do fonte Rust com expressão regular e exige igualdade. Sem isso os
-  dois andam separados em silêncio, e erram para os dois lados: tela menor que
-  o Rust manda para arquivo uma cópia que cabia embutida; tela maior oferece a
-  embutida e colhe o erro do Rust depois de a pessoa ter escolhido.
+  os dois.** São dois hoje: `MAX_BACKUP_BYTES` (`core/history.rs`) e
+  `MAX_ENUMERATED` (`core/bulk.rs`), os dois espelhados em `api.ts`, e
+  `delete-prefix.test.ts` lê as duas constantes do fonte Rust com expressão
+  regular e exige igualdade. Sem isso os dois andam separados em silêncio, e
+  erram para os dois lados: tela menor que o Rust manda para arquivo uma cópia
+  que cabia embutida; tela maior oferece a embutida e colhe o erro do Rust
+  depois de a pessoa ter escolhido. O teto de chaves passou um tempo do lado
+  errado desta regra — digitado como prosa em três catálogos — e foi
+  consertado junto do recorte da cópia.
+- **Toda operação longa sobre o banco pode ser interrompida, e cada fase dela
+  mostra andamento.** São três fases, e cada uma tem bandeira e número
+  próprios: a enumeração (`cancel_enumeration`, por (host, banco), porque o id
+  da contagem só nasce no fim da varredura), a leitura dos retratos
+  (`BulkTick::Lendo`) e a exclusão em lotes (`BulkTick::Apagando`). A fase dos
+  retratos é a mais LONGA — uma ida e volta por chave — e foi a última a
+  ganhar as duas coisas: sem elas, "desistir" não tinha efeito observável e a
+  janela ficava parada em "0 chaves apagadas", indistinguível de travada. Os
+  números de fases diferentes **não** dividem canal: "12.000 retratos lidos" e
+  "12.000 chaves apagadas" são frases diferentes.
 - **Valor truncado não pode ser salvo** — gravaria o pedaço sobre o inteiro.
 - Tipos editáveis: `string`, `hash`, `list`, `zset`. `set`, `stream` e
   RedisJSON são somente leitura.
@@ -439,7 +473,10 @@ as duas decididas e desenhadas em
 E o apagar em massa **não resolve este nível**: a enumeração para no teto de
 `bulk::MAX_ENUMERATED` (100.000 chaves) e marca o resultado como cortado, então
 um galho de 3,4 milhões não sai por aqui de uma vez. O teto existe pela mesma
-razão que o da trie — juntar nomes num `Vec` custa o tamanho do prefixo.
+razão que o da trie — juntar nomes num `Vec` custa o tamanho do prefixo. Com o
+resultado cortado, o diálogo e o desfecho **dizem** que vão sobrar chaves e que
+a operação precisa ser repetida: o item do menu promete "Apagar tudo sob este
+prefixo…", e sobrar chave em silêncio é pior que falhar alto.
 
 Nenhuma das duas tem item no menu hoje, e **não é para ganhar item cinza**
 enquanto não existir: item que nunca acende ensina a pessoa a ignorar o menu. O
