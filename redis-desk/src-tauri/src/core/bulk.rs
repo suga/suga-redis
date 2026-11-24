@@ -3,6 +3,9 @@
 //! classifica; apagar é responsabilidade de outra função, que decide o que
 //! fazer com a lista que sai daqui.
 
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::conn::{ConnError, Pool};
 use super::keys::{Alvo, KeyKind, SCAN_COUNT, ScanTick, escapar_glob};
 
@@ -206,6 +209,105 @@ async fn enumerate_com_teto(
                 kinds,
                 truncated,
             })
+        }
+    })
+    .await
+}
+
+/// Tamanho do lote de `UNLINK` — grande o bastante para poucas idas e
+/// voltas num prefixo com dezenas de milhares de chaves, pequeno o
+/// bastante para o `cancel` (ver `unlink_em_lotes`) ter chance real de
+/// interromper antes do fim da lista.
+pub const UNLINK_BATCH: usize = 500;
+
+/// Erro que CARREGA o parcial: o que já saiu, saiu, e quem grava o
+/// histórico (tarefa seguinte) precisa do número de verdade mesmo quando a
+/// conexão morre no meio de uma exclusão em lotes — um `ConnError` sozinho
+/// perderia essa contagem.
+#[derive(Debug)]
+pub struct BulkError {
+    pub deleted: u64,
+    pub source: ConnError,
+}
+
+/// O laço de lotes, sem Redis: `apagar` é a costura que de fato conversa
+/// com o servidor. `unlink_keys` passa um fechamento que manda `UNLINK`;
+/// os testes passam um fechamento que devolve resultados forjados — é o
+/// que torna o tamanho do lote e a falha no meio testáveis sem contêiner e
+/// sem precisar criar 1200 chaves de verdade.
+///
+/// `cancel` só é conferido ENTRE lotes, nunca dentro de um: o lote corrente
+/// sempre termina antes de parar, para não deixar uma exclusão pela
+/// metade dentro do próprio lote.
+pub(crate) async fn unlink_em_lotes<F, Fut>(
+    keys: &[String],
+    lote: usize,
+    cancel: &AtomicBool,
+    progress: impl Fn(u64),
+    apagar: F,
+) -> Result<u64, BulkError>
+where
+    F: Fn(&[String]) -> Fut,
+    Fut: Future<Output = Result<u64, ConnError>>,
+{
+    let mut total: u64 = 0;
+    let tamanho_lote = lote.max(1);
+
+    for pedaco in keys.chunks(tamanho_lote) {
+        match apagar(pedaco).await {
+            Ok(apagadas) => {
+                total += apagadas;
+                progress(total);
+            }
+            Err(source) => {
+                return Err(BulkError {
+                    deleted: total,
+                    source,
+                });
+            }
+        }
+
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+
+    Ok(total)
+}
+
+/// Apaga as chaves enumeradas, em lotes de `UNLINK_BATCH`, via `UNLINK` —
+/// nunca `DEL`: `DEL` libera a memória do valor na mesma linha de execução
+/// do servidor, e um lote com valores grandes prenderia o Redis inteiro
+/// enquanto libera; `UNLINK` manda essa liberação para uma thread de
+/// segundo plano.
+///
+/// Devolve quantas chaves o servidor disse ter apagado de verdade — que
+/// pode ser menos que `keys.len()` se alguma já tiver sumido sozinha
+/// (expirado, ou apagada por outra conexão) no caminho entre a enumeração
+/// e a exclusão.
+pub async fn unlink_keys(
+    pool: &Pool,
+    alvo: Alvo<'_>,
+    keys: &[String],
+    cancel: &AtomicBool,
+    progress: impl Fn(u64),
+) -> Result<u64, BulkError> {
+    let Alvo { host, pw, db } = alvo;
+
+    unlink_em_lotes(keys, UNLINK_BATCH, cancel, progress, |lote: &[String]| {
+        let lote = lote.to_vec();
+        async move {
+            pool.with_retry(host, db, pw, move |mut conn| {
+                let lote = lote.clone();
+                async move {
+                    let apagadas: u64 = redis::cmd("UNLINK")
+                        .arg(lote)
+                        .query_async(&mut conn)
+                        .await?;
+                    Ok(apagadas)
+                }
+            })
+            .await
         }
     })
     .await
@@ -596,5 +698,182 @@ mod tests {
             assert_eq!(enumeration.keys.len(), 5);
         })
         .await;
+    }
+
+    /// Converte uma lista de nomes literais num `Vec<String>` — mesma ideia
+    /// de `prefixos`, mas usada para nomes de chave de verdade, não
+    /// prefixos de busca.
+    fn nomes(lista: &[&str]) -> Vec<String> {
+        lista.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn deletes_what_it_was_given() {
+        let chaves = ["unlink_rs_test:a", "unlink_rs_test:b", "unlink_rs_test:c"];
+        com_chaves(&chaves, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let cancel = AtomicBool::new(false);
+
+            let apagadas = unlink_keys(&pool, alvo(&host), &nomes(&chaves), &cancel, |_| {})
+                .await
+                .unwrap();
+
+            assert_eq!(apagadas, 3);
+
+            let mut conn = pool.get(&host, host.db, None).await.unwrap();
+            for chave in chaves {
+                let existe: bool = redis::cmd("EXISTS")
+                    .arg(chave)
+                    .query_async(&mut conn)
+                    .await
+                    .unwrap();
+                assert!(!existe, "\"{chave}\" devia ter sido apagada");
+            }
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn leaves_the_rest_alone() {
+        let chaves = ["leaves_rs_test:a:1", "leaves_rs_test:b:1"];
+        com_chaves(&chaves, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let cancel = AtomicBool::new(false);
+
+            let apagadas = unlink_keys(
+                &pool,
+                alvo(&host),
+                &nomes(&["leaves_rs_test:a:1"]),
+                &cancel,
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(apagadas, 1);
+
+            let mut conn = pool.get(&host, host.db, None).await.unwrap();
+            let existe: bool = redis::cmd("EXISTS")
+                .arg("leaves_rs_test:b:1")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(existe, "\"leaves_rs_test:b:1\" não devia ter sido apagada");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn counts_what_actually_went() {
+        // Review Focus 3: uma chave da lista já não existe de verdade (uma
+        // outra conexão a apagou, ou ela expirou, entre a enumeração e a
+        // exclusão) — o servidor conta só o que de fato removeu, não o
+        // tamanho da lista pedida.
+        let chaves = ["counts_rs_test:a", "counts_rs_test:b"];
+        com_chaves(&chaves, || async {
+            let pool = Pool::new();
+            let host = test_host();
+            let mut conn = pool.get(&host, host.db, None).await.unwrap();
+            let _: () = redis::cmd("DEL")
+                .arg("counts_rs_test:b")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+
+            let cancel = AtomicBool::new(false);
+            let apagadas = unlink_keys(&pool, alvo(&host), &nomes(&chaves), &cancel, |_| {})
+                .await
+                .unwrap();
+
+            assert_eq!(apagadas, 1, "só \"counts_rs_test:a\" existia de verdade");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancel_stops_and_reports() {
+        // Sem Redis: o fechamento marca `cancel` ao processar o 1º lote, e
+        // o laço precisa parar ANTES do 2º — nunca no meio de um lote.
+        let keys: Vec<String> = (0..6).map(|i| format!("cancel_rs_test:{i}")).collect();
+        let cancel = AtomicBool::new(false);
+        let lotes_vistos = std::sync::Mutex::new(Vec::<usize>::new());
+
+        let total = unlink_em_lotes(
+            &keys,
+            2,
+            &cancel,
+            |_| {},
+            |lote: &[String]| {
+                lotes_vistos.lock().unwrap().push(lote.len());
+                cancel.store(true, Ordering::Relaxed);
+                let n = lote.len() as u64;
+                async move { Ok(n) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(total, 2, "só o 1º lote devia ter rodado");
+        assert_eq!(*lotes_vistos.lock().unwrap(), vec![2]);
+    }
+
+    #[tokio::test]
+    async fn batches_are_bounded() {
+        let keys: Vec<String> = (0..1200).map(|i| format!("batch_rs_test:{i:04}")).collect();
+        let cancel = AtomicBool::new(false);
+        let tamanhos = std::sync::Mutex::new(Vec::<usize>::new());
+
+        let total = unlink_em_lotes(
+            &keys,
+            UNLINK_BATCH,
+            &cancel,
+            |_| {},
+            |lote: &[String]| {
+                tamanhos.lock().unwrap().push(lote.len());
+                let n = lote.len() as u64;
+                async move { Ok(n) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*tamanhos.lock().unwrap(), vec![500, 500, 200]);
+        assert_eq!(total, 1200);
+    }
+
+    #[tokio::test]
+    async fn a_failed_batch_carries_the_partial() {
+        // Review Focus 5: uma falha de conexão no meio de uma exclusão não
+        // pode ser injetada contra um contêiner de verdade — por isso o
+        // fechamento forjado, que acerta o 1º lote e falha o 2º.
+        let keys: Vec<String> = (0..1000).map(|i| format!("fail_rs_test:{i:04}")).collect();
+        let cancel = AtomicBool::new(false);
+        let chamada = std::sync::atomic::AtomicUsize::new(0);
+
+        let erro = unlink_em_lotes(
+            &keys,
+            500,
+            &cancel,
+            |_| {},
+            |lote: &[String]| {
+                let indice = chamada.fetch_add(1, Ordering::Relaxed);
+                let n = lote.len() as u64;
+                async move {
+                    if indice == 0 {
+                        Ok(n)
+                    } else {
+                        Err(ConnError::Protocol(
+                            "conexão caiu no meio do lote".to_string(),
+                        ))
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(erro.deleted, 500);
     }
 }
