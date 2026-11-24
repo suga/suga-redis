@@ -397,15 +397,17 @@ test("BackupTooLarge reabre o diálogo oferecendo gravar em arquivo", async () =
 	expect(reaberto).toHaveTextContent(/não coube/i);
 	expect(screen.queryByTestId("erro-apagar")).toBeNull();
 
-	// A enumeração foi consumida antes da cópia ser lida, então reabrir
-	// custa uma varredura nova — e a segunda confirmação vai no id novo.
-	expect(enumerou).toHaveBeenCalledTimes(2);
+	// E NÃO paga outra varredura: a fachada devolve a contagem ao mapa
+	// nesta recusa, então o mesmo id continua valendo. Varrer de novo aqui
+	// cobraria a operação mais cara do aplicativo por uma escolha que a
+	// pessoa ainda nem refez.
+	expect(enumerou).toHaveBeenCalledTimes(1);
 
 	await user.click(within(reaberto).getByRole("button", { name: "Apagar 1.200 chaves" }));
 	expect(apagou).toHaveBeenLastCalledWith("enum-1", "file", null);
 });
 
-test("recusada também em arquivo, só restam apagar sem cópia e cancelar", async () => {
+test("o caminho inteiro das duas recusas: nada apagado, uma varredura só", async () => {
 	const user = userEvent.setup();
 	apagou.mockRejectedValueOnce({
 		kind: "backup_too_large",
@@ -446,6 +448,15 @@ test("recusada também em arquivo, só restam apagar sem cópia e cancelar", asy
 		within(ultimo).getByRole("button", { name: "Apagar 1.200 chaves sem volta atrás" }),
 	).toBeEnabled();
 	expect(within(ultimo).getByRole("button", { name: "Cancelar" })).toBeEnabled();
+
+	// Em nenhum ponto do caminho uma chave saiu. As duas provas disso na
+	// tela: nenhum desfecho foi anunciado, e a árvore nunca foi relida —
+	// a releitura da raiz só acontece depois de um apagar que aconteceu.
+	expect(screen.queryByTestId("aviso-apagar")).toBeNull();
+	expect(nivel).not.toHaveBeenCalledWith("h1", 0, "");
+	// E em nenhum ponto a pessoa pagou uma segunda varredura.
+	expect(enumerou).toHaveBeenCalledTimes(1);
+	expect(apagou.mock.calls.map((c) => c[0])).toEqual(["enum-1", "enum-1"]);
 });
 
 // ------------------------------------------------------- depois do apagar

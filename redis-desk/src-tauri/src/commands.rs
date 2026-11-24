@@ -1102,11 +1102,15 @@ pub async fn delete_prefix(
                         });
                     }
 
-                    // Daqui em diante a contagem sai do mapa para sempre,
-                    // inclusive se a exclusão falhar no meio: uma lista
-                    // parcialmente apagada já não descreve o que está no
-                    // banco, e oferecê-la de novo seria oferecer um número
-                    // que deixou de ser verdade.
+                    // Daqui em diante a contagem sai do mapa, e não volta se
+                    // a exclusão falhar no meio: uma lista parcialmente
+                    // apagada já não descreve o que está no banco, e
+                    // oferecê-la de novo seria oferecer um número que deixou
+                    // de ser verdade.
+                    //
+                    // A única exceção é a recusa por teto de cópia, logo
+                    // abaixo — lá nada chegou a sair, e a lista continua
+                    // valendo inteira.
                     let Some(guardada) = state.enumerations.lock().unwrap().remove(enumeration_id)
                     else {
                         return Err(CommandError::UnknownEnumeration(enumeration_id.to_string()));
@@ -1154,6 +1158,30 @@ pub async fn delete_prefix(
                         .await;
 
                     state.deletions.lock().unwrap().remove(enumeration_id);
+
+                    // A cópia não coube no teto — e o teto é conferido ANTES
+                    // de a primeira chave sair, então nenhuma saiu e a lista
+                    // que a pessoa leu na tela continua descrevendo o banco.
+                    //
+                    // Isto é a mesma classe de evento que
+                    // `needs_confirmation`: não aconteceu nada, e falta
+                    // escolher de novo. Lá a contagem também não é consumida,
+                    // e pela mesma razão — cobrar outra varredura do espaço
+                    // de chaves inteiro, que é a operação mais cara deste
+                    // aplicativo, é punir a pessoa errada por uma cópia
+                    // grande demais. Então ela volta ao mapa, sob o MESMO id,
+                    // para a tela reabrir o diálogo oferecendo o arquivo.
+                    if let Err(HistoryError::BackupTooLarge { bytes }) = resultado {
+                        state
+                            .enumerations
+                            .lock()
+                            .unwrap()
+                            .insert(enumeration_id.to_string(), guardada);
+                        return Err(CommandError::History(HistoryError::BackupTooLarge {
+                            bytes,
+                        }));
+                    }
+
                     // Erro aqui sobe sem mexer em cache nenhum: o parcial diz
                     // QUANTAS saíram, nunca QUAIS — ao contrário da
                     // desistência, em que os lotes pararam numa fronteira
@@ -2491,6 +2519,97 @@ mod tests {
         );
         assert!(!handle.truncated, "o teste não semeia perto do teto");
         handle.id
+    }
+
+    /// Baixar o teto é o que deixa este caso ser exercitado sem escrever
+    /// 64 MiB no Redis — ver `History::com_teto_de_copia`.
+    fn test_state_com_teto_de_copia(bytes: usize) -> (tempfile::TempDir, AppState) {
+        let (dir, mut state) = test_state();
+        state.history.com_teto_de_copia(bytes);
+        (dir, state)
+    }
+
+    #[tokio::test]
+    async fn a_refused_backup_keeps_the_enumeration_alive() {
+        // O teto é conferido ANTES de a primeira chave sair, então uma
+        // recusa por tamanho é da mesma classe que `needs_confirmation`:
+        // não aconteceu nada, e falta escolher de novo. Consumir a contagem
+        // aqui cobraria da pessoa outra varredura do espaço de chaves
+        // inteiro só porque a cópia era grande — a operação mais cara deste
+        // aplicativo, pelo motivo errado.
+        let (_dir, state) = test_state_com_teto_de_copia(10);
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:copia_grande:";
+        let chaves = seed_bulk(&mut conn, prefixo, 3).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let id = enumerate_exactly(&state, &host_id, prefixo, 3).await;
+
+        let erro = delete_prefix(&state, &id, BackupRequest::Inline, None, |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(
+            erro.kind(),
+            "backup_too_large",
+            "a tela só reabre o diálogo se distinguir este erro, veio {erro:?}"
+        );
+
+        // Nada saiu — é o que a própria mensagem do erro promete.
+        for chave in &chaves {
+            assert!(
+                still_there(&mut conn, chave).await,
+                "a recusa por teto não pode apagar nada: {chave} sumiu"
+            );
+        }
+
+        // E a contagem continua guardada, sob o MESMO id: é isso que deixa
+        // a segunda escolha não pagar outra varredura.
+        assert!(
+            state.enumerations.lock().unwrap().contains_key(&id),
+            "a contagem precisava voltar ao mapa depois da recusa por teto"
+        );
+
+        // A prova de que ela vale de verdade, e não só de que está no mapa:
+        // a segunda tentativa, agora sem cópia, apaga as mesmas três.
+        let outcome = delete_prefix(&state, &id, BackupRequest::None, None, |_| {})
+            .await
+            .unwrap();
+        let WriteOutcome::Deleted { deleted, .. } = outcome else {
+            panic!("a segunda tentativa precisava apagar, veio {outcome:?}")
+        };
+        assert_eq!(deleted, 3);
+        for chave in &chaves {
+            assert!(!still_there(&mut conn, chave).await, "{chave} devia ter saído");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_backup_refused_in_a_file_too_keeps_the_enumeration_alive() {
+        // O teto é em BYTES e vale para os dois caminhos: `BackupChoice::File`
+        // passa pelos mesmos `read_snapshots`. Gravar em arquivo não é,
+        // portanto, uma saída garantida — e quando ela também é recusada a
+        // contagem tem que sobreviver igual, senão a pessoa fica sem
+        // nenhuma escolha que não custe outra varredura.
+        let (_dir, state) = test_state_com_teto_de_copia(10);
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:copia_grande_arquivo:";
+        let chaves = seed_bulk(&mut conn, prefixo, 3).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let id = enumerate_exactly(&state, &host_id, prefixo, 3).await;
+
+        let erro = delete_prefix(&state, &id, BackupRequest::File, None, |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(erro.kind(), "backup_too_large", "veio {erro:?}");
+
+        for chave in &chaves {
+            assert!(still_there(&mut conn, chave).await, "{chave} sumiu");
+        }
+        assert!(
+            state.enumerations.lock().unwrap().contains_key(&id),
+            "a contagem precisava voltar ao mapa também no caminho do arquivo"
+        );
     }
 
     #[tokio::test]

@@ -547,19 +547,23 @@
 	 * não pode pesar um número velho — é essa diferença que faz a enumeração
 	 * ser um passo à parte.
 	 *
-	 * `copiaRecusada` só vem preenchido na reabertura depois de um
-	 * `BackupTooLarge`: a enumeração anterior já tinha sido consumida pela
-	 * fachada quando a cópia foi recusada, então a volta custa uma varredura
-	 * nova — e é por isso que o diálogo volta mostrando "Varrendo…".
+	 * Uma recusa por teto de cópia NÃO passa por aqui: a enumeração
+	 * sobrevive a ela na fachada, e o diálogo que já está na tela só troca
+	 * as opções de cópia (ver `confirmarApagar`). Varrer de novo ali seria
+	 * cobrar a operação mais cara do aplicativo por uma escolha que a
+	 * pessoa ainda nem refez.
 	 */
-	async function comecarApagar(
-		prefixos: string[],
-		copiaRecusada: BackupRequest | null = null,
-	) {
+	async function comecarApagar(prefixos: string[]) {
 		erroEnumerar = "";
 		erroApagar = "";
 		avisoApagar = "";
-		apagar = { prefixos, enumeracao: null, progresso: null, apagados: null, copiaRecusada };
+		apagar = {
+			prefixos,
+			enumeracao: null,
+			progresso: null,
+			apagados: null,
+			copiaRecusada: null,
+		};
 
 		const minha = ++geracaoApagar;
 		try {
@@ -618,12 +622,18 @@
 			if (apagar !== atual) return;
 
 			if (isApiError(err) && err.kind === "backup_too_large") {
-				// Nenhuma chave saiu: o Rust lê os retratos ANTES de apagar, e
+				// Nenhuma chave saiu: o Rust lê os retratos ANTES de apagar e
 				// recusa inteiro quando eles passam do teto. Isto não é uma
 				// falha a mostrar e pronto — é a escolha da cópia voltando com
 				// uma opção a menos. Apagar com uma cópia que não coube não é
 				// uma terceira saída.
-				await comecarApagar(atual.prefixos, backup);
+				//
+				// A contagem continua valendo: a fachada a devolve ao mapa
+				// nesta recusa, sob o mesmo id, exatamente como já fazia com
+				// `needs_confirmation`. Por isso aqui não se varre de novo —
+				// o diálogo que já está na tela só muda de opções.
+				atual.apagados = null;
+				atual.copiaRecusada = backup;
 				return;
 			}
 			apagar = null;

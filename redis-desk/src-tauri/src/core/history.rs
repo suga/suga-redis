@@ -655,6 +655,13 @@ fn bulk_entry_key(prefixes: &[String]) -> &str {
 
 pub struct History {
     conn: Mutex<Connection>,
+    /// O teto da cópia de segurança de uma exclusão em massa, em bytes.
+    ///
+    /// Campo, e não só a constante, para que o teste do caso de corte na
+    /// FACHADA não precise criar 64 MiB de valor — mesmo motivo do
+    /// parâmetro de `delete_prefix_com_teto`, que cobre o mesmo corte aqui
+    /// dentro. Nasce em `MAX_BACKUP_BYTES` e só muda em teste.
+    max_backup_bytes: usize,
 }
 
 impl History {
@@ -672,7 +679,16 @@ impl History {
 
         Ok(History {
             conn: Mutex::new(conn),
+            max_backup_bytes: MAX_BACKUP_BYTES,
         })
+    }
+
+    /// Baixa o teto da cópia de segurança. Só para teste: é o que deixa o
+    /// caso de corte ser exercitado na fachada sem escrever 64 MiB no
+    /// Redis — o mesmo motivo do parâmetro de `delete_prefix_com_teto`.
+    #[cfg(test)]
+    pub(crate) fn com_teto_de_copia(&mut self, bytes: usize) {
+        self.max_backup_bytes = bytes;
     }
 
     /// Grava uma linha nova do histórico e devolve seu id. Privado: usado
@@ -839,7 +855,7 @@ impl History {
         let keys = plan.keys;
         let cancel = plan.cancel;
 
-        self.delete_prefix_com_teto(pool, alvo, plan, MAX_BACKUP_BYTES, move || {
+        self.delete_prefix_com_teto(pool, alvo, plan, self.max_backup_bytes, move || {
             unlink_keys(pool, alvo, keys, cancel, progress)
         })
         .await
