@@ -107,6 +107,26 @@ test("vira para cima quando não cabe abaixo do cursor", () => {
 	expect(menu.style.bottom).not.toBe("");
 });
 
+test("não vira quando cabe abaixo do cursor", () => {
+	window.innerHeight = 800;
+	// Mesma altura fingida do teste de viragem — aqui sobra espaço de
+	// sobra (800 - 10 - 150), então o menu deveria abrir para baixo,
+	// sem virar. Uma implementação que sempre virasse passaria pelos
+	// seis testes do brief sem que nenhum deles notasse.
+	Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+		configurable: true,
+		value: 150,
+	});
+
+	const { container } = render(ContextMenu, {
+		props: { x: 10, y: 10, itens: ITENS, onEscolher: vi.fn(), onFechar: vi.fn() },
+	});
+
+	const menu = container.querySelector('[role="menu"]') as HTMLElement;
+	expect(menu.style.top).not.toBe("");
+	expect(menu.style.bottom).toBe("");
+});
+
 test("devolve o foco ao elemento que o abriu", async () => {
 	const abridor = document.createElement("button");
 	abridor.textContent = "abrir menu";

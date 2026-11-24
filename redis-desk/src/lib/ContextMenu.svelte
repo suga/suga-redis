@@ -20,9 +20,9 @@
 	 * desenhado fora da tela é um menu com item que ninguém alcança.
 	 *
 	 * Também serve quem opera por teclado: as setas andam entre os itens,
-	 * Enter escolhe, e Escape fecha devolvendo o foco a quem abriu o menu —
-	 * do jeito que `ConfirmDialog` já faz, para quem abriu sem querer não
-	 * se perder na tela.
+	 * Enter escolhe, e Escape fecha devolvendo o foco a quem abriu o menu
+	 * (guardado de `document.activeElement` na montagem) — quem abriu sem
+	 * querer não se perder na tela.
 	 */
 	import { onMount, tick } from "svelte";
 
