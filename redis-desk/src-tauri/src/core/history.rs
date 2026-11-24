@@ -100,10 +100,14 @@ pub struct FailedKey {
 pub enum RollbackOutcome {
     /// A entrada mirava uma chave só, e ela voltou ao que era.
     Key,
-    /// A entrada era uma exclusão em massa: quantas chaves voltaram e quais
+    /// A entrada era uma exclusão em massa: QUAIS chaves voltaram e quais
     /// não voltaram, com o motivo de cada uma.
+    ///
+    /// Os nomes, e não só a contagem: quem chamou precisa repor cada chave
+    /// nos caches que a exclusão fez esquecer (a trie da árvore, em
+    /// `commands::rollback`), e um número não diz quais repor.
     Bulk {
-        restored: u64,
+        restored: Vec<String>,
         failed: Vec<FailedKey>,
     },
 }
@@ -1054,11 +1058,11 @@ impl History {
     ) -> Result<RollbackOutcome> {
         let snapshots = bulk_snapshots(entry, backup)?;
 
-        let mut restored = 0u64;
+        let mut restored: Vec<String> = Vec::new();
         let mut failed: Vec<FailedKey> = Vec::new();
         for KeySnapshot { key, value } in snapshots {
             match restore_value(pool, host, pw, entry.db, &key, &Some(value), None).await {
-                Ok(()) => restored += 1,
+                Ok(()) => restored.push(key),
                 Err(err) => failed.push(FailedKey {
                     key,
                     reason: err.to_string(),
@@ -2279,10 +2283,28 @@ mod tests {
         let now = now_unix_ms_for_test();
 
         let human_id = history
-            .insert_entry(&host, host.db, "chave", "resumo", None, None, Actor::Human, now)
+            .insert_entry(
+                &host,
+                host.db,
+                "chave",
+                "resumo",
+                None,
+                None,
+                Actor::Human,
+                now,
+            )
             .unwrap();
         let llm_id = history
-            .insert_entry(&host, host.db, "chave", "resumo", None, None, Actor::Llm, now)
+            .insert_entry(
+                &host,
+                host.db,
+                "chave",
+                "resumo",
+                None,
+                None,
+                Actor::Llm,
+                now,
+            )
             .unwrap();
 
         assert_eq!(history.get(human_id).unwrap().actor, Actor::Human);
@@ -2891,7 +2913,7 @@ mod tests {
 
         match relatorio {
             RollbackOutcome::Bulk { restored, failed } => {
-                assert_eq!(restored, 3);
+                assert_eq!(restored.len(), 3);
                 assert!(failed.is_empty(), "nenhuma chave devia falhar: {failed:?}");
             }
             outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
@@ -2965,7 +2987,7 @@ mod tests {
 
         match relatorio {
             RollbackOutcome::Bulk { restored, failed } => {
-                assert_eq!(restored, 2);
+                assert_eq!(restored.len(), 2);
                 assert!(failed.is_empty(), "nenhuma chave devia falhar: {failed:?}");
             }
             outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
@@ -3104,7 +3126,7 @@ mod tests {
 
         match relatorio {
             RollbackOutcome::Bulk { restored, failed } => {
-                assert_eq!(restored, 2, "duas voltaram");
+                assert_eq!(restored.len(), 2, "duas voltaram");
                 assert_eq!(failed.len(), 1, "uma não: {failed:?}");
                 assert_eq!(failed[0].key, set_key);
                 assert!(
@@ -3216,7 +3238,7 @@ mod tests {
 
         match relatorio {
             RollbackOutcome::Bulk { restored, failed } => {
-                assert_eq!(restored, 2, "a cópia está lá e é usável");
+                assert_eq!(restored.len(), 2, "a cópia está lá e é usável");
                 assert!(failed.is_empty(), "nenhuma chave devia falhar: {failed:?}");
             }
             outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
