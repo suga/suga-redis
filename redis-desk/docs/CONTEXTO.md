@@ -4,7 +4,7 @@ Documento de retomada. Leia antes de mexer no código — especialmente a
 seção **Fatos que custaram caro**, que registra coisas que não se deduzem
 lendo os arquivos e que já quebraram este projeto uma vez cada.
 
-Estado em 2026-11-16. Branch `main`, 97 commits, árvore limpa.
+Estado em 2026-11-24. Branch `feat/menu-de-indice`, 135 commits, árvore limpa.
 O repositório é **público** (`suga/suga-redis`) e é projeto pessoal.
 
 ---
@@ -48,19 +48,29 @@ o instrumento para resolvê-la, e de quebra fechou o buraco que a escondia:
   pararam de existir: cada falha agora tem seu próprio estado (`erroBancos`,
   `erroIndice`), visível, em vez de se disfarçar de banco vazio.
 
+Um terceiro desenho (`docs/superpowers/specs/2026-11-24-menu-de-indice-design.md`)
+trocou o menu nativo do sistema no botão direito da árvore por um menu do
+aplicativo e, dentro dele, entregou **apagar todas as chaves sob um prefixo**:
+seleção múltipla de prefixos, enumeração conferida na hora, cópia de segurança
+embutida ou em arquivo, uma entrada de histórico por operação e volta atrás.
+Do mesmo desenho, **busca no galho** e **estatística do prefixo** ficaram por
+fazer (ver *Onde está incompleto*).
+
 ## Estado
 
 | | |
 |:-|-:|
-| Testes Rust | **130**, todos passando |
-| Testes de interface | **179**, todos passando |
-| Linhas de código | ~23.000 |
-| Idiomas da interface | **3** (pt-BR, en, es), ~220 chaves por catálogo |
-| `cargo clippy` | 3 avisos pré-existentes (`config.rs:246`, `history.rs:381`, `history.rs:443`) |
+| Testes Rust | **196**, todos passando |
+| Testes de interface | **262**, todos passando |
+| Linhas de código | ~32.000 (~17.000 Rust, ~15.000 interface) |
+| Idiomas da interface | **3** (pt-BR, en, es), ~260 chaves por catálogo |
+| `cargo clippy` | 3 avisos pré-existentes (`config.rs:246`, `history.rs:697`, `history.rs:776`) |
 | `svelte-check` | 0 erros, 0 avisos |
 
 Empacotado e instalado em `/Applications/Suga-Redis.app`, registrado no
-Claude Code como servidor MCP (`claude mcp list` mostra `✔ Connected`).
+Claude Code como servidor MCP (`claude mcp list` mostra `✔ Connected`). **Esse
+empacotamento é de 2026-11-16 e não tem o menu de contexto nem o apagar em
+massa** — nada desta leva foi empacotado ainda.
 
 ## Como rodar
 
@@ -82,10 +92,30 @@ npm run dist                      # empacota em dist/ (gitignorado)
 ditto dist/Suga-Redis.app /Applications/Suga-Redis.app
 ```
 
-Bancos usados pelos testes, para não colidir ao escrever novos: 0–2
-(`conn`/`value`), 1 (`keys`), 4 (`search` índice frio), 5 (`index`), 6–9
-(`search`), 10 (`commands`), 11 (`mcp`), 12 (`approval`), 15 (medições
-descartáveis).
+A suíte Rust roda **em paralelo contra o mesmo contêiner**, então cada módulo
+de teste tem o seu banco. Quem está lá hoje, conferido no código, para não
+colidir ao escrever novos:
+
+| Banco | De quem é |
+|:-|:-|
+| 0 | `core::conn` (`db_sizes` conta as chaves do db0) |
+| 1 | `core::keys` |
+| 2 | `core::value`, leitura |
+| 3 | `core::value`, escrita |
+| 4 | `core::history` e o teste de índice frio de `core::search` |
+| 5 | `core::index` |
+| 6–9 | `core::search` |
+| 10 | `commands.rs` |
+| 11 | `mcp` |
+| 12 | `approval` |
+| 13 | `core::bulk`, os testes de exclusão em massa de `commands.rs`, e os de conectar/desconectar de `core::conn` e `commands.rs` |
+| 14 | os testes de exclusão em massa de `core::history` |
+| 15 | medições descartáveis |
+
+**O 13 é o banco mais povoado, e isso impõe uma disciplina:** quem escrever
+teste nele dá a cada caso um prefixo de chave só dele, não enumera o banco
+inteiro e **não confere `DBSIZE`** — a contagem do banco é de todo mundo. O que
+prova que uma exclusão não aconteceu é a própria chave continuar lá.
 
 ## O que mudou depois de 2026-11-05
 
@@ -134,6 +164,7 @@ src-tauri/src/
     config.rs    hosts; senha no chaveiro do SO, nunca em arquivo
     conn.rs      pool por (host, banco); classificação de erro
     keys.rs      varredura, trie de prefixos, paginação de galho
+    bulk.rs      enumeração por prefixo; exclusão por UNLINK em lotes
     value.rs     ler/escrever por tipo, paginação de string
     index.rs     índice FTS5 (trigram) para busca em VALORES
     search.rs    busca; nome ao vivo + valor pelo índice
@@ -162,11 +193,36 @@ Duas regras seguidas de ponta a ponta:
 
 - `KEYS`, `FLUSHALL` e `FLUSHDB` são proibidos. O único lugar com `FLUSHALL`
   é `scripts/test-redis.sh`, contra o contêiner de teste.
+- **Apagar em massa é sempre enumerar e apagar o enumerado**, nunca `FLUSHDB`
+  — inclusive quando o alvo são todos os prefixos de primeiro nível, que no
+  efeito esvazia o banco. **A contagem mostrada é a contagem apagada**: apaga-se
+  a lista que o diálogo exibiu, não o que o prefixo tiver no instante de
+  apagar. A diferença entre os dois caminhos não é cosmética — o enumerado tem
+  contagem conferida, cópia de segurança, linha de histórico e volta atrás, e o
+  `FLUSHDB` não tem nenhum dos quatro.
 - **Escrita em host `prod` exige confirmação**, decidida em `commands.rs`
   (não na tela — um botão pode esquecer de perguntar).
 - **Escrita pedida pela LLM exige o dono digitar o nome do host**,
   exatamente, em qualquer ambiente. Sem app aberto não há socket e a escrita
   não acontece. Isso vale por construção.
+- **Exclusão em massa em host `prod` também exige o nome do host digitado**,
+  byte a byte — sem aparar espaço e sem ignorar caixa, como o Rust compara
+  (`DeletePrefixDialog.svelte`, `liberado`). É uma **divergência deliberada**,
+  não uma inconsistência a corrigir: o `ConfirmDialog.svelte` diz em comentário
+  que a decisão do produto é "que a pessoa seja avisada, não que seja obrigada
+  a datilografar", e essa decisão continua valendo para o que ela governa —
+  **uma** escrita, em **uma** chave, com cópia automática e volta atrás a um
+  clique. Aqui o raio é de N chaves e o caminho "sem cópia" não tem volta: é a
+  mesma régua que o projeto já aplica à escrita da LLM, pelo mesmo motivo — o
+  custo de errar não cabe num clique. O `ConfirmDialog` não mudou; ganhou um
+  irmão.
+- **Número que vive dos dois lados da fronteira do Tauri tem teste que compara
+  os dois.** O teto da cópia de segurança é `MAX_BACKUP_BYTES`, declarado em
+  `core/history.rs` e espelhado em `api.ts`; `delete-prefix.test.ts` lê a
+  constante do fonte Rust com expressão regular e exige igualdade. Sem isso os
+  dois andam separados em silêncio, e erram para os dois lados: tela menor que
+  o Rust manda para arquivo uma cópia que cabia embutida; tela maior oferece a
+  embutida e colhe o erro do Rust depois de a pessoa ter escolhido.
 - **Valor truncado não pode ser salvo** — gravaria o pedaço sobre o inteiro.
 - Tipos editáveis: `string`, `hash`, `list`, `zset`. `set`, `stream` e
   RedisJSON são somente leitura.
@@ -235,6 +291,16 @@ texto. O validador em `src/lib/json.ts` usa o `JSON.parse` só para o
   torná-lo **idempotente**, não fazê-lo disparar menos.
 - `$state` inicializado a partir de prop captura só o valor inicial; use
   `untrack` + `{#key}` para remontar (ver `HostForm`, `Workspace`).
+- **Um `$derived` se recalcula na hora em que é lido.** Mexer no que ele lê,
+  no meio de um laço que indexa o resultado dele, move o chão: a lista se
+  refaz menor debaixo de índices contados na lista maior. Em `KeyTree.svelte`
+  a lista achatada `linhas` depende da seleção, e limpar a seleção antes de
+  percorrer custou duas coisas — um `TypeError` saindo do manipulador de
+  clique no `Shift+clique` (`atuais[i]` virava `undefined`) e, pior porque
+  ninguém reporta, um estreitamento calado no `⌘+A`, que marcava menos linhas
+  do que a tela mostrava. A correção é **fotografar a lista antes de qualquer
+  mutação e indexar a foto** (`const atuais = linhas;` em `marcarFaixa` e
+  `marcarPrimeiroNivel`).
 - `bind:value` em `<input type="number">` entrega número, não texto.
 
 ### Build do linux em contêiner
@@ -333,7 +399,32 @@ que serve é **filtrar dentro do galho** — uma varredura direcionada em vez de
 o filtro da árvore chamar essa busca quando o galho está cortado, em vez de
 filtrar só o que está em memória.
 
-**Era a pergunta aberta quando esta sessão terminou.**
+**Continua por fazer, e agora tem onde morar.** A leva de 2026-11-24 construiu
+o menu de botão direito que hospeda esses itens, e dele entregou só o apagar em
+massa — que resolve *zerar* o galho, não *achar* dentro dele. Ficaram de fora,
+as duas decididas e desenhadas em
+`docs/superpowers/specs/2026-11-24-menu-de-indice-design.md`:
+
+- **Busca no galho** — o item do menu que chama a busca ao vivo com o prefixo
+  do galho por âncora, em vez de filtrar o que está em memória. É esta pergunta
+  aberta, vista pelo outro lado.
+- **Estatística do prefixo (abordagem E2)** — uma varredura dirigida colhendo
+  `TYPE`, `PTTL` e `MEMORY USAGE` por chave, produzindo quebra por tipo,
+  memória total, quantas chaves sem TTL e as maiores. Só o `TYPE` existe hoje,
+  colhido de graça pela enumeração que precede o apagar (`core/bulk.rs`). O
+  resto custa os pipelines de metadado que foram **tirados** da varredura de
+  árvore por preço — eles levavam 11 idas e voltas a 350 —, e por isso o
+  desenho os põe sob pedido explícito, com progresso, nunca por conta própria.
+
+E o apagar em massa **não resolve este nível**: a enumeração para no teto de
+`bulk::MAX_ENUMERATED` (100.000 chaves) e marca o resultado como cortado, então
+um galho de 3,4 milhões não sai por aqui de uma vez. O teto existe pela mesma
+razão que o da trie — juntar nomes num `Vec` custa o tamanho do prefixo.
+
+Nenhuma das duas tem item no menu hoje, e **não é para ganhar item cinza**
+enquanto não existir: item que nunca acende ensina a pessoa a ignorar o menu. O
+menu tem quatro itens, todos vivos — copiar prefixo e apagar tudo sob o
+prefixo na linha de galho, copiar nome e apagar chave na folha.
 
 ### 5. Não implementado, de propósito
 
@@ -344,7 +435,10 @@ filtrar só o que está em memória.
 - **Verificação interativa do empacotamento** (cadastrar host, navegar,
   editar e desfazer clicando). Os caminhos têm teste automatizado e foram
   conferidos pelo binário empacotado via MCP, mas o clique humano continua
-  devendo.
+  devendo. O **menu de contexto e o apagar em massa** devem mais que isso:
+  nunca rodaram em binário empacotado, e o que os prova hoje é só a suíte. São
+  os únicos caminhos que apagam N chaves de uma vez — o clique humano neles
+  vale mais do que valia nos outros.
 
 ### 6. Avisos conhecidos
 
