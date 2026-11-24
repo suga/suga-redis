@@ -3,7 +3,9 @@
 //! inteiro (sem truncar) antes de aplicar `WriteOp`, guarda a linha num
 //! SQLite compartilhado com o índice de busca da Task 7, e sabe desfazer
 //! exatamente o que foi feito — inclusive recriar uma chave apagada, com o
-//! TTL que ela tinha.
+//! TTL que ela tinha. Uma exclusão em massa (`delete_prefix_with_backup`)
+//! entra como UMA entrada com os retratos de todas as chaves juntos, na
+//! própria linha ou num arquivo à parte.
 //!
 //! Banco em `<dir de dados do app>/suga-redis.sqlite`, aberto sempre com
 //! `PRAGMA journal_mode = WAL` e `PRAGMA busy_timeout = 5000`: o mesmo
@@ -11,8 +13,10 @@
 //! um segundo processo do SO (o servidor MCP) — sem WAL e um busy_timeout
 //! generoso, os dois processos se atropelam com `SQLITE_BUSY` em uso normal.
 
+use std::future::Future;
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -20,11 +24,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
+use super::bulk::{BulkError, unlink_keys};
 use super::config::{Env, Host};
 use super::conn::{ConnError, Pool};
-use super::keys::KeyKind;
+use super::keys::{Alvo, KeyKind};
 use super::value::{
-    Bytes, Value, ValueLimit, ValueView, WriteOp, apply_write, op_summary, read_value,
+    BackupKind, Bytes, Value, ValueLimit, ValueView, WriteOp, apply_write, op_summary, read_value,
 };
 
 /// Limite passado a `read_value` ao tirar a cópia de segurança: grande o
@@ -38,6 +43,45 @@ const FULL_READ_LIMIT: ValueLimit = ValueLimit {
     max_bytes: 1 << 30,
     max_elements: 1_000_000,
 };
+
+/// Teto do tamanho da cópia de segurança de uma exclusão em massa, em bytes
+/// do JSON montado. Existe porque a cópia inteira passa pela memória antes
+/// de qualquer chave ser apagada: um prefixo com dezenas de milhares de
+/// valores gordos não pode virar um `String` do tamanho do banco só porque
+/// alguém pediu a cópia. Batido o teto, a exclusão é RECUSADA (ver
+/// `delete_prefix_with_backup`) — nunca feita sem a cópia que a pessoa
+/// pediu.
+pub const MAX_BACKUP_BYTES: usize = 64 * 1024 * 1024;
+
+/// O que a pessoa escolheu no diálogo de confirmação da exclusão em massa:
+/// guardar a cópia junto da entrada do histórico, gravá-la num arquivo à
+/// parte, ou apagar sem cópia nenhuma.
+#[derive(Debug, Clone, Copy)]
+pub enum BackupChoice<'a> {
+    Inline,
+    /// Diretório onde gravar; o nome do arquivo é montado aqui.
+    File(&'a Path),
+    None,
+}
+
+/// Uma exclusão em massa já confirmada: os prefixos que a pessoa escolheu,
+/// as chaves que a varredura (`core::bulk::enumerate`) achou sob eles, onde
+/// a cópia de segurança deve ficar e a bandeira de cancelamento que a tela
+/// levanta se desistir no meio.
+pub struct BulkDelete<'a> {
+    pub prefixes: &'a [String],
+    pub keys: &'a [String],
+    pub backup: BackupChoice<'a>,
+    pub cancel: &'a AtomicBool,
+}
+
+/// O que sobrou de uma exclusão em massa: a entrada única de histórico que
+/// a registra e quantas chaves saíram de verdade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BulkOutcome {
+    pub entry_id: i64,
+    pub deleted: u64,
+}
 
 /// Quem fez a mudança: uma pessoa pela UI, ou a LLM (Task 16) através das
 /// ferramentas MCP (Task 15). Guardado em toda entrada do histórico para que
@@ -117,6 +161,15 @@ pub enum HistoryError {
         "a chave \"{key}\" já tinha expirado sozinha antes da volta atrás — nada foi restaurado"
     )]
     ExpiredBeforeRollback { key: String },
+
+    #[error(
+        "a cópia de segurança da exclusão em massa passou do teto de {bytes} bytes — \
+         nenhuma chave foi apagada"
+    )]
+    BackupTooLarge { bytes: usize },
+
+    #[error("falha ao gravar o arquivo da cópia de segurança: {0}")]
+    BackupIo(std::io::Error),
 }
 
 /// Mapeia o erro da abertura compartilhada (`core::sqlite::open_shared`) para
@@ -236,6 +289,18 @@ struct ValueSnapshot {
     /// que usam `PEXPIREAT` com este instante.
     expires_at_ms: Option<i64>,
     elements: Vec<ElementSnapshot>,
+}
+
+/// Um retrato de `ValueSnapshot` com o nome da chave junto — a forma de
+/// cada item da cópia de uma exclusão em massa, onde um `before_json`
+/// guarda N chaves em vez de uma. `flatten` deixa o JSON de cada item com a
+/// mesma forma do retrato de uma chave só, mais o campo `key`: quem for
+/// restaurar (Tarefa 5) lê o mesmo formato nos dois caminhos.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct KeySnapshot {
+    key: String,
+    #[serde(flatten)]
+    value: ValueSnapshot,
 }
 
 /// Converte o valor lido (`ValueView`) para a forma serializável do
@@ -361,6 +426,136 @@ fn now_unix_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// Lê o valor inteiro de cada chave de `keys` e devolve os retratos já
+/// montados como o JSON que vai para `before_json` (ou para o arquivo da
+/// cópia). Um JSON por vez, com o tamanho somado a cada retrato: assim o
+/// teto recusa a cópia grande demais SEM antes carregar tudo na memória —
+/// que é justamente o que ele existe para evitar.
+///
+/// Uma chave que sumiu entre a varredura e a cópia (expirou, ou outra
+/// conexão apagou) é pulada em silêncio: não há retrato a tirar de algo que
+/// já não existe, e isso não é motivo para recusar a exclusão inteira.
+async fn read_snapshots(
+    pool: &Pool,
+    alvo: Alvo<'_>,
+    keys: &[String],
+    now_ms: i64,
+    max_bytes: usize,
+) -> Result<String> {
+    let Alvo { host, pw, db } = alvo;
+    let mut parts: Vec<String> = Vec::with_capacity(keys.len());
+    // Os dois colchetes do vetor já contam para o teto.
+    let mut bytes = 2usize;
+
+    for key in keys {
+        let view = match read_value(pool, host, pw, db, key, FULL_READ_LIMIT).await {
+            Ok(view) => view,
+            Err(ConnError::KeyGone(_)) => continue,
+            Err(err) => return Err(HistoryError::Conn(err)),
+        };
+        let part = serde_json::to_string(&KeySnapshot {
+            key: key.clone(),
+            value: snapshot_from_view(&view, now_ms),
+        })?;
+        // +1 pela vírgula que separa este retrato do anterior.
+        bytes += part.len() + 1;
+        if bytes > max_bytes {
+            return Err(HistoryError::BackupTooLarge { bytes });
+        }
+        parts.push(part);
+    }
+
+    Ok(format!("[{}]", parts.join(",")))
+}
+
+/// `AAAA-MM-DD-hhmmss-<host>-db<N>-<prefixo>.json`, com host e prefixo
+/// saneados para nome de arquivo. Só o PRIMEIRO prefixo entra no nome: um
+/// pedido com vários deixaria o nome tão longo quanto a operação que
+/// descreve, e a lista completa já está no `op_json` da entrada.
+fn backup_file_name(host: &Host, db: u8, prefixes: &[String], at_ms: i64) -> String {
+    let prefix = prefixes.first().map(String::as_str).unwrap_or("todas");
+    format!(
+        "{}-{}-db{}-{}.json",
+        timestamp_for_name(at_ms),
+        sanitize_for_name(&host.name),
+        db,
+        sanitize_for_name(prefix),
+    )
+}
+
+/// Tudo que não for letra ASCII, dígito, `-` ou `_` vira `_`, e o resultado
+/// é cortado em 40 caracteres: o nome do host e o prefixo são texto de
+/// pessoa (`:`, `/`, acento, espaço) e entram num nome de arquivo.
+fn sanitize_for_name(text: &str) -> String {
+    let clean: String = text
+        .chars()
+        .take(40)
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if clean.is_empty() {
+        "_".to_string()
+    } else {
+        clean
+    }
+}
+
+/// `AAAA-MM-DD-hhmmss` em UTC, a partir do epoch em milissegundos.
+///
+/// UTC, e não a hora de quem clicou: não há dependência de calendário neste
+/// binário, e o nome do arquivo só precisa ordenar e não se repetir. O
+/// instante local da exclusão continua gravado em `at`, na entrada do
+/// histórico.
+fn timestamp_for_name(at_ms: i64) -> String {
+    let seconds = at_ms.div_euclid(1000);
+    let (year, month, day) = civil_from_days(seconds.div_euclid(86_400));
+    let in_day = seconds.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02}-{:02}{:02}{:02}",
+        in_day / 3600,
+        (in_day % 3600) / 60,
+        in_day % 60,
+    )
+}
+
+/// Ano, mês e dia do calendário gregoriano a partir do número de dias desde
+/// 1970-01-01 — o `civil_from_days` de Howard Hinnant, que desloca a época
+/// para 0000-03-01 para que o dia bissexto caia no FIM do ciclo de 400 anos
+/// e a conta vire aritmética inteira sem tabela de meses.
+fn civil_from_days(days: i64) -> (i64, u64, u64) {
+    let shifted = days + 719_468;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = (shifted - era * 146_097) as u64;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era as i64 + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// A coluna `key` de uma entrada de exclusão em massa. Ela mira prefixos,
+/// não uma chave — fica o primeiro prefixo, que é o que a lista do
+/// histórico mostra; a lista inteira está no `op_json`.
+fn bulk_entry_key(prefixes: &[String]) -> &str {
+    prefixes.first().map(String::as_str).unwrap_or("")
+}
+
 pub struct History {
     conn: Mutex<Connection>,
 }
@@ -423,6 +618,21 @@ impl History {
         conn.execute(
             "UPDATE history SET after_json = ?1 WHERE id = ?2",
             params![after_json, id],
+        )?;
+        Ok(())
+    }
+
+    /// Regrava a operação (e a frase que a descreve) de uma entrada já
+    /// inserida. Só a exclusão em massa precisa disto: a contagem real de
+    /// chaves apagadas só existe DEPOIS do `UNLINK`, e a linha é gravada
+    /// antes dele — ver `delete_prefix_com_teto`.
+    fn update_op(&self, id: i64, key: &str, op: &WriteOp) -> Result<()> {
+        let summary = op_summary(key, op);
+        let op_json = serde_json::to_string(op)?;
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE history SET summary = ?1, op_json = ?2 WHERE id = ?3",
+            params![summary, op_json, id],
         )?;
         Ok(())
     }
@@ -501,6 +711,139 @@ impl History {
         self.update_after_json(id, after_json.as_deref())?;
 
         Ok(id)
+    }
+
+    /// Apaga toda chave de `plan.keys` e registra a exclusão inteira como
+    /// UMA entrada de histórico, com os retratos de todas elas na cópia de
+    /// segurança — a irmã em massa de `write_with_backup`.
+    ///
+    /// A ordem é a garantia do método, não um detalhe de implementação: lê
+    /// os retratos, **confere o teto**, grava a linha, apaga e só então
+    /// corrige a linha com a contagem real. Conferir o teto depois de
+    /// apagar faria a recusa chegar com as chaves já no chão e sem cópia.
+    ///
+    /// `BackupChoice::None` pula a leitura dos retratos inteira — é o que
+    /// torna rápido o caminho de quem decidiu apagar sem cópia; lê-los para
+    /// jogar fora seria o pior dos dois mundos.
+    ///
+    /// O ator é sempre `Human`: a LLM não tem ferramenta de exclusão em
+    /// massa, e se um dia tiver, ela passa por aqui com o ator explícito,
+    /// não por omissão.
+    pub async fn delete_prefix_with_backup(
+        &self,
+        pool: &Pool,
+        host: &Host,
+        pw: Option<&str>,
+        db: u8,
+        plan: BulkDelete<'_>,
+        progress: impl Fn(u64),
+    ) -> Result<BulkOutcome> {
+        let alvo = Alvo { host, pw, db };
+        let keys = plan.keys;
+        let cancel = plan.cancel;
+
+        self.delete_prefix_com_teto(pool, alvo, plan, MAX_BACKUP_BYTES, move || {
+            unlink_keys(pool, alvo, keys, cancel, progress)
+        })
+        .await
+    }
+
+    /// `delete_prefix_with_backup` com o teto como parâmetro, para o teste
+    /// do caso de corte não precisar criar 64 MiB de valor — mesmo padrão
+    /// de `bulk::enumerate_com_teto`.
+    ///
+    /// `apagar` é a costura que de fato apaga `plan.keys`. A pública passa
+    /// `bulk::unlink_keys`; o teste passa um fechamento que forja a conexão
+    /// caindo no meio, que é a única forma de provar que o parcial de
+    /// `BulkError` chega à linha ANTES de o erro subir.
+    async fn delete_prefix_com_teto<F, Fut>(
+        &self,
+        pool: &Pool,
+        alvo: Alvo<'_>,
+        plan: BulkDelete<'_>,
+        max_backup_bytes: usize,
+        apagar: F,
+    ) -> Result<BulkOutcome>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = std::result::Result<u64, BulkError>>,
+    {
+        let Alvo { host, db, .. } = alvo;
+        // Um único instante serve para converter os TTLs lidos (relativos)
+        // em instantes absolutos, para o `at` da entrada e para o nome do
+        // arquivo da cópia: os três descrevem o mesmo momento.
+        let now = now_unix_ms();
+
+        // Primeiro os retratos e o teto — tudo que pode recusar a operação
+        // acontece antes de a primeira chave sair.
+        let (backup, before_json) = match plan.backup {
+            BackupChoice::None => (BackupKind::None, None),
+            BackupChoice::Inline => {
+                let json = read_snapshots(pool, alvo, plan.keys, now, max_backup_bytes).await?;
+                (BackupKind::Inline, Some(json))
+            }
+            BackupChoice::File(dir) => {
+                let json = read_snapshots(pool, alvo, plan.keys, now, max_backup_bytes).await?;
+                let path = dir.join(backup_file_name(host, db, plan.prefixes, now));
+                std::fs::create_dir_all(dir).map_err(HistoryError::BackupIo)?;
+                std::fs::write(&path, json).map_err(HistoryError::BackupIo)?;
+                (
+                    BackupKind::File {
+                        path: path.to_string_lossy().into_owned(),
+                    },
+                    None,
+                )
+            }
+        };
+
+        let key = bulk_entry_key(plan.prefixes);
+        let enumerated = plan.keys.len() as u64;
+        let entry_op = |deleted: u64| WriteOp::DeletePrefix {
+            prefixes: plan.prefixes.to_vec(),
+            deleted,
+            enumerated,
+            backup: backup.clone(),
+        };
+
+        // A linha nasce com `deleted: 0` — é o número verdadeiro enquanto o
+        // `UNLINK` não rodou. Nascer com a contagem pedida faria a linha
+        // prometer, durante toda a exclusão, uma exclusão que ainda não
+        // aconteceu.
+        let op = entry_op(0);
+        let id = self.insert_entry(
+            host,
+            db,
+            key,
+            &op_summary(key, &op),
+            serde_json::to_string(&op).ok().as_deref(),
+            before_json.as_deref(),
+            Actor::Human,
+            now,
+        )?;
+
+        match apagar().await {
+            Ok(deleted) => {
+                self.update_op(id, key, &entry_op(deleted))?;
+                Ok(BulkOutcome {
+                    entry_id: id,
+                    deleted,
+                })
+            }
+            // Nada saiu: a linha registraria uma mudança que não aconteceu,
+            // e isso é pior do que não ter linha — mesma decisão de
+            // `write_with_backup`.
+            Err(err) if err.deleted == 0 => {
+                self.delete_row(id)?;
+                Err(HistoryError::Conn(err.source))
+            }
+            // O que já saiu, saiu. A linha precisa dizer o número de
+            // verdade ANTES de o erro subir, senão o histórico promete de
+            // volta chaves que não existem mais.
+            Err(err) => {
+                self.update_op(id, key, &entry_op(err.deleted))?;
+                Err(HistoryError::Conn(err.source))
+            }
+        }
     }
 
     /// As `limit` entradas mais recentes do host, mais novas primeiro.
@@ -947,6 +1290,7 @@ fn build_restore_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::bulk::UNLINK_BATCH;
     use crate::core::conn::Pool;
     use redis::aio::MultiplexedConnection;
 
@@ -1759,6 +2103,478 @@ mod tests {
 
         assert_eq!(history.get(human_id).unwrap().actor, Actor::Human);
         assert_eq!(history.get(llm_id).unwrap().actor, Actor::Llm);
+    }
+
+    // ---------------------------------------------------------------
+    // Exclusão em massa: uma entrada de histórico com N retratos.
+    //
+    // Banco 14: os outros já estão tomados pelo resto da suíte, que roda
+    // em paralelo contra o mesmo contêiner (ver `docs/CONTEXTO.md`). Cada
+    // teste daqui usa seu próprio prefixo de chave pelo mesmo motivo — as
+    // asserções são de igualdade exata.
+    // ---------------------------------------------------------------
+
+    fn bulk_host() -> Host {
+        Host {
+            db: 14,
+            ..test_host()
+        }
+    }
+
+    /// Cria `quantas` chaves string sob `prefix` — `MSET` sobrescreve o
+    /// que tiver sobrado de uma execução anterior — e devolve os nomes.
+    async fn seed_keys(
+        conn: &mut MultiplexedConnection,
+        prefix: &str,
+        quantas: usize,
+    ) -> Vec<String> {
+        let keys: Vec<String> = (0..quantas).map(|n| format!("{prefix}{n}")).collect();
+        let mut mset = redis::cmd("MSET");
+        for key in &keys {
+            mset.arg(key).arg(format!("valor-{key}"));
+        }
+        let _: () = mset.query_async(conn).await.unwrap();
+        keys
+    }
+
+    async fn exists(conn: &mut MultiplexedConnection, keys: &[String]) -> u64 {
+        redis::cmd("EXISTS")
+            .arg(keys)
+            .query_async(conn)
+            .await
+            .unwrap()
+    }
+
+    async fn drop_keys(conn: &mut MultiplexedConnection, keys: &[String]) {
+        let _: () = redis::cmd("DEL").arg(keys).query_async(conn).await.unwrap();
+    }
+
+    /// Os retratos guardados numa cópia inline, já como JSON.
+    fn snapshots_of(json: &str) -> Vec<serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(json)
+            .unwrap()
+            .as_array()
+            .expect("a cópia precisa ser um vetor de retratos")
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn inline_backup_holds_every_snapshot() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:inline:";
+        let keys = seed_keys(&mut conn, prefix, 3).await;
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+
+        let outcome = history
+            .delete_prefix_with_backup(
+                &pool,
+                &host,
+                None,
+                host.db,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::Inline,
+                    cancel: &cancel,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.deleted, 3);
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            0,
+            "as três chaves precisam ter saído do banco"
+        );
+
+        let entry = history.get(outcome.entry_id).unwrap();
+        let retratos = snapshots_of(
+            entry
+                .before_json
+                .as_deref()
+                .expect("uma cópia inline precisa estar em before_json"),
+        );
+        assert_eq!(
+            retratos.len(),
+            3,
+            "três chaves apagadas, três retratos: {retratos:?}"
+        );
+        for (retrato, key) in retratos.iter().zip(&keys) {
+            assert_eq!(retrato["key"], *key);
+            assert_eq!(
+                retrato["elements"][0]["value"]["text"],
+                format!("valor-{key}")
+            );
+        }
+
+        match entry.op.expect("a entrada precisa carregar a operação") {
+            WriteOp::DeletePrefix {
+                prefixes: gravados,
+                deleted,
+                enumerated,
+                backup,
+            } => {
+                assert_eq!(gravados, prefixes);
+                assert_eq!(deleted, 3);
+                assert_eq!(enumerated, 3);
+                assert_eq!(backup, BackupKind::Inline);
+            }
+            outra => panic!("operação errada no histórico: {outra:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_values_survive_the_backup() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_bulk:binario:0".to_string();
+        let keys = vec![key.clone()];
+        // Nem todo valor do Redis é UTF-8 válido. Estes bytes não são.
+        let bruto: Vec<u8> = vec![0xff, 0xfe, 0x00, 0x41, 0x80];
+        let _: () = redis::cmd("SET")
+            .arg(&key)
+            .arg(bruto.as_slice())
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec!["history_rs_bulk:binario:".to_string()];
+
+        let outcome = history
+            .delete_prefix_with_backup(
+                &pool,
+                &host,
+                None,
+                host.db,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::Inline,
+                    cancel: &cancel,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        let entry = history.get(outcome.entry_id).unwrap();
+        let retratos = snapshots_of(entry.before_json.as_deref().unwrap());
+        let valor = &retratos[0]["elements"][0]["value"];
+
+        assert!(
+            valor["text"].is_null(),
+            "um valor que não é UTF-8 não pode virar texto estragado: {valor}"
+        );
+        let encoded = valor["base64"]
+            .as_str()
+            .expect("sem texto, a cópia precisa trazer o base64");
+        assert_eq!(
+            BASE64.decode(encoded).unwrap(),
+            bruto,
+            "os bytes precisam voltar idênticos do base64"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_backup_leaves_before_json_null() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:sem_copia:";
+        let keys = seed_keys(&mut conn, prefix, 2).await;
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+
+        let outcome = history
+            .delete_prefix_with_backup(
+                &pool,
+                &host,
+                None,
+                host.db,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::None,
+                    cancel: &cancel,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.deleted, 2);
+        assert_eq!(exists(&mut conn, &keys).await, 0);
+
+        let entry = history.get(outcome.entry_id).unwrap();
+        assert!(
+            entry.before_json.is_none(),
+            "quem recusou a cópia não pode acabar com uma: {:?}",
+            entry.before_json
+        );
+        match entry.op.expect("a entrada precisa carregar a operação") {
+            WriteOp::DeletePrefix { backup, .. } => assert_eq!(backup, BackupKind::None),
+            outra => panic!("operação errada no histórico: {outra:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ceiling_refuses_before_deleting() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:teto:";
+        let keys = seed_keys(&mut conn, prefix, 3).await;
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+        let alvo = Alvo {
+            host: &host,
+            pw: None,
+            db: host.db,
+        };
+
+        // Teto de 10 bytes: três retratos não cabem nem de longe. O
+        // fechamento de exclusão é o de verdade, para o teste provar que a
+        // recusa acontece ANTES de ele ser chamado.
+        let erro = history
+            .delete_prefix_com_teto(
+                &pool,
+                alvo,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::Inline,
+                    cancel: &cancel,
+                },
+                10,
+                || unlink_keys(&pool, alvo, &keys, &cancel, |_| {}),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(erro, HistoryError::BackupTooLarge { .. }),
+            "o teto precisa recusar com BackupTooLarge, veio: {erro:?}"
+        );
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            3,
+            "recusada a cópia, as chaves CONTINUAM no banco"
+        );
+        assert!(
+            history.list(&host.id, 10).unwrap().is_empty(),
+            "sem exclusão não há o que registrar no histórico"
+        );
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    #[tokio::test]
+    async fn file_backup_writes_and_points() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:arquivo:";
+        let keys = seed_keys(&mut conn, prefix, 2).await;
+
+        let (_dir, history) = open_history();
+        let destino = tempfile::TempDir::new().unwrap();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+
+        let outcome = history
+            .delete_prefix_with_backup(
+                &pool,
+                &host,
+                None,
+                host.db,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::File(destino.path()),
+                    cancel: &cancel,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.deleted, 2);
+        let entry = history.get(outcome.entry_id).unwrap();
+        assert!(
+            entry.before_json.is_none(),
+            "a cópia foi para o arquivo; before_json não pode repeti-la"
+        );
+
+        let caminho = match entry.op.expect("a entrada precisa carregar a operação") {
+            WriteOp::DeletePrefix {
+                backup: BackupKind::File { path },
+                ..
+            } => path,
+            outra => panic!("a operação precisa apontar para o arquivo: {outra:?}"),
+        };
+
+        let conteudo =
+            std::fs::read_to_string(&caminho).expect("o arquivo da cópia precisa existir");
+        assert_eq!(
+            snapshots_of(&conteudo).len(),
+            2,
+            "o arquivo precisa trazer os dois retratos"
+        );
+        assert!(
+            std::path::Path::new(&caminho).starts_with(destino.path()),
+            "o arquivo precisa ter sido gravado no diretório escolhido: {caminho}"
+        );
+    }
+
+    #[tokio::test]
+    async fn entry_records_what_actually_went() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:cancelado:";
+        // Mais de um lote de `UNLINK_BATCH`: o cancelamento só é conferido
+        // ENTRE lotes, então é preciso haver um segundo lote para parar.
+        let keys = seed_keys(&mut conn, prefix, UNLINK_BATCH + 100).await;
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(true);
+        let prefixes = vec![prefix.to_string()];
+
+        let outcome = history
+            .delete_prefix_with_backup(
+                &pool,
+                &host,
+                None,
+                host.db,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::None,
+                    cancel: &cancel,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.deleted, UNLINK_BATCH as u64);
+
+        match history
+            .get(outcome.entry_id)
+            .unwrap()
+            .op
+            .expect("a entrada precisa carregar a operação")
+        {
+            WriteOp::DeletePrefix {
+                deleted,
+                enumerated,
+                ..
+            } => {
+                assert_eq!(deleted, UNLINK_BATCH as u64);
+                assert_eq!(enumerated, keys.len() as u64);
+                assert!(
+                    deleted < enumerated,
+                    "cancelada no meio, a entrada precisa dizer que saiu menos do que foi achado"
+                );
+            }
+            outra => panic!("operação errada no histórico: {outra:?}"),
+        }
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    /// Review Focus: a conexão morre no meio da exclusão. O que já saiu,
+    /// saiu — e a linha precisa dizer esse número ANTES de o erro subir,
+    /// senão o histórico promete de volta chaves que não existem mais.
+    /// O fechamento de exclusão é forjado porque não há como derrubar a
+    /// conexão no meio de um `UNLINK` de verdade sob demanda.
+    #[tokio::test]
+    async fn a_partial_delete_is_recorded_before_the_error_climbs() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec!["history_rs_bulk:parcial:".to_string()];
+        let keys: Vec<String> = (0..5)
+            .map(|n| format!("history_rs_bulk:parcial:{n}"))
+            .collect();
+
+        let erro = history
+            .delete_prefix_com_teto(
+                &pool,
+                Alvo {
+                    host: &host,
+                    pw: None,
+                    db: host.db,
+                },
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    // Sem cópia: este teste é sobre a contagem, e assim ele
+                    // não precisa de chave nenhuma no servidor.
+                    backup: BackupChoice::None,
+                    cancel: &cancel,
+                },
+                MAX_BACKUP_BYTES,
+                || async {
+                    Err(BulkError {
+                        deleted: 2,
+                        source: ConnError::Unreachable {
+                            host: "host de teste".to_string(),
+                            detail: "conexão caiu no meio do lote".to_string(),
+                        },
+                    })
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(erro, HistoryError::Conn(ConnError::Unreachable { .. })),
+            "o erro da conexão precisa subir, veio: {erro:?}"
+        );
+
+        let entradas = history.list(&host.id, 10).unwrap();
+        assert_eq!(entradas.len(), 1, "o parcial precisa ter ficado registrado");
+        match entradas[0]
+            .op
+            .clone()
+            .expect("a entrada precisa carregar a operação")
+        {
+            WriteOp::DeletePrefix {
+                deleted,
+                enumerated,
+                ..
+            } => {
+                assert_eq!(deleted, 2, "a linha precisa guardar o parcial do erro");
+                assert_eq!(enumerated, 5);
+            }
+            outra => panic!("operação errada no histórico: {outra:?}"),
+        }
+    }
+
+    /// O nome do arquivo da cópia carrega a data, e montá-la sem
+    /// dependência de calendário é a parte deste módulo que mais fácil
+    /// erraria por um dia sem ninguém notar.
+    #[test]
+    fn the_backup_file_name_carries_the_moment() {
+        assert_eq!(timestamp_for_name(0), "1970-01-01-000000");
+        // 2026-11-24T15:04:05Z = 1_795_532_645 s desde a época.
+        assert_eq!(timestamp_for_name(1_795_532_645_000), "2026-11-24-150405");
     }
 
     /// Mesma lógica de `now_unix_ms` (privada), usada pelos testes
