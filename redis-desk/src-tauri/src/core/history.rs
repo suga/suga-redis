@@ -83,6 +83,31 @@ pub struct BulkOutcome {
     pub deleted: u64,
 }
 
+/// Uma chave que a volta atrás de uma exclusão em massa não conseguiu
+/// trazer de volta, com o motivo já em texto — é o que a tela mostra a quem
+/// clicou em "desfazer" e precisa saber o que ficou para trás.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedKey {
+    pub key: String,
+    pub reason: String,
+}
+
+/// O que uma volta atrás desfez. As duas formas existem porque as duas
+/// entradas são diferentes de verdade: uma escrita de chave única volta
+/// inteira ou não volta (a falha sobe como `Err`), enquanto uma exclusão em
+/// massa volta chave a chave e pode voltar pela metade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RollbackOutcome {
+    /// A entrada mirava uma chave só, e ela voltou ao que era.
+    Key,
+    /// A entrada era uma exclusão em massa: quantas chaves voltaram e quais
+    /// não voltaram, com o motivo de cada uma.
+    Bulk {
+        restored: u64,
+        failed: Vec<FailedKey>,
+    },
+}
+
 /// Quem fez a mudança: uma pessoa pela UI, ou a LLM (Task 16) através das
 /// ferramentas MCP (Task 15). Guardado em toda entrada do histórico para que
 /// a UI possa distinguir e, por exemplo, destacar mudanças feitas pela LLM.
@@ -167,6 +192,18 @@ pub enum HistoryError {
          nenhuma chave foi apagada"
     )]
     BackupTooLarge { bytes: usize },
+
+    #[error(
+        "a exclusão em massa sob \"{prefix}\" foi feita sem cópia de segurança — não há o que \
+         restaurar"
+    )]
+    NoBackup { prefix: String },
+
+    #[error("falha ao ler o arquivo da cópia de segurança \"{path}\": {source}")]
+    BackupUnreadable {
+        path: String,
+        source: std::io::Error,
+    },
 
     #[error("falha ao gravar o arquivo da cópia de segurança: {0}")]
     BackupIo(std::io::Error),
@@ -936,14 +973,30 @@ impl History {
     /// original aconteceu, então `rollback` não recebe `db` como parâmetro —
     /// ele vem do próprio registro, não do que estiver selecionado na UI no
     /// momento do clique em "desfazer".
+    ///
+    /// O despacho é pela OPERAÇÃO da entrada: uma exclusão em massa volta
+    /// pelo caminho de `rollback_bulk` (um retrato por chave), e todo o
+    /// resto — inclusive as entradas antigas, gravadas antes de a coluna
+    /// `op_json` existir, que não têm operação nenhuma — segue o caminho de
+    /// chave única de sempre.
+    ///
+    /// Note que a exclusão em massa NÃO é desfeita aplicando a operação
+    /// inversa: `WriteOp::DeletePrefix` não passa por `apply_write` (ver o
+    /// comentário dessa variante em `core::value`). Restaurar é repor cada
+    /// retrato pelo mesmo `restore_value` que desfaz uma escrita de chave
+    /// única.
     pub async fn rollback(
         &self,
         pool: &Pool,
         host: &Host,
         pw: Option<&str>,
         entry_id: i64,
-    ) -> Result<()> {
+    ) -> Result<RollbackOutcome> {
         let entry = self.get(entry_id)?;
+
+        if let Some(WriteOp::DeletePrefix { backup, .. }) = &entry.op {
+            return self.rollback_bulk(pool, host, pw, &entry, backup).await;
+        }
 
         let snapshot = match &entry.before_json {
             Some(json) => Some(serde_json::from_str::<ValueSnapshot>(json)?),
@@ -977,7 +1030,47 @@ impl History {
         .await?;
         self.mark_rolled_back(entry_id)?;
 
-        Ok(())
+        Ok(RollbackOutcome::Key)
+    }
+
+    /// Repõe, uma a uma, as chaves que uma exclusão em massa apagou — a
+    /// volta atrás de `delete_prefix_with_backup`.
+    ///
+    /// Melhor esforço por chave, na ordem em que os retratos foram
+    /// gravados: uma chave que não volta (tipo sem suporte, retrato
+    /// corrompido, tipo trocado desde a cópia) entra em `failed` com o
+    /// motivo e o laço SEGUE. Abortar no primeiro erro deixaria o resto do
+    /// lote no chão por causa de uma chave só.
+    ///
+    /// `rolled_back` só é marcado quando `failed` está vazio: um "desfeito"
+    /// que repôs 900 de 1.395 é mentira, e a pessoa agiria em cima dela.
+    async fn rollback_bulk(
+        &self,
+        pool: &Pool,
+        host: &Host,
+        pw: Option<&str>,
+        entry: &HistoryEntry,
+        backup: &BackupKind,
+    ) -> Result<RollbackOutcome> {
+        let snapshots = bulk_snapshots(entry, backup)?;
+
+        let mut restored = 0u64;
+        let mut failed: Vec<FailedKey> = Vec::new();
+        for KeySnapshot { key, value } in snapshots {
+            match restore_value(pool, host, pw, entry.db, &key, &Some(value), None).await {
+                Ok(()) => restored += 1,
+                Err(err) => failed.push(FailedKey {
+                    key,
+                    reason: err.to_string(),
+                }),
+            }
+        }
+
+        if failed.is_empty() {
+            self.mark_rolled_back(entry.id)?;
+        }
+
+        Ok(RollbackOutcome::Bulk { restored, failed })
     }
 
     /// Remove entradas do host que tenham mais de `keep_days` dias OU que
@@ -1205,6 +1298,42 @@ fn build_restore_command(
     };
 
     Ok((command, snap.expires_at_ms))
+}
+
+/// Os retratos guardados pela cópia de uma exclusão em massa, na ordem em
+/// que foram gravados.
+///
+/// Quem decide de onde (e se) eles saem é a CÓPIA — `BackupKind` e o
+/// `before_json` da linha —, nunca a contagem `deleted` da operação. Uma
+/// queda no meio do `UNLINK` deixa `deleted` em 0 na linha para sempre,
+/// enquanto a cópia que ela carrega está inteira e é perfeitamente usável:
+/// recusar a restauração por causa daquele número seria virar as costas
+/// para o backup que está ali.
+fn bulk_snapshots(entry: &HistoryEntry, backup: &BackupKind) -> Result<Vec<KeySnapshot>> {
+    let json = match backup {
+        // Recusar é um desfecho de verdade, não uma falha a disfarçar: a
+        // pessoa escolheu apagar sem cópia e a mensagem diz exatamente
+        // isso. Nada é escrito no Redis.
+        BackupKind::None => {
+            return Err(HistoryError::NoBackup {
+                prefix: entry.key.clone(),
+            });
+        }
+        BackupKind::Inline => entry.before_json.clone().ok_or_else(|| {
+            HistoryError::Corrupt(format!(
+                "a entrada {} diz ter cópia embutida, mas não há retrato nenhum nela",
+                entry.id
+            ))
+        })?,
+        BackupKind::File { path } => {
+            std::fs::read_to_string(path).map_err(|err| HistoryError::BackupUnreadable {
+                path: path.clone(),
+                source: err,
+            })?
+        }
+    };
+
+    Ok(serde_json::from_str(&json)?)
 }
 
 /// Restaura `key` para o estado descrito por `snapshot` (ou apaga a chave,
@@ -2160,6 +2289,61 @@ mod tests {
         assert_eq!(history.get(llm_id).unwrap().actor, Actor::Llm);
     }
 
+    /// Entradas gravadas antes da coluna `op_json` existir não têm operação
+    /// nenhuma — só a frase em português. O despacho pela `op` não pode
+    /// engasgar com elas: sem operação, segue o caminho de sempre.
+    #[tokio::test]
+    async fn an_entry_without_an_op_still_rolls_back() {
+        let pool = Pool::new();
+        let host = test_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let key = "history_rs_test:entrada_antiga";
+        del(&mut conn, &[key]).await;
+
+        let (_dir, history) = open_history();
+        // A forma que `ValueSnapshot` tinha (e tem) em `before_json`,
+        // escrita à mão: a entrada que este teste imita nasceu antes de
+        // existir código para gravá-la com operação.
+        let antes = r#"{"kind":"string","expires_at_ms":null,"elements":[{"field":null,"value":{"text":"antigo","base64":null},"score":null}]}"#;
+        let id = history
+            .insert_entry(
+                &host,
+                host.db,
+                key,
+                "Definir o valor de history_rs_test:entrada_antiga",
+                None,
+                Some(antes),
+                Actor::Human,
+                now_unix_ms(),
+            )
+            .unwrap();
+        let _: () = redis::cmd("SET")
+            .arg(key)
+            .arg("novo")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let relatorio = history.rollback(&pool, &host, None, id).await.unwrap();
+
+        assert!(
+            matches!(relatorio, RollbackOutcome::Key),
+            "entrada sem operação segue o caminho de chave única: {relatorio:?}"
+        );
+        let valor: String = redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            valor, "antigo",
+            "a volta atrás de sempre precisa continuar valendo"
+        );
+        assert!(history.get(id).unwrap().rolled_back);
+
+        del(&mut conn, &[key]).await;
+    }
+
     // ---------------------------------------------------------------
     // Exclusão em massa: uma entrada de histórico com N retratos.
     //
@@ -2620,6 +2804,430 @@ mod tests {
             }
             outra => panic!("operação errada no histórico: {outra:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Volta atrás de uma exclusão em massa: o outro lado da cópia.
+    // ---------------------------------------------------------------
+
+    /// Cria um `set` — tipo somente leitura, que a volta atrás não sabe
+    /// recriar — para servir de chave que falha no meio de um lote.
+    async fn seed_set(conn: &mut MultiplexedConnection, key: &str) {
+        let _: () = redis::cmd("DEL").arg(key).query_async(conn).await.unwrap();
+        let _: () = redis::cmd("SADD")
+            .arg(key)
+            .arg("a")
+            .arg("b")
+            .query_async(conn)
+            .await
+            .unwrap();
+    }
+
+    /// Apaga `keys` inteiro, com a cópia pedida — o preâmbulo comum de
+    /// todo teste de volta atrás daqui.
+    async fn delete_all(
+        history: &History,
+        pool: &Pool,
+        host: &Host,
+        prefixes: &[String],
+        keys: &[String],
+        backup: BackupChoice<'_>,
+    ) -> BulkOutcome {
+        let cancel = AtomicBool::new(false);
+        history
+            .delete_prefix_with_backup(
+                pool,
+                host,
+                None,
+                host.db,
+                BulkDelete {
+                    prefixes,
+                    keys,
+                    backup,
+                    cancel: &cancel,
+                },
+                |_| {},
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_every_key() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:volta:";
+        let keys = seed_keys(&mut conn, prefix, 3).await;
+        // A última leva prazo: o valor precisa voltar, e o prazo também.
+        let _: () = redis::cmd("PEXPIRE")
+            .arg(&keys[2])
+            .arg(300_000)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+
+        let (_dir, history) = open_history();
+        let prefixes = vec![prefix.to_string()];
+        let apagada = delete_all(
+            &history,
+            &pool,
+            &host,
+            &prefixes,
+            &keys,
+            BackupChoice::Inline,
+        )
+        .await;
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            0,
+            "as três precisam ter saído antes da volta atrás"
+        );
+
+        let relatorio = history
+            .rollback(&pool, &host, None, apagada.entry_id)
+            .await
+            .unwrap();
+
+        match relatorio {
+            RollbackOutcome::Bulk { restored, failed } => {
+                assert_eq!(restored, 3);
+                assert!(failed.is_empty(), "nenhuma chave devia falhar: {failed:?}");
+            }
+            outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
+        }
+
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            3,
+            "as três precisam ter voltado"
+        );
+        for key in &keys {
+            let valor: String = redis::cmd("GET")
+                .arg(key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(valor, format!("valor-{key}"));
+        }
+        let sem_prazo: i64 = redis::cmd("PTTL")
+            .arg(&keys[0])
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(sem_prazo, -1, "quem não tinha prazo não pode ganhar um");
+        let prazo: i64 = redis::cmd("PTTL")
+            .arg(&keys[2])
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(
+            (200_000..=300_000).contains(&prazo),
+            "o prazo precisa voltar junto do valor, veio {prazo}"
+        );
+        assert!(
+            history.get(apagada.entry_id).unwrap().rolled_back,
+            "o lote inteiro voltou: a entrada é um desfeito de verdade"
+        );
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_from_the_file() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:volta_arquivo:";
+        let keys = seed_keys(&mut conn, prefix, 2).await;
+
+        let (_dir, history) = open_history();
+        let destino = tempfile::TempDir::new().unwrap();
+        let prefixes = vec![prefix.to_string()];
+        let apagada = delete_all(
+            &history,
+            &pool,
+            &host,
+            &prefixes,
+            &keys,
+            BackupChoice::File(destino.path()),
+        )
+        .await;
+        assert!(
+            history.get(apagada.entry_id).unwrap().before_json.is_none(),
+            "a cópia está no arquivo: é de lá que a restauração tem de sair"
+        );
+
+        let relatorio = history
+            .rollback(&pool, &host, None, apagada.entry_id)
+            .await
+            .unwrap();
+
+        match relatorio {
+            RollbackOutcome::Bulk { restored, failed } => {
+                assert_eq!(restored, 2);
+                assert!(failed.is_empty(), "nenhuma chave devia falhar: {failed:?}");
+            }
+            outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
+        }
+
+        for key in &keys {
+            let valor: String = redis::cmd("GET")
+                .arg(key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(
+                valor,
+                format!("valor-{key}"),
+                "a cópia em arquivo precisa restaurar o mesmo que a embutida"
+            );
+        }
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    #[tokio::test]
+    async fn rollback_without_backup_is_refused() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:volta_sem_copia:";
+        let keys = seed_keys(&mut conn, prefix, 2).await;
+
+        let (_dir, history) = open_history();
+        let prefixes = vec![prefix.to_string()];
+        let apagada =
+            delete_all(&history, &pool, &host, &prefixes, &keys, BackupChoice::None).await;
+
+        let erro = history
+            .rollback(&pool, &host, None, apagada.entry_id)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(erro, HistoryError::NoBackup { .. }),
+            "sem cópia não há o que restaurar, e a recusa precisa dizer isso: {erro:?}"
+        );
+        assert!(
+            erro.to_string().contains("sem cópia de segurança"),
+            "a mensagem é o que a pessoa lê: {erro}"
+        );
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            0,
+            "uma recusa não pode escrever nada"
+        );
+        assert!(
+            !history.get(apagada.entry_id).unwrap().rolled_back,
+            "uma recusa não desfez coisa nenhuma"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_rollback_does_not_mark_done() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:volta_parcial:";
+        let textos = seed_keys(&mut conn, prefix, 2).await;
+        let set_key = format!("{prefix}conjunto");
+        seed_set(&mut conn, &set_key).await;
+        // O `set` no MEIO do lote: a falha dele não pode abortar o resto.
+        let keys = vec![textos[0].clone(), set_key.clone(), textos[1].clone()];
+
+        let (_dir, history) = open_history();
+        let prefixes = vec![prefix.to_string()];
+        let apagada = delete_all(
+            &history,
+            &pool,
+            &host,
+            &prefixes,
+            &keys,
+            BackupChoice::Inline,
+        )
+        .await;
+
+        let relatorio = history
+            .rollback(&pool, &host, None, apagada.entry_id)
+            .await
+            .unwrap();
+
+        match relatorio {
+            RollbackOutcome::Bulk { failed, .. } => {
+                assert_eq!(failed.len(), 1, "só o `set` devia falhar: {failed:?}");
+                assert_eq!(failed[0].key, set_key, "o relatório nomeia quem não voltou");
+            }
+            outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
+        }
+
+        assert!(
+            !history.get(apagada.entry_id).unwrap().rolled_back,
+            "desfeito pela metade não é desfeito"
+        );
+        assert_eq!(
+            exists(&mut conn, &textos).await,
+            2,
+            "a falha de uma chave não pode abortar as outras"
+        );
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    #[tokio::test]
+    async fn rollback_reports_what_it_restored() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:volta_relato:";
+        let textos = seed_keys(&mut conn, prefix, 2).await;
+        let set_key = format!("{prefix}conjunto");
+        seed_set(&mut conn, &set_key).await;
+        let keys = vec![textos[0].clone(), textos[1].clone(), set_key.clone()];
+
+        let (_dir, history) = open_history();
+        let prefixes = vec![prefix.to_string()];
+        let apagada = delete_all(
+            &history,
+            &pool,
+            &host,
+            &prefixes,
+            &keys,
+            BackupChoice::Inline,
+        )
+        .await;
+
+        let relatorio = history
+            .rollback(&pool, &host, None, apagada.entry_id)
+            .await
+            .unwrap();
+
+        match relatorio {
+            RollbackOutcome::Bulk { restored, failed } => {
+                assert_eq!(restored, 2, "duas voltaram");
+                assert_eq!(failed.len(), 1, "uma não: {failed:?}");
+                assert_eq!(failed[0].key, set_key);
+                assert!(
+                    failed[0].reason.contains("set"),
+                    "o motivo precisa dizer por que a chave não voltou: {}",
+                    failed[0].reason
+                );
+            }
+            outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
+        }
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    /// O arquivo da cópia vive fora do banco de histórico e pode ter sido
+    /// movido, apagado ou ficado num disco que não está montado. A volta
+    /// atrás precisa dizer isso — e não escrever nada.
+    #[tokio::test]
+    async fn a_missing_backup_file_is_an_error_not_a_silent_half_restore() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:volta_arquivo_sumido:";
+        let keys = seed_keys(&mut conn, prefix, 2).await;
+
+        let (_dir, history) = open_history();
+        let destino = tempfile::TempDir::new().unwrap();
+        let prefixes = vec![prefix.to_string()];
+        let apagada = delete_all(
+            &history,
+            &pool,
+            &host,
+            &prefixes,
+            &keys,
+            BackupChoice::File(destino.path()),
+        )
+        .await;
+        drop(destino);
+
+        let erro = history
+            .rollback(&pool, &host, None, apagada.entry_id)
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(erro, HistoryError::BackupUnreadable { .. }),
+            "o arquivo sumiu, e a volta atrás precisa dizer isso: {erro:?}"
+        );
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            0,
+            "sem a cópia não há o que escrever"
+        );
+        assert!(
+            !history.get(apagada.entry_id).unwrap().rolled_back,
+            "nada foi desfeito"
+        );
+    }
+
+    /// Uma queda no meio do `UNLINK` deixa `deleted` em 0 para sempre, com
+    /// a cópia inteira e perfeitamente usável do lado. Quem decide o que
+    /// restaurar é a cópia, nunca essa contagem.
+    #[tokio::test]
+    async fn a_row_that_counted_no_deletion_still_restores_its_backup() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:volta_sem_contagem:";
+        let keys = seed_keys(&mut conn, prefix, 2).await;
+
+        let (_dir, history) = open_history();
+        let prefixes = vec![prefix.to_string()];
+        let apagada = delete_all(
+            &history,
+            &pool,
+            &host,
+            &prefixes,
+            &keys,
+            BackupChoice::Inline,
+        )
+        .await;
+        let copia = history
+            .get(apagada.entry_id)
+            .unwrap()
+            .before_json
+            .expect("a cópia inline precisa estar na linha");
+
+        // A mesma cópia numa linha que nunca chegou a contar o que apagou.
+        let travada = WriteOp::DeletePrefix {
+            prefixes: prefixes.clone(),
+            deleted: 0,
+            enumerated: keys.len() as u64,
+            backup: BackupKind::Inline,
+        };
+        let id = history
+            .insert_entry(
+                &host,
+                host.db,
+                prefix,
+                &op_summary(prefix, &travada),
+                serde_json::to_string(&travada).ok().as_deref(),
+                Some(&copia),
+                Actor::Human,
+                now_unix_ms(),
+            )
+            .unwrap();
+
+        let relatorio = history.rollback(&pool, &host, None, id).await.unwrap();
+
+        match relatorio {
+            RollbackOutcome::Bulk { restored, failed } => {
+                assert_eq!(restored, 2, "a cópia está lá e é usável");
+                assert!(failed.is_empty(), "nenhuma chave devia falhar: {failed:?}");
+            }
+            outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
+        }
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            2,
+            "as duas precisam ter voltado"
+        );
+
+        drop_keys(&mut conn, &keys).await;
     }
 
     /// O nome do arquivo da cópia carrega a data, e montá-la sem

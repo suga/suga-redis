@@ -29,7 +29,9 @@ use crate::approval::{
 };
 use crate::core::config::{ConfigError, Env, Host, HostStore};
 use crate::core::conn::{ConnError, Pool};
-use crate::core::history::{Actor, History, HistoryEntry, HistoryError};
+use crate::core::history::{
+    Actor, FailedKey, History, HistoryEntry, HistoryError, RollbackOutcome,
+};
 use crate::core::index::{Index, IndexError, ScanProgress, ScanReport};
 use crate::core::keys::{
     Alvo, KeyTrie, Level, MAX_CHILDREN, ScanSnapshot, expand_branch, scan_trie,
@@ -170,6 +172,15 @@ pub enum WriteOutcome {
     /// A escrita NÃO aconteceu: é produção e ninguém confirmou ainda.
     /// `summary` é a frase do diálogo.
     NeedsConfirmation { summary: String },
+    /// A volta atrás de uma exclusão em massa: quantas chaves voltaram e
+    /// quais não voltaram. `failed` vazio é o desfeito inteiro; qualquer
+    /// coisa nele é um desfeito pela metade, e a tela precisa dizer isso —
+    /// por isso a contagem e os nomes atravessam a fronteira, em vez de um
+    /// "pronto" que esconderia o que ficou para trás.
+    Restored {
+        restored: u64,
+        failed: Vec<FailedKey>,
+    },
 }
 
 /// Tudo que os comandos precisam, montado uma vez na subida do app.
@@ -785,13 +796,18 @@ pub async fn rollback(state: &AppState, entry_id: i64, confirmed: bool) -> Resul
                     });
                 }
 
-                state
+                let desfeito = state
                     .history
                     .rollback(&state.pool, &host, pw.as_deref(), entry_id)
                     .await?;
                 state.index.forget_key(&host_id, entry.db, &entry.key)?;
 
-                Ok(WriteOutcome::Applied { entry_id })
+                Ok(match desfeito {
+                    RollbackOutcome::Key => WriteOutcome::Applied { entry_id },
+                    RollbackOutcome::Bulk { restored, failed } => {
+                        WriteOutcome::Restored { restored, failed }
+                    }
+                })
             })
             .await
         }
