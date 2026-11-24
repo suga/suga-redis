@@ -379,9 +379,17 @@
 	 */
 	function marcarFaixa(branch: Branch) {
 		if (branch.leaf_key !== null) return;
-		const ate = linhas.findIndex((l) => l.branch?.full_prefix === branch.full_prefix);
+
+		// A lista é fotografada ANTES de mexer na seleção, e os índices valem
+		// só para esta foto. `linhas` depende da seleção (é ela que segura na
+		// tela a marca que o filtro não casa), e um `$derived` se recalcula na
+		// hora em que é lido: limpar a seleção no meio encolhe a lista debaixo
+		// de índices contados na lista maior — `atuais[i]` seria `undefined`, e
+		// o clique estourava.
+		const atuais = linhas;
+		const ate = atuais.findIndex((l) => l.branch?.full_prefix === branch.full_prefix);
 		const de =
-			ancora === null ? -1 : linhas.findIndex((l) => l.branch?.full_prefix === ancora);
+			ancora === null ? -1 : atuais.findIndex((l) => l.branch?.full_prefix === ancora);
 		if (ate === -1) return;
 
 		// A âncora pode ter saído da tela: galho fechado em volta dela, filtro
@@ -397,7 +405,7 @@
 
 		selecionados.clear();
 		for (let i = Math.min(de, ate); i <= Math.max(de, ate); i += 1) {
-			const dentro = linhas[i].branch;
+			const dentro = atuais[i].branch;
 			if (dentro && dentro.leaf_key === null) selecionados.add(dentro.full_prefix);
 		}
 	}
@@ -410,8 +418,11 @@
 	 * a mesma coisa.
 	 */
 	function marcarPrimeiroNivel() {
+		// Fotografada antes de limpar, pela mesma razão de `marcarFaixa` — aqui
+		// não estoura, só marcaria menos do que a tela mostra, calado.
+		const atuais = linhas;
 		selecionados.clear();
-		for (const linha of linhas) {
+		for (const linha of atuais) {
 			const branch = linha.branch;
 			if (linha.depth === 0 && branch && branch.leaf_key === null) {
 				selecionados.add(branch.full_prefix);

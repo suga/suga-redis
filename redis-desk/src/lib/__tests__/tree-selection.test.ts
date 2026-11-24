@@ -285,6 +285,43 @@ test("o filtro mantém o caminho até uma marca lá dentro", async () => {
 	expect(screen.queryByRole("button", { name: /sessao/ })).not.toBeInTheDocument();
 });
 
+test("Shift+clique debaixo de um filtro pega a faixa que está na tela", async () => {
+	const user = userEvent.setup();
+	const { rerender } = montar();
+
+	await cliqueComando(user, linha(/catalogo/));
+	await cliqueComando(user, linha(/sessao/));
+	// Com o filtro, as três linhas continuam na tela: `pedido` porque casa,
+	// as outras duas porque estão marcadas.
+	await rerender({ filter: "ped" });
+
+	await cliqueShift(user, linha(/catalogo/));
+
+	// A faixa é contada sobre a lista de ANTES de mexer na seleção: limpar
+	// a seleção encolhe a própria lista (o filtro volta a esconder quem não
+	// casa), e indexar a lista nova com os índices da antiga lê fora dela.
+	expect(linha(/catalogo/)).toHaveClass("marcada");
+	expect(linha(/pedido/)).toHaveClass("marcada");
+	expect(linha(/sessao/)).toHaveClass("marcada");
+});
+
+test("⌘+A debaixo de um filtro marca o primeiro nível que está na tela", async () => {
+	const user = userEvent.setup();
+	const { rerender } = montar();
+
+	await cliqueComando(user, linha(/catalogo/));
+	await rerender({ filter: "ped" });
+
+	linha(/pedido/).focus();
+	await user.keyboard("{Meta>}a{/Meta}");
+
+	// Mesma armadilha, versão silenciosa: `catalogo` só está na lista por
+	// estar marcado, e limpar a seleção no meio da varredura o tiraria dela
+	// — o ⌘+A marcaria menos do que a tela mostrava, sem dizer nada.
+	expect(linha(/catalogo/)).toHaveClass("marcada");
+	expect(linha(/pedido/)).toHaveClass("marcada");
+});
+
 test("Shift+clique com a âncora fora da tela adota a linha clicada", async () => {
 	const user = userEvent.setup();
 	arvore({ "catalogo:": [galho("eventos", "catalogo:", 2)] });
@@ -307,6 +344,26 @@ test("Shift+clique com a âncora fora da tela adota a linha clicada", async () =
 	expect(linha(/catalogo/)).toHaveClass("marcada");
 	expect(linha(/pedido/)).toHaveClass("marcada");
 	expect(linha(/sessao/)).toHaveClass("marcada");
+});
+
+test("o menu leva a marca escondida junto, e diz onde ela está", async () => {
+	const user = userEvent.setup();
+	arvore({ "catalogo:": [galho("eventos", "catalogo:", 2)] });
+	const { onPrefixMenu } = montar();
+
+	await cliqueComando(user, linha(/sessao/));
+	await user.click(linha(/catalogo/));
+	await cliqueComando(user, await screen.findByRole("button", { name: /eventos/ }));
+	await user.click(linha(/catalogo/));
+
+	fireEvent.contextMenu(linha(/sessao/), { clientX: 5, clientY: 6 });
+
+	// O sintoma que começou tudo isto era o menu receber prefixos que
+	// ninguém vê. A conta continua inteira — nada do que foi marcado se
+	// perdeu —, e o que saiu da vista está localizado: o galho que o guarda
+	// diz isso na própria linha.
+	expect(onPrefixMenu).toHaveBeenCalledWith(["sessao:", "catalogo:eventos:"], 5, 6);
+	expect(linha(/catalogo/)).toHaveClass("guarda-marcados");
 });
 
 test("a marca de selecionado não usa a classe de produção", async () => {
@@ -366,15 +423,22 @@ test("a marca sobrevive à linha sair da janela", async () => {
 
 	await cliqueComando(user, linha(/p00/));
 	expect(linha(/p00/)).toHaveClass("marcada");
+	// A classe é escopada pelo compilador; esta contagem prova que o
+	// seletor acha a marca, para a contagem de zero lá embaixo valer.
+	expect(container.querySelectorAll(".marcada")).toHaveLength(1);
 
 	const rolagem = container.querySelector(".rolagem") as HTMLElement;
 	Object.defineProperty(rolagem, "scrollTop", { configurable: true, value: 1200 });
 	await fireEvent.scroll(rolagem);
 
 	// A linha marcada deixou de existir no DOM — é exatamente aqui que uma
-	// seleção guardada por índice de linha ou por nó perderia o rastro.
+	// seleção guardada por nó perderia o rastro.
 	expect(screen.queryByRole("button", { name: /p00/ })).not.toBeInTheDocument();
 	expect(linha(/p45/)).toBeInTheDocument();
+	// E a marca não escorregou para quem ocupou a janela: uma seleção
+	// guardada por índice DENTRO da fatia desenhada marcaria a primeira
+	// linha de cá, e passaria por todo o resto deste teste.
+	expect(container.querySelectorAll(".marcada")).toHaveLength(0);
 
 	Object.defineProperty(rolagem, "scrollTop", { configurable: true, value: 0 });
 	await fireEvent.scroll(rolagem);
