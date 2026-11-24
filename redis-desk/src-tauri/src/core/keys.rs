@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// `COUNT` pedido a cada chamada de `SCAN`: alto o bastante para que um
 /// banco com muitas chaves não precise de milhares de idas e vindas, sem
 /// pedir uma passada tão grande que pese no servidor de uma vez só.
-const SCAN_COUNT: usize = 5_000;
+pub(crate) const SCAN_COUNT: usize = 5_000;
 
 /// Tamanho do lote de chaves por pipeline de metadados (`TYPE` + `PTTL` +
 /// `MEMORY USAGE`). Lotes menores que o total de chaves evitam um pipeline
@@ -446,7 +446,7 @@ pub struct Alvo<'a> {
 /// Sem isso, um prefixo que contenha `*` deixa de selecionar o que está sob
 /// ele e passa a casar com qualquer coisa — devolvendo chaves de outros
 /// galhos como se fossem deste.
-fn escapar_glob(texto: &str) -> String {
+pub(crate) fn escapar_glob(texto: &str) -> String {
     let mut out = String::with_capacity(texto.len());
     for ch in texto.chars() {
         if matches!(ch, '*' | '?' | '[' | ']' | '\\') {

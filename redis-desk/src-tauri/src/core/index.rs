@@ -292,6 +292,47 @@ impl Index {
         Ok(())
     }
 
+    /// Tira VÁRIAS chaves do índice de uma vez — a irmã em massa de
+    /// `forget_key`, para a exclusão em massa da fachada
+    /// (`commands::delete_prefix`).
+    ///
+    /// Não é `forget_key` num laço, e a diferença não é de estilo:
+    /// `key_index` é uma tabela FTS5 em que `key` é `UNINDEXED`, então
+    /// cada `DELETE` por nome varre a tabela inteira. Medido contra um
+    /// índice de 20.000 linhas, cada exclusão dessas custa ~3 ms — apagar
+    /// um prefixo de 20.000 chaves levaria quase um minuto com o aplicativo
+    /// parado, e o custo cresce com o PRODUTO dos dois números. Aqui os
+    /// nomes vão para uma tabela temporária e um `DELETE` só varre a tabela
+    /// uma única vez, numa transação só.
+    pub fn forget_keys(&self, host_id: &str, db: u8, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // `TEMP` é por conexão, e esta é a conexão do índice: a tabela não
+        // atravessa processos nem aparece para o histórico, que abre a sua.
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS forgotten_keys (key TEXT PRIMARY KEY);
+             DELETE FROM forgotten_keys;",
+        )?;
+        {
+            let mut stmt = tx.prepare("INSERT OR IGNORE INTO forgotten_keys (key) VALUES (?1)")?;
+            for key in keys {
+                stmt.execute(params![key])?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM key_index \
+             WHERE host_id = ?1 AND db = ?2 AND key IN (SELECT key FROM forgotten_keys)",
+            params![host_id, db as i64],
+        )?;
+        tx.execute_batch("DELETE FROM forgotten_keys;")?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Roda uma consulta de leitura sobre a conexão do índice.
     ///
     /// Existe para `core::search` (Task 8) poder escrever o SEU SQL — o

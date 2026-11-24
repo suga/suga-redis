@@ -585,6 +585,22 @@ async fn read_stream(
     Ok((page, total))
 }
 
+/// Onde (e se) a cópia de segurança de uma exclusão em massa (`DeletePrefix`)
+/// ficou guardada. Existe separado do conteúdo da cópia em si porque o
+/// `op_json` do histórico precisa saber, só de olhar essa variante, como
+/// restaurar — ou se não há como, porque a pessoa recusou a cópia na hora de
+/// confirmar.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "backup", rename_all = "snake_case")]
+pub enum BackupKind {
+    /// A cópia inteira coube junto do próprio `op_json`.
+    Inline,
+    /// A cópia foi grande demais para `op_json` e foi escrita à parte.
+    File { path: String },
+    /// A pessoa optou por apagar sem cópia.
+    None,
+}
+
 /// Uma mudança tipada no conteúdo ou no TTL de uma chave editável. Todo
 /// caminho que grava dado neste produto — o editor da UI, o desfazer da
 /// Task 6 e as escritas controladas da LLM na Task 16 — passa por aqui, nunca
@@ -626,6 +642,19 @@ pub enum WriteOp {
         ttl_ms: Option<i64>,
     },
     DeleteKey,
+    /// Apagar toda chave sob um ou mais prefixos, de uma vez — o resultado
+    /// de `core::bulk::enumerate` seguido de `core::bulk::unlink_keys`,
+    /// registrado como UMA operação de histórico em vez de milhares.
+    DeletePrefix {
+        /// Os prefixos confirmados pela pessoa, na ordem em que apareceram
+        /// no diálogo.
+        prefixes: Vec<String>,
+        /// Quantas saíram de verdade (cancelar faz isto ser menor).
+        deleted: u64,
+        /// Quantas a varredura achou quando a pessoa confirmou.
+        enumerated: u64,
+        backup: BackupKind,
+    },
 }
 
 /// Sentinela usado só durante `RemoveListItem`, para marcar com `LSET` o
@@ -786,6 +815,29 @@ async fn execute_op(
         }
         WriteOp::SetTtl { ttl_ms } => set_ttl(conn, key, *ttl_ms).await,
         WriteOp::DeleteKey => redis::cmd("DEL").arg(key).query_async::<()>(conn).await,
+        WriteOp::DeletePrefix { .. } => {
+            // Toda outra variante mira UMA chave, a que `apply_write`
+            // recebeu. `DeletePrefix` não tem essa chave — ela varre e
+            // apaga em lote via `core::bulk::enumerate`/`unlink_keys`, com
+            // sua própria conexão e seu próprio laço de `UNLINK`. Quem grava
+            // essa operação no histórico chama `bulk::unlink_keys`
+            // diretamente, nunca `apply_write`.
+            //
+            // Isto PODE ser alcançado: `op: WriteOp` chega a `apply_write`
+            // já desserializado do lado da tela (`commands::cmd_write_value`),
+            // e nada no tipo impede um `DeletePrefix` de entrar nesse
+            // caminho — só a disciplina de quem chama. Um `unreachable!()`
+            // aqui derrubaria o app inteiro (`panic = "abort"` no release),
+            // não só esta escrita, então a recusa precisa ser um `Err`
+            // comum, como qualquer outra falha de comando.
+            Err(redis::RedisError::from((
+                redis::ErrorKind::Client,
+                "DeletePrefix não é uma escrita de chave única",
+                "esta operação é aplicada em lote por core::bulk::unlink_keys, nunca por \
+                 execute_op/apply_write"
+                    .to_string(),
+            )))
+        }
     }
 }
 
@@ -881,6 +933,31 @@ pub fn op_summary(key: &str, op: &WriteOp) -> String {
             format!("Tornar {key} persistente (remover o TTL)")
         }
         WriteOp::DeleteKey => format!("Apagar a chave {key}"),
+        WriteOp::DeletePrefix {
+            prefixes,
+            deleted,
+            enumerated,
+            backup,
+        } => {
+            let alvo = prefix_label(prefixes);
+            let cópia = match backup {
+                BackupKind::Inline | BackupKind::File { .. } => "com cópia",
+                BackupKind::None => "sem cópia",
+            };
+            format!("Apagar {deleted} de {enumerated} chaves sob {alvo}, {cópia}")
+        }
+    }
+}
+
+/// Como citar os prefixos de um `DeletePrefix` numa frase: o primeiro, e
+/// "e mais N" quando há outros — nunca a lista inteira, que para um pedido
+/// de vários prefixos poderia ficar tão longa quanto a própria operação que
+/// descreve.
+fn prefix_label(prefixes: &[String]) -> String {
+    match prefixes {
+        [] => "nenhum prefixo".to_string(),
+        [único] => format!("\"{único}\""),
+        [primeiro, resto @ ..] => format!("\"{primeiro}\" e mais {}", resto.len()),
     }
 }
 
@@ -1573,6 +1650,81 @@ mod tests {
             other => panic!("esperava Value::List, veio {other:?}"),
         }
     }
+
+    #[test]
+    fn delete_prefix_round_trips_through_serde() {
+        let op = WriteOp::DeletePrefix {
+            prefixes: vec!["wallet:".to_string(), "session:".to_string()],
+            deleted: 1200,
+            enumerated: 1395,
+            backup: BackupKind::File {
+                path: "/tmp/suga-redis-backup.json".to_string(),
+            },
+        };
+
+        let json = serde_json::to_string(&op).unwrap();
+        let back: WriteOp = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(op, back);
+    }
+
+    /// Uma versão anterior deste app gravou `op_json` sem a variante
+    /// `DeletePrefix` — a string abaixo é literal, exatamente como teria
+    /// saído do disco antes desta variante existir. Acrescentar uma
+    /// variante nova ao enum não pode fazer esse histórico antigo parar de
+    /// abrir: `op_json` é formato persistido, não um tipo em memória.
+    #[test]
+    fn old_op_json_still_deserializes() {
+        let op: WriteOp = serde_json::from_str(r#"{"op":"delete_key"}"#).unwrap();
+        assert_eq!(op, WriteOp::DeleteKey);
+    }
+
+    #[test]
+    fn summary_names_count_and_prefix() {
+        // `deleted` menor que `enumerated` é o caso de um cancelamento no
+        // meio da exclusão — o resumo precisa mostrar os dois números, não
+        // colapsar um no outro.
+        let summary = op_summary(
+            "irrelevante",
+            &WriteOp::DeletePrefix {
+                prefixes: vec!["wallet:".to_string()],
+                deleted: 1200,
+                enumerated: 1395,
+                backup: BackupKind::Inline,
+            },
+        );
+
+        assert!(
+            summary.contains("1395"),
+            "resumo deveria citar quantas a varredura achou: {summary}"
+        );
+        assert!(
+            summary.contains("1200"),
+            "resumo deveria citar quantas saíram de verdade: {summary}"
+        );
+        assert!(
+            summary.contains("wallet:"),
+            "resumo deveria citar o prefixo: {summary}"
+        );
+    }
+
+    #[test]
+    fn summary_says_when_there_is_no_backup() {
+        let summary = op_summary(
+            "irrelevante",
+            &WriteOp::DeletePrefix {
+                prefixes: vec!["wallet:".to_string()],
+                deleted: 1395,
+                enumerated: 1395,
+                backup: BackupKind::None,
+            },
+        );
+
+        assert!(
+            summary.contains("sem cópia"),
+            "sem backup precisa dizer isso na frase: {summary}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1993,5 +2145,38 @@ mod write_tests {
             "um valor de {} bytes lido em paginas de 64 kB precisa se declarar cortado",
             grande.len()
         );
+    }
+
+    /// `DeletePrefix` chega a `apply_write` como qualquer outro `WriteOp`
+    /// desserializado (`commands::cmd_write_value` não filtra variante
+    /// nenhuma) — e `execute_op` recusa com um `Err` comum em vez de
+    /// `unreachable!()`, porque derrubar o processo inteiro por uma escrita
+    /// mal-formada não é uma opção (`panic = "abort"` no release). Este
+    /// teste prova que o caminho chega mesmo até lá e volta como erro, não
+    /// como pânico.
+    #[tokio::test]
+    async fn delete_prefix_through_apply_write_is_a_controlled_error() {
+        let pool = Pool::new();
+        let host = test_host();
+
+        let result = apply_write(
+            &pool,
+            &host,
+            None,
+            host.db,
+            "value_rs_test:nao_deveria_existir",
+            &WriteOp::DeletePrefix {
+                prefixes: vec!["wallet:".to_string()],
+                deleted: 0,
+                enumerated: 0,
+                backup: BackupKind::None,
+            },
+        )
+        .await;
+
+        match result {
+            Err(_) => {}
+            Ok(()) => panic!("DeletePrefix não deveria ser aceita por apply_write"),
+        }
     }
 }

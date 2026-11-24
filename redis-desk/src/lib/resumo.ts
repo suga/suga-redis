@@ -8,6 +8,7 @@
  * histórico; quem fala com gente é esta.
  */
 import type { Bytes, WriteOp } from "$lib/api";
+import { numero } from "$lib/formato";
 import { t } from "$lib/i18n.svelte";
 
 /** O texto de um valor, ou a marca de que ele é binário. */
@@ -48,5 +49,24 @@ export function resumoDaOperacao(chave: string, op: WriteOp): string {
 				: t("op.setTtl", { chave, ms: op.ttl_ms });
 		case "delete_key":
 			return t("op.deleteKey", { chave });
+		case "delete_prefix": {
+			// `deleted`, não `enumerated`: a frase descreve o que SAIU, e
+			// desistir no meio faz os dois números divergirem. Prometer o
+			// número da varredura seria o histórico dizendo de volta chaves
+			// que continuam no banco.
+			const n = numero(op.deleted);
+			if (op.prefixes.length > 1) {
+				// Nomear só o primeiro faria a linha descrever menos do que
+				// aconteceu, e os outros não caberiam numa frase de uma linha.
+				return t("op.deletePrefixVariosPrefixos", {
+					n,
+					prefixos: numero(op.prefixes.length),
+				});
+			}
+			const prefixo = op.prefixes[0] ?? chave;
+			return op.deleted === 1
+				? t("op.deletePrefixUma", { n, prefixo })
+				: t("op.deletePrefixVarias", { n, prefixo });
+		}
 	}
 }

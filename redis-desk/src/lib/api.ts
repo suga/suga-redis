@@ -141,7 +141,28 @@ export type WriteOp =
 	| { op: "set_zset_member"; member: Bytes; score: number }
 	| { op: "remove_zset_member"; member: Bytes }
 	| { op: "set_ttl"; ttl_ms: number | null }
-	| { op: "delete_key" };
+	| { op: "delete_key" }
+	| {
+			op: "delete_prefix";
+			prefixes: string[];
+			/** Quantas saíram de VERDADE — desistir no meio faz isto ser menor. */
+			deleted: number;
+			/** Quantas a varredura tinha achado quando a pessoa confirmou. */
+			enumerated: number;
+			backup: BackupKind;
+	  };
+
+/**
+ * Onde (e se) a cópia de segurança de uma exclusão em massa ficou guardada.
+ *
+ * É por esta variante, e só por ela, que o histórico sabe se tem o que
+ * restaurar: uma entrada gravada com `none` não oferece volta atrás — não
+ * porque o botão esteja cinza, mas porque não existe nada para repor.
+ */
+export type BackupKind =
+	| { backup: "inline" }
+	| { backup: "file"; path: string }
+	| { backup: "none" };
 
 /** Atalho para montar um `Bytes` a partir de texto digitado na tela. */
 export function textBytes(text: string): Bytes {
@@ -149,14 +170,46 @@ export function textBytes(text: string): Bytes {
 }
 
 /**
+ * Uma chave que a volta atrás de uma exclusão em massa não conseguiu trazer
+ * de volta, com o motivo já em texto.
+ */
+export interface FailedKey {
+	key: string;
+	reason: string;
+}
+
+/**
  * O que aconteceu com um pedido de escrita. `needs_confirmation` significa
  * que NADA foi escrito: é produção e falta confirmar. A tela mostra o
  * diálogo com `summary` e, se a pessoa autorizar, repete a mesma chamada
- * com `confirmed: true`.
+ * com `confirmed: true`. `deleted` e `restored` são as duas pontas da
+ * exclusão em massa: uma exclusão que aconteceu, e a volta atrás dela.
+ *
+ * No `deleted`, os três números dizem coisas diferentes e nenhum serve
+ * sozinho:
+ *
+ * - `deleted` é o que o servidor disse ter apagado. É um limite INFERIOR:
+ *   um reenvio depois de uma resposta perdida devolve 0 para chaves que
+ *   saíram, e uma chave que expirou sozinha também não entra na conta.
+ * - `attempted` é o que foi enviado ao servidor — e, por isso, o número que
+ *   diz se a operação PAROU. "O resto continua no banco" é verdade sobre
+ *   ele e mentira sobre `deleted`.
+ * - `enumerated` é o que a contagem tinha prometido.
+ *
+ * `entry_id` vem `null` quando nada foi tentado: não há linha de histórico,
+ * porque ela registraria uma mudança que não aconteceu.
  */
 export type WriteOutcome =
 	| { outcome: "applied"; entry_id: number }
-	| { outcome: "needs_confirmation"; summary: string };
+	| { outcome: "needs_confirmation"; summary: string }
+	| {
+			outcome: "deleted";
+			entry_id: number | null;
+			deleted: number;
+			attempted: number;
+			enumerated: number;
+	  }
+	| { outcome: "restored"; restored: number; failed: FailedKey[] };
 
 // -------------------------------------------------------------- histórico
 
@@ -273,7 +326,15 @@ export interface ApiError {
 		| "history"
 		| "unknown_host"
 		| "name_mismatch"
-		| "approval";
+		| "approval"
+		/** A contagem guardada venceu: é preciso enumerar de novo antes de apagar. */
+		| "unknown_enumeration"
+		/**
+		 * A cópia de segurança passou do teto de bytes e NENHUMA chave foi
+		 * apagada. Tem nome próprio porque a tela reage a ele refazendo a
+		 * escolha da cópia, não mostrando um erro — ver `Workspace`.
+		 */
+		| "backup_too_large";
 	message: string;
 }
 
@@ -374,6 +435,143 @@ export function onTreeProgress(
 	handler: (retrato: TreeProgress) => void,
 ): Promise<UnlistenFn> {
 	return listen<TreeProgress>("tree://progress", (event) => handler(event.payload));
+}
+
+// --------------------------------------------------- exclusão em massa
+
+/**
+ * O resumo de uma enumeração de prefixo — e só o resumo. A lista de nomes
+ * fica no Rust; só a contagem e os tipos atravessam a fronteira.
+ */
+export interface EnumerationHandle {
+	id: string;
+	count: number;
+	kinds: [KeyKind, number][];
+	/** A varredura bateu no teto de `MAX_ENUMERATED` chaves antes de terminar. */
+	truncated: boolean;
+	/** Quantas são de tipo sem volta atrás (set, stream, RedisJSON). */
+	unrestorable: number;
+}
+
+/** O que a pessoa escolheu no diálogo sobre a cópia de segurança. */
+export type BackupRequest = "inline" | "file" | "none";
+
+/**
+ * O teto da cópia de segurança, em BYTES — espelho de `MAX_BACKUP_BYTES`
+ * em `src-tauri/src/core/history.rs`.
+ *
+ * Mora aqui, e não solto no diálogo, pela mesma razão que todo o resto
+ * deste arquivo: é um número que precisa bater com o Rust, e ter UM lugar
+ * onde ele mora é o que torna o desencontro consertável. A frase que a
+ * pessoa lê quando a cópia é recusada cita este número; se ele andar de um
+ * lado só, a tela passa a mentir sobre o teto que acabou de recusá-la — em
+ * silêncio, porque nada quebra. `delete-prefix.test.ts` lê a constante do
+ * Rust e compara com esta, para o desencontro falhar alto.
+ */
+export const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
+
+/**
+ * O teto de chaves que uma enumeração devolve — espelho de `MAX_ENUMERATED`
+ * em `src-tauri/src/core/bulk.rs`.
+ *
+ * Mora aqui pela mesma razão de `MAX_BACKUP_BYTES`, e com o mesmo teste: a
+ * frase que a pessoa lê quando a varredura para no teto cita este número, e
+ * um literal digitado nos três catálogos andaria sozinho no dia em que o
+ * Rust mudasse — em silêncio, porque nada quebra quando só a prosa está
+ * errada. `delete-prefix.test.ts` lê a constante do fonte Rust e compara.
+ */
+export const MAX_ENUMERATED = 100_000;
+
+/**
+ * Varre um ou mais prefixos e guarda os nomes achados, sem apagar nada
+ * ainda. Acompanhe o andamento com `onBulkScanProgress`.
+ *
+ * Só existe UMA enumeração por par (host, banco): chamar de novo para o
+ * mesmo par descarta a anterior — por isso só um diálogo de exclusão em
+ * massa pode estar aberto por banco de cada vez.
+ *
+ * Devolve `null` quando a varredura foi interrompida por
+ * `cancelEnumeration`. Não é falha e não é resposta vazia: a lista que sai
+ * de uma varredura interrompida não descreve o prefixo, então não existe
+ * contagem a mostrar nem id a guardar.
+ */
+export function enumeratePrefix(
+	hostId: string,
+	db: number,
+	prefixes: string[],
+): Promise<EnumerationHandle | null> {
+	return invoke("cmd_enumerate_prefix", { hostId, db, prefixes });
+}
+
+/**
+ * Pede para parar a varredura de uma enumeração em andamento. `false` não é
+ * falha: pode ser que ela já tenha acabado antes de o clique chegar.
+ *
+ * Endereçada por (host, banco) e não por id porque ainda não existe id — o
+ * da contagem só nasce quando a varredura termina, e a desistência precisa
+ * chegar antes disso.
+ */
+export function cancelEnumeration(hostId: string, db: number): Promise<boolean> {
+	return invoke("cmd_cancel_enumeration", { hostId, db });
+}
+
+/**
+ * Apaga as chaves de uma enumeração já feita. Em host de produção,
+ * `typedHostName` é comparado byte a byte com o nome do host — sem
+ * aparar espaços e sem ignorar maiúsculas/minúsculas; fora de produção
+ * ele é ignorado. Acompanhe o andamento pelos DOIS canais: a leitura da
+ * cópia (`onBulkBackupProgress`) vem antes e é a fase longa; a exclusão em
+ * si (`onBulkDeleteProgress`) vem depois.
+ *
+ * Uma recusa (`needs_confirmation`) NÃO consome a enumeração: o mesmo
+ * `enumerationId` continua válido, e a tela repete a chamada com o nome
+ * digitado em vez de varrer tudo de novo.
+ */
+export function deletePrefix(
+	enumerationId: string,
+	backup: BackupRequest,
+	typedHostName: string | null,
+): Promise<WriteOutcome> {
+	return invoke("cmd_delete_prefix", { enumerationId, backup, typedHostName });
+}
+
+/**
+ * Pede para parar uma exclusão em massa em andamento. `false` não é falha:
+ * pode ser que a exclusão já tenha acabado antes de o clique chegar.
+ */
+export function cancelDelete(enumerationId: string): Promise<boolean> {
+	return invoke("cmd_cancel_delete", { enumerationId });
+}
+
+/** Acompanha a varredura de uma enumeração. Chame o retorno para parar. */
+export function onBulkScanProgress(
+	handler: (tick: ScanTick) => void,
+): Promise<UnlistenFn> {
+	return listen<ScanTick>("bulk://scan-progress", (event) => handler(event.payload));
+}
+
+/**
+ * Acompanha a exclusão em massa já confirmada: quantas chaves já saíram.
+ * Chame o retorno para parar.
+ */
+export function onBulkDeleteProgress(
+	handler: (deleted: number) => void,
+): Promise<UnlistenFn> {
+	return listen<number>("bulk://delete-progress", (event) => handler(event.payload));
+}
+
+/**
+ * Acompanha a LEITURA da cópia de segurança: quantas chaves já foram
+ * retratadas. Chame o retorno para parar.
+ *
+ * Canal próprio, e não o mesmo do apagar, porque os dois números querem
+ * dizer coisas diferentes: esta é a fase longa da operação — uma ida e
+ * volta por chave — e durante ela nenhuma chave saiu ainda.
+ */
+export function onBulkBackupProgress(
+	handler: (read: number) => void,
+): Promise<UnlistenFn> {
+	return listen<number>("bulk://backup-progress", (event) => handler(event.payload));
 }
 
 /** Refaz o índice de busca. Acompanhe o andamento com `onRescanProgress`. */

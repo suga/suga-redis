@@ -4,9 +4,15 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 // Mesmo mínimo de mock que `workspace-conn.test.ts`: `Workspace` monta
 // `KeyTree` de qualquer jeito, então o mock cobre tudo que ele chama também.
-vi.mock("$lib/api", () => ({
+vi.mock("$lib/api", async (importOriginal) => ({
+	// Do módulo real, e não um número repetido aqui: um mock literal que
+	// esquece um export novo mata o primeiro teste que montar o diálogo,
+	// com uma mensagem que não tem nada a ver com o que ele testava.
+	MAX_BACKUP_BYTES: (await importOriginal<typeof import("$lib/api")>()).MAX_BACKUP_BYTES,
 	errorMessage: (err: unknown) => String(err),
 	textBytes: (text: string) => ({ text, base64: null, truncated: false }),
+	isApiError: (err: unknown) =>
+		typeof err === "object" && err !== null && "kind" in err && "message" in err,
 	listDbs: vi.fn(async () => []),
 	onRescanProgress: vi.fn(async () => () => {}),
 	onTreeProgress: vi.fn(async () => () => {}),
@@ -16,6 +22,15 @@ vi.mock("$lib/api", () => ({
 	writeValue: vi.fn(),
 	treeLevel: vi.fn(async () => null),
 	loadMoreChildren: vi.fn(),
+	// O `Workspace` passou a assinar os dois andamentos da exclusão em
+	// massa na montagem; sem eles aqui, ele nem monta.
+	onBulkScanProgress: vi.fn(async () => () => {}),
+	onBulkDeleteProgress: vi.fn(async () => () => {}),
+	onBulkBackupProgress: vi.fn(async () => () => {}),
+	enumeratePrefix: vi.fn(),
+	deletePrefix: vi.fn(),
+	cancelDelete: vi.fn(async () => true),
+	cancelEnumeration: vi.fn(async () => true),
 }));
 
 import { listDbs, rescan, scanStatus, scanTree } from "$lib/api";
