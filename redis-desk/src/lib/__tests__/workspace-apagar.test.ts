@@ -28,6 +28,7 @@ vi.mock("$lib/api", async (importOriginal) => {
 		onTreeProgress: vi.fn(async () => () => {}),
 		onBulkScanProgress: vi.fn(async () => () => {}),
 		onBulkDeleteProgress: vi.fn(async () => () => {}),
+		onBulkBackupProgress: vi.fn(async () => () => {}),
 		scanTree: vi.fn(async () => undefined),
 		rescan: vi.fn(),
 		scanStatus: vi.fn(async () => null),
@@ -37,13 +38,16 @@ vi.mock("$lib/api", async (importOriginal) => {
 		enumeratePrefix: vi.fn(),
 		deletePrefix: vi.fn(),
 		cancelDelete: vi.fn(async () => true),
+		cancelEnumeration: vi.fn(async () => true),
 	};
 });
 
 import {
 	cancelDelete,
+	cancelEnumeration,
 	deletePrefix,
 	enumeratePrefix,
+	onBulkBackupProgress,
 	onBulkDeleteProgress,
 	onTreeProgress,
 	treeLevel,
@@ -61,6 +65,7 @@ import type {
 const enumerou = vi.mocked(enumeratePrefix);
 const apagou = vi.mocked(deletePrefix);
 const desistiu = vi.mocked(cancelDelete);
+const desistiuDaVarredura = vi.mocked(cancelEnumeration);
 const escreveu = vi.mocked(writeValue);
 const nivel = vi.mocked(treeLevel);
 const assinouArvore = vi.mocked(onTreeProgress);
@@ -163,9 +168,12 @@ beforeEach(() => {
 		outcome: "deleted",
 		entry_id: 9,
 		deleted: 1_200,
+		attempted: 1_200,
 		enumerated: 1_200,
 	}));
 	desistiu.mockImplementation(async () => true);
+	desistiuDaVarredura.mockReset();
+	desistiuDaVarredura.mockImplementation(async () => true);
 	assinouApagar.mockImplementation(async () => () => {});
 });
 
@@ -348,6 +356,7 @@ test("needs_confirmation reabre o diálogo pedindo o nome digitado", async () =>
 		outcome: "deleted",
 		entry_id: 9,
 		deleted: 1_200,
+		attempted: 1_200,
 		enumerated: 1_200,
 	});
 	await montar({ env: "prod", name: "Redis de produção" });
@@ -403,7 +412,13 @@ test("dois cliques seguidos em apagar mandam uma chamada só", async () => {
 	await waitFor(() => expect(apagou).toHaveBeenCalled());
 
 	expect(apagou).toHaveBeenCalledTimes(1);
-	liberar({ outcome: "deleted", entry_id: 9, deleted: 1_200, enumerated: 1_200 });
+	liberar({
+		outcome: "deleted",
+		entry_id: 9,
+		deleted: 1_200,
+		attempted: 1_200,
+		enumerated: 1_200,
+	});
 });
 
 test("o diálogo entra em modo apagando antes do primeiro andamento chegar", async () => {
@@ -719,6 +734,172 @@ test("uma desistência que falha não diz que o apagar falhou", async () => {
 	expect(aviso).toHaveTextContent(/continua correndo/i);
 });
 
+
+// ------------------------------------- o que a tela diz quando sobra chave
+
+test("a frase do parcial é medida pelo TENTADO, não pelo que o servidor contou", async () => {
+	const user = userEvent.setup();
+	// `deleted` menor que `enumerated` sem nada ter parado é rotina: uma
+	// chave que expirou sozinha entre a contagem e o `UNLINK`, ou um reenvio
+	// que perdeu a conta de um `UNLINK` que o servidor já tinha aplicado.
+	// Dizer "o resto continua no banco" em cima desse número é afirmar algo
+	// falso sobre o banco — e é uma frase sobre a qual alguém vai agir.
+	apagou.mockResolvedValue({
+		outcome: "deleted",
+		entry_id: 9,
+		deleted: 300,
+		attempted: 1_200,
+		enumerated: 1_200,
+	});
+	await montar();
+	await pedirApagarPrefixo();
+
+	const dialogo = await screen.findByRole("dialog");
+	await user.click(within(dialogo).getByRole("button", { name: "Apagar 1.200 chaves" }));
+
+	const aviso = await screen.findByTestId("aviso-apagar");
+	expect(aviso).not.toHaveTextContent(/parou antes do fim/i);
+	expect(aviso).not.toHaveTextContent(/resto continua no banco/i);
+	expect(aviso).toHaveTextContent("300");
+});
+
+test("uma exclusão que parou de verdade diz que o resto continua no banco", async () => {
+	const user = userEvent.setup();
+	apagou.mockResolvedValue({
+		outcome: "deleted",
+		entry_id: 9,
+		deleted: 500,
+		attempted: 500,
+		enumerated: 1_200,
+	});
+	await montar();
+	await pedirApagarPrefixo();
+
+	const dialogo = await screen.findByRole("dialog");
+	await user.click(within(dialogo).getByRole("button", { name: "Apagar 1.200 chaves" }));
+
+	const aviso = await screen.findByTestId("aviso-apagar");
+	expect(aviso).toHaveTextContent("500 de 1.200");
+	expect(aviso).toHaveTextContent(/resto continua no banco/i);
+});
+
+test("com a varredura cortada no teto, o desfecho manda repetir a operação", async () => {
+	const user = userEvent.setup();
+	// O menu prometeu "Apagar tudo sob este prefixo…"; a varredura parou no
+	// teto, então sobrou chave. O que salvava isto hoje era acidental — a
+	// trie ainda mostra o galho —, e acidente não é aviso.
+	enumerou.mockImplementation(async () =>
+		enumeracao({ count: 100_000, truncated: true }),
+	);
+	apagou.mockResolvedValue({
+		outcome: "deleted",
+		entry_id: 9,
+		deleted: 100_000,
+		attempted: 100_000,
+		enumerated: 100_000,
+	});
+	await montar();
+	await pedirApagarPrefixo();
+
+	const dialogo = await screen.findByRole("dialog");
+	await user.click(within(dialogo).getByRole("button", { name: "Apagar 100.000 chaves" }));
+
+	const aviso = await screen.findByTestId("aviso-apagar");
+	expect(aviso).toHaveTextContent("100.000");
+	expect(aviso).toHaveTextContent(/ainda há chaves sob este prefixo/i);
+	expect(aviso).toHaveTextContent(/repita a operação/i);
+});
+
+// ------------------------------------------- desistir durante a varredura
+
+test("fechar a janela durante a varredura manda a varredura parar", async () => {
+	const user = userEvent.setup();
+	// Fechar só escondia a janela: o cursor seguia correndo no Rust até dar
+	// a volta no espaço de chaves inteiro, porque o `MATCH` do `SCAN` não
+	// encurta o trabalho do servidor. Quem clicou no prefixo errado não
+	// tinha como parar de pagar por isso.
+	enumerou.mockImplementation(() => new Promise<EnumerationHandle | null>(() => {}));
+	const alvo = await montar();
+	await pedirApagarPrefixo();
+
+	await screen.findByRole("dialog");
+	await user.keyboard("{Escape}");
+
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	expect(desistiuDaVarredura).toHaveBeenCalledWith(alvo.id, alvo.db);
+	// E não o desistir da EXCLUSÃO: nenhuma chave chegou a sair, e não há
+	// id de exclusão nenhum a parar.
+	expect(desistiu).not.toHaveBeenCalled();
+});
+
+test("uma varredura interrompida fecha a janela sem inventar frase nenhuma", async () => {
+	// `null` é o que a fachada devolve quando a varredura foi interrompida a
+	// pedido: não é falha e não é resposta vazia. Dizer "não há nada sob
+	// este prefixo" aqui seria a mesma troca que já custou caro duas vezes
+	// neste arquivo, de trás para frente.
+	let responder!: (achado: EnumerationHandle | null) => void;
+	enumerou.mockImplementation(
+		() => new Promise<EnumerationHandle | null>((resolve) => (responder = resolve)),
+	);
+	await montar();
+	await pedirApagarPrefixo();
+
+	await screen.findByRole("dialog");
+	responder(null);
+
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+	expect(screen.queryByTestId("erro-enumerar")).toBeNull();
+	expect(screen.queryByTestId("aviso-apagar")).toBeNull();
+	expect(screen.queryByTestId("erro-apagar")).toBeNull();
+});
+
+test("um pedido de parada que não chega tem assunto próprio", async () => {
+	const user = userEvent.setup();
+	enumerou.mockImplementation(() => new Promise<EnumerationHandle | null>(() => {}));
+	desistiuDaVarredura.mockRejectedValue({
+		kind: "unreachable",
+		message: "o pedido de parada não chegou",
+	});
+	await montar();
+	await pedirApagarPrefixo();
+
+	await screen.findByRole("dialog");
+	await user.keyboard("{Escape}");
+
+	const aviso = await screen.findByTestId("erro-apagar");
+	expect(aviso).toHaveTextContent("o pedido de parada não chegou");
+	// A VARREDURA continua correndo — não a exclusão, que nunca começou.
+	// Nenhuma chave está em risco, e dizer "não deu para apagar as chaves"
+	// descreveria outra coisa.
+	expect(aviso).toHaveTextContent(/varredura continua correndo/i);
+	expect(aviso).not.toHaveTextContent(/não deu para apagar as chaves/i);
+});
+
+// ------------------------------------------- a leitura da cópia na janela
+
+test("a janela mostra a leitura da cópia enquanto nenhuma chave saiu", async () => {
+	const user = userEvent.setup();
+	let entregarLeitura!: (lidas: number) => void;
+	vi.mocked(onBulkBackupProgress).mockImplementation(async (handler) => {
+		entregarLeitura = handler;
+		return () => {};
+	});
+	apagou.mockImplementation(() => new Promise<WriteOutcome>(() => {}));
+	await montar();
+	await pedirApagarPrefixo();
+
+	const dialogo = await screen.findByRole("dialog");
+	await user.click(within(dialogo).getByRole("button", { name: "Apagar 1.200 chaves" }));
+
+	// Antes de qualquer retrato, é o que a janela sempre mostrou.
+	expect(screen.getByTestId("andamento-apagar")).toHaveTextContent("0 chaves apagadas");
+
+	entregarLeitura(400);
+	expect(await screen.findByTestId("andamento-apagar")).toHaveTextContent(
+		"Lendo a cópia: 400 de 1.200 chaves",
+	);
+});
+
 // ------------------------------------------- a máquina de estados é total
 
 test("um desfecho que esta tela não conhece fecha o diálogo em vez de travá-lo", async () => {
@@ -756,7 +937,13 @@ test("o desfecho apaga a frase da desistência que não vale mais", async () => 
 
 	// A exclusão termina normalmente: o que não chegou foi o pedido de
 	// parada, e nada obriga o apagar a falhar junto.
-	concluir({ outcome: "deleted", entry_id: 9, deleted: 1_200, enumerated: 1_200 });
+	concluir({
+		outcome: "deleted",
+		entry_id: 9,
+		deleted: 1_200,
+		attempted: 1_200,
+		enumerated: 1_200,
+	});
 
 	expect(await screen.findByTestId("aviso-apagar")).toHaveTextContent("1.200");
 	// A frase descrevia uma exclusão em curso, e agora o modal que a

@@ -21,11 +21,13 @@
 	import { resumoDaOperacao } from "$lib/resumo";
 	import {
 		cancelDelete,
+		cancelEnumeration,
 		deletePrefix,
 		enumeratePrefix,
 		errorMessage,
 		isApiError,
 		listDbs,
+		onBulkBackupProgress,
 		onBulkDeleteProgress,
 		onBulkScanProgress,
 		onRescanProgress,
@@ -198,6 +200,12 @@
 		progresso: { scanned: number; total: number } | null;
 		/** Não-nulo enquanto as chaves saem: quantas já saíram. */
 		apagados: number | null;
+		/**
+		 * Não-nulo enquanto os retratos da cópia são lidos: quantas chaves já
+		 * foram percorridas. É a fase LONGA da exclusão, e sem este número a
+		 * janela ficava parada em "0 chaves apagadas" durante ela inteira.
+		 */
+		lidos: number | null;
 		/** Qual escolha de cópia o Rust acabou de recusar por tamanho. */
 		copiaRecusada: BackupRequest | null;
 	}
@@ -226,6 +234,7 @@
 		| "erro.aoApagarPrefixo"
 		| "erro.aoCopiar"
 		| "erro.aoDesistir"
+		| "erro.aoDesistirVarredura"
 		| "erro.aoRelerArvore";
 	let erroApagar = $state("");
 	let assuntoApagar = $state<AssuntoApagar>("erro.aoApagarPrefixo");
@@ -281,12 +290,18 @@
 			// um andamento de outra exclusão qualquer.
 			if (apagar && apagar.apagados !== null) apagar.apagados = saidas;
 		});
+		// A mesma régua para a leitura da cópia, que é a fase ANTERIOR da
+		// mesma operação: só pousa num diálogo que já pediu a exclusão.
+		const pararCopia = onBulkBackupProgress((lidas) => {
+			if (apagar && apagar.apagados !== null) apagar.lidos = lidas;
+		});
 
 		return () => {
 			pararVarredura.then((fn) => fn());
 			pararLeitura.then((fn) => fn());
 			pararVarreduraEmMassa.then((fn) => fn());
 			pararExclusao.then((fn) => fn());
+			pararCopia.then((fn) => fn());
 		};
 	});
 
@@ -566,6 +581,7 @@
 			enumeracao: null,
 			progresso: null,
 			apagados: null,
+			lidos: null,
 			copiaRecusada: null,
 		};
 
@@ -573,6 +589,15 @@
 		try {
 			const achado = await enumeratePrefix(host.id, db, prefixos);
 			if (minha !== geracaoApagar || !apagar) return;
+
+			if (!achado) {
+				// A varredura foi interrompida a pedido (ver `cancelarApagar`).
+				// Quem desistiu já fechou a janela; fechar de novo é só
+				// garantir que uma resposta em voo não a reabra. NUNCA uma
+				// frase: desistir não é falha e não é resposta vazia.
+				apagar = null;
+				return;
+			}
 
 			if (achado.count === 0) {
 				// Consentimento para apagar zero chaves é consentimento para um
@@ -618,6 +643,7 @@
 				return;
 			}
 			if (resultado.outcome === "deleted") {
+				const cortada = atual.enumeracao?.truncated ?? false;
 				apagar = null;
 				// A frase que estava na tela descrevia uma exclusão EM CURSO —
 				// tipicamente "a exclusão continua correndo", de um pedido de
@@ -627,7 +653,12 @@
 				// saindo. Zerada ANTES de `depoisDeApagar`, que pode pôr no
 				// mesmo lugar uma falha nova e legítima.
 				erroApagar = "";
-				avisoApagar = resumoDoApagado(resultado.deleted, resultado.enumerated);
+				avisoApagar = resumoDoApagado(
+					resultado.deleted,
+					resultado.attempted,
+					resultado.enumerated,
+					cortada,
+				);
 				depoisDeApagar(atual.prefixos);
 				return;
 			}
@@ -660,13 +691,36 @@
 		}
 	}
 
-	/** A frase do desfecho: o que saiu, e se saiu tudo que foi prometido. */
-	function resumoDoApagado(saidas: number, prometidas: number): string {
-		if (saidas < prometidas) {
+	/**
+	 * A frase do desfecho: o que saiu, e se sobrou chave para trás.
+	 *
+	 * "Parou antes do fim" é medido por `tentadas`, nunca por `saidas`.
+	 * `saidas` é o que o servidor disse ter apagado, e fica abaixo do pedido
+	 * também quando nada parou — uma chave que expirou sozinha entre a
+	 * contagem e o `UNLINK`, ou um reenvio que perdeu a conta de um `UNLINK`
+	 * já aplicado. Dizer "o resto continua no banco" em cima desse número é
+	 * afirmar algo falso sobre o banco, e é uma frase sobre a qual alguém vai
+	 * agir.
+	 *
+	 * `cortada` é o outro jeito de sobrar chave: a varredura parou no teto, a
+	 * exclusão apagou tudo que ela tinha achado, e o prefixo CONTINUA com
+	 * chaves por baixo. O item do menu prometeu "Apagar tudo sob este
+	 * prefixo…", então quem clicou precisa ouvir que falta repetir.
+	 */
+	function resumoDoApagado(
+		saidas: number,
+		tentadas: number,
+		prometidas: number,
+		cortada: boolean,
+	): string {
+		if (tentadas < prometidas) {
 			return t("apagarPrefixo.feitoParcial", {
-				feitas: numero(saidas),
+				feitas: numero(tentadas),
 				prometidas: numero(prometidas),
 			});
+		}
+		if (cortada) {
+			return t("apagarPrefixo.feitoCortado", { n: numero(saidas) });
 		}
 		const chave = saidas === 1 ? "apagarPrefixo.feitoUma" : "apagarPrefixo.feitoVarias";
 		return t(chave, { n: numero(saidas) });
@@ -726,6 +780,18 @@
 		// voltaria e reabriria o diálogo que a pessoa acabou de fechar.
 		geracaoApagar += 1;
 		apagar = null;
+		// E manda a varredura PARAR, não só some com a janela. Sem isto o
+		// cursor seguia correndo no Rust até dar a volta no espaço de chaves
+		// inteiro — o `MATCH` do `SCAN` não encurta o trabalho do servidor —,
+		// e quem clicou no prefixo errado não tinha como parar de pagar por
+		// isso.
+		cancelEnumeration(host.id, db).catch((err) => {
+			// Assunto PRÓPRIO, como o de desistir da exclusão, e pela mesma
+			// razão: o que não chegou foi o pedido de parada. A varredura
+			// continua correndo, e nenhuma chave está em risco — dizer que
+			// não deu para apagar seria descrever outra coisa.
+			falhouNoApagar("erro.aoDesistirVarredura", err);
+		});
 	}
 
 	/** Uma escrita foi aplicada: relê a chave e atualiza a árvore. */
@@ -973,6 +1039,7 @@
 		enumeracao={apagar.enumeracao}
 		progresso={apagar.progresso}
 		apagados={apagar.apagados}
+		lidos={apagar.lidos}
 		copiaRecusada={apagar.copiaRecusada}
 		onConfirmar={confirmarApagar}
 		onCancelar={cancelarApagar}

@@ -30,9 +30,11 @@ vi.mock("$lib/api", async (importOriginal) => ({
 	// massa na montagem; sem eles aqui, ele nem monta.
 	onBulkScanProgress: vi.fn(async () => () => {}),
 	onBulkDeleteProgress: vi.fn(async () => () => {}),
+	onBulkBackupProgress: vi.fn(async () => () => {}),
 	enumeratePrefix: vi.fn(),
 	deletePrefix: vi.fn(),
 	cancelDelete: vi.fn(async () => true),
+	cancelEnumeration: vi.fn(async () => true),
 }));
 
 import type { Host } from "$lib/api";

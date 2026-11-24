@@ -17,7 +17,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import DeletePrefixDialog from "$lib/DeletePrefixDialog.svelte";
-import { MAX_BACKUP_BYTES } from "$lib/api";
+import { MAX_BACKUP_BYTES, MAX_ENUMERATED } from "$lib/api";
 import type { BackupRequest, EnumerationHandle, Host } from "$lib/api";
 
 function hostDe(partes: Partial<Host> = {}): Host {
@@ -59,6 +59,7 @@ interface Partes {
 	enumeracao?: EnumerationHandle | null;
 	progresso?: { scanned: number; total: number } | null;
 	apagados?: number | null;
+	lidos?: number | null;
 	onConfirmar?: (backup: BackupRequest, nomeDigitado: string | null) => void;
 	onCancelar?: () => void;
 }
@@ -74,6 +75,7 @@ function montar(partes: Partes = {}) {
 			enumeracao: partes.enumeracao === undefined ? enumeracaoDe() : partes.enumeracao,
 			progresso: partes.progresso ?? null,
 			apagados: partes.apagados ?? null,
+			lidos: partes.lidos ?? null,
 			onConfirmar,
 			onCancelar,
 		},
@@ -192,6 +194,62 @@ test("acima do teto oferece gravar em arquivo e não oferece a cópia embutida",
 	expect(onConfirmar).toHaveBeenCalledWith("file", null);
 });
 
+test("acima do teto avisa que vão sobrar chaves e que a operação se repete", () => {
+	// O item do menu promete "Apagar tudo sob este prefixo…", e com a
+	// varredura cortada isso não vai acontecer. A ressalva do teto falava
+	// só da CÓPIA — o tamanho dela, para onde ela vai —, e em lugar nenhum
+	// alguém dizia que o prefixo continua com chaves por baixo. O
+	// anti-objetivo é explícito: sobrar chave em silêncio é pior que falhar
+	// alto.
+	montar({
+		host: DEV,
+		enumeracao: enumeracaoDe({ count: 100_000, truncated: true }),
+	});
+
+	const ressalva = screen.getByText(/parou no teto/);
+	expect(ressalva).toHaveTextContent(/continuam no banco/);
+	expect(ressalva).toHaveTextContent(/repita a operação/i);
+});
+
+test("a frase da leitura da cópia conta as chaves retratadas, não as apagadas", () => {
+	// A fase longa: uma ida e volta por chave, antes de a primeira sair.
+	// A janela mostrava "0 chaves apagadas" durante ela inteira, parada —
+	// indistinguível de travada para quem está olhando.
+	montar({
+		host: DEV,
+		enumeracao: enumeracaoDe({ count: 12_345 }),
+		apagados: 0,
+		lidos: 4_000,
+	});
+
+	const andamento = screen.getByTestId("andamento-apagar");
+	expect(andamento).toHaveTextContent("Lendo a cópia: 4.000 de 12.345 chaves");
+	// E NUNCA pelo canal do apagar: dizer "4.000 chaves apagadas" com zero
+	// apagadas é pior que o número parado que estava aqui antes.
+	expect(andamento).not.toHaveTextContent(/apagadas/);
+});
+
+test("o primeiro andamento do apagar toma o lugar da frase da leitura", () => {
+	montar({
+		host: DEV,
+		enumeracao: enumeracaoDe({ count: 12_345 }),
+		apagados: 500,
+		lidos: 12_345,
+	});
+
+	const andamento = screen.getByTestId("andamento-apagar");
+	expect(andamento).toHaveTextContent("500 chaves apagadas");
+	expect(andamento).not.toHaveTextContent(/Lendo a cópia/);
+});
+
+test("sem cópia não há frase de leitura nenhuma", () => {
+	// Quem escolheu apagar sem cópia não passa pela fase dos retratos, e
+	// `lidos` fica nulo: a janela volta a mostrar só o que saiu.
+	montar({ host: DEV, apagados: 0, lidos: null });
+
+	expect(screen.getByTestId("andamento-apagar")).toHaveTextContent("0 chaves apagadas");
+});
+
 test("mostra o carimbo de ambiente e o banco", () => {
 	montar({ db: 7, prefixos: ["sessao:"] });
 
@@ -272,6 +330,31 @@ test("o aviso de tipo sem volta tem o mesmo peso do irreversível", () => {
 	expect(corpo).not.toMatch(/uppercase/);
 });
 
+test("o teto de chaves citado na frase é o mesmo que o Rust aplica", () => {
+	// Mesma razão do teste irmão abaixo, e a invariante que o `CONTEXTO.md`
+	// escreve: número que vive dos dois lados da fronteira do Tauri tem
+	// teste que compara os dois. Este estava digitado como prosa em três
+	// catálogos, sem constante e sem teste — mudar o teto no Rust deixaria
+	// os três idiomas mentindo sobre o número que acabou de cortar a
+	// varredura, em silêncio.
+	const fonte = readFileSync("src-tauri/src/core/bulk.rs", "utf8");
+	const achado = /pub const MAX_ENUMERATED: usize = ([^;]+);/.exec(fonte);
+	expect(achado).not.toBeNull();
+
+	expect(numeroDoRust(achado![1])).toBe(MAX_ENUMERATED);
+});
+
+/**
+ * Converte uma expressão de constante do Rust ("64 * 1024 * 1024",
+ * "100_000") no número que ela vale — multiplicando à mão, sem `eval`.
+ */
+function numeroDoRust(expressao: string): number {
+	return expressao
+		.split("*")
+		.map((parte) => Number(parte.trim().replace(/_/g, "")))
+		.reduce((a, b) => a * b);
+}
+
 test("o teto citado na frase é o mesmo teto que o Rust aplica", () => {
 	// A frase da recusa diz quantos MB não couberam. Esse número tem que
 	// ser o que de fato recusou a cópia — um literal na tela andaria sozinho
@@ -281,11 +364,5 @@ test("o teto citado na frase é o mesmo teto que o Rust aplica", () => {
 	const achado = /pub const MAX_BACKUP_BYTES: usize = ([^;]+);/.exec(fonte);
 	expect(achado).not.toBeNull();
 
-	// "64 * 1024 * 1024" — multiplicado à mão, sem `eval`.
-	const doRust = achado![1]
-		.split("*")
-		.map((parte) => Number(parte.trim()))
-		.reduce((a, b) => a * b);
-
-	expect(doRust).toBe(MAX_BACKUP_BYTES);
+	expect(numeroDoRust(achado![1])).toBe(MAX_BACKUP_BYTES);
 });

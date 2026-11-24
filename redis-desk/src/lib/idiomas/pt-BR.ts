@@ -224,7 +224,7 @@ export const ptBR = {
 	"apagarPrefixo.contagemVarias": "{n} chaves conferidas agora, nesta varredura.",
 	"apagarPrefixo.copiaHistorico": "Guardar uma cópia no histórico antes de apagar",
 	"apagarPrefixo.copiaArquivo": "Gravar uma cópia em arquivo antes de apagar",
-	"apagarPrefixo.acimaDoTeto": "São mais de 100.000 chaves: a varredura parou no teto. Uma cópia desse tamanho não cabe no histórico — esta vai para um arquivo.",
+	"apagarPrefixo.acimaDoTeto": "São mais de {n} chaves: a varredura parou no teto. As demais continuam no banco — repita a operação para apagá-las. Uma cópia desse tamanho não cabe no histórico, então esta vai para um arquivo.",
 	"apagarPrefixo.irreversivel": "Sem cópia não há volta atrás: o que sair daqui não volta.",
 	"apagarPrefixo.semVoltaUma": "{n} destas chaves é de um tipo que a volta atrás não recria (set, stream, RedisJSON) — nem com a cópia guardada.",
 	"apagarPrefixo.semVoltaVarias": "{n} destas chaves são de tipos que a volta atrás não recria (set, stream, RedisJSON) — nem com a cópia guardada.",
@@ -236,6 +236,7 @@ export const ptBR = {
 	"apagarPrefixo.apagarVariasSemVolta": "Apagar {n} chaves sem volta atrás",
 	"apagarPrefixo.apagandoUma": "{n} chave apagada",
 	"apagarPrefixo.apagandoVarias": "{n} chaves apagadas",
+	"apagarPrefixo.lendoCopia": "Lendo a cópia: {feitas} de {total} chaves",
 	"menu.copiarPrefixo": "Copiar prefixo",
 	"menu.copiarPrefixos": "Copiar os {n} prefixos",
 	"menu.apagarPrefixo": "Apagar tudo sob este prefixo…",
@@ -250,6 +251,7 @@ export const ptBR = {
 	"apagarPrefixo.feitoUma": "{n} chave apagada. A volta atrás está na aba Histórico.",
 	"apagarPrefixo.feitoVarias": "{n} chaves apagadas. A volta atrás está na aba Histórico.",
 	"apagarPrefixo.feitoParcial": "A exclusão parou antes do fim: {feitas} de {prometidas} chaves saíram. O resto continua no banco.",
+	"apagarPrefixo.feitoCortado": "{n} chaves apagadas, mas a varredura tinha parado no teto: ainda há chaves sob este prefixo. Repita a operação. A volta atrás está na aba Histórico.",
 	"historico.semCopia": "Apagadas sem cópia de segurança: não há o que restaurar.",
 	"historico.copiaEmArquivo": "A cópia está no arquivo {caminho}.",
 	"historico.voltouParcial": "{n} chaves voltaram. Estas não:",
@@ -260,6 +262,7 @@ export const ptBR = {
 	"erro.aoCopiar": "Não deu para copiar para a área de transferência.",
 	"erro.aoRelerArvore": "As chaves foram apagadas, mas não deu para reler a árvore. Use “Varrer de novo” para a tela acompanhar.",
 	"erro.aoDesistir": "A exclusão continua correndo: não deu para pedir que ela parasse.",
+	"erro.aoDesistirVarredura": "A varredura continua correndo: não deu para pedir que ela parasse.",
 	"acao.conectar": "Conectar",
 };
 

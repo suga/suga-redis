@@ -26,9 +26,11 @@ vi.mock("$lib/api", async (importOriginal) => ({
 	// massa na montagem; sem eles aqui, ele nem monta.
 	onBulkScanProgress: vi.fn(async () => () => {}),
 	onBulkDeleteProgress: vi.fn(async () => () => {}),
+	onBulkBackupProgress: vi.fn(async () => () => {}),
 	enumeratePrefix: vi.fn(),
 	deletePrefix: vi.fn(),
 	cancelDelete: vi.fn(async () => true),
+	cancelEnumeration: vi.fn(async () => true),
 }));
 
 import { listDbs, rescan, scanStatus, scanTree } from "$lib/api";

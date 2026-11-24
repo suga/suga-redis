@@ -20,8 +20,11 @@
 	 *   ainda marcada, que é justamente o caso em que alguém se acha coberto
 	 *   e não está: a cópia guarda set, stream e RedisJSON, mas a volta
 	 *   atrás não os recria.
-	 * - **Que a varredura parou no teto**, quando parou: são mais de 100.000
-	 *   chaves, e uma cópia desse tamanho não cabe no histórico.
+	 * - **Que a varredura parou no teto**, quando parou — e que, por isso,
+	 *   **vão sobrar chaves** sob o prefixo depois desta exclusão. O item do
+	 *   menu promete "Apagar tudo sob este prefixo…", e sobrar chave em
+	 *   silêncio é pior que falhar alto. A cópia grande demais é a segunda
+	 *   metade dessa frase, não a primeira.
 	 *
 	 * Ele não fala com o Rust: recebe tudo por prop e devolve a decisão por
 	 * `onConfirmar`. Quem varre, apaga e cancela é quem o abriu.
@@ -29,7 +32,7 @@
 	import { envChrome } from "$lib/env";
 	import { numero } from "$lib/formato";
 	import { t } from "$lib/i18n.svelte";
-	import { MAX_BACKUP_BYTES } from "$lib/api";
+	import { MAX_BACKUP_BYTES, MAX_ENUMERATED } from "$lib/api";
 	import type { BackupRequest, EnumerationHandle, Host } from "$lib/api";
 
 	interface Props {
@@ -47,6 +50,17 @@
 		 * primeiro andamento chegar.
 		 */
 		apagados: number | null;
+		/**
+		 * Quantas chaves já foram retratadas para a cópia, ou `null` quando
+		 * essa fase não está correndo (nem começou, ou a pessoa escolheu
+		 * apagar sem cópia).
+		 *
+		 * Existe porque ela é a fase LONGA — uma ida e volta por chave, com
+		 * leitura inteira — e antes dela a janela mostrava "0 chaves
+		 * apagadas", parado, enquanto nada tinha saído ainda: quem opera não
+		 * tinha como distinguir "está trabalhando" de "travou".
+		 */
+		lidos?: number | null;
 		/**
 		 * Qual escolha de cópia o Rust acabou de recusar por tamanho, se
 		 * alguma. É a volta do `BackupTooLarge`, que não é uma falha a
@@ -71,6 +85,7 @@
 		enumeracao,
 		progresso,
 		apagados,
+		lidos = null,
 		copiaRecusada = null,
 		onConfirmar,
 		onCancelar,
@@ -88,8 +103,8 @@
 	let apagando = $derived(apagados !== null);
 
 	/**
-	 * Acima do teto a cópia só pode ir para arquivo: 100.000 retratos dentro
-	 * de uma linha do histórico não é cópia, é outro banco. O mesmo vale
+	 * Acima do teto a cópia só pode ir para arquivo: `MAX_ENUMERATED`
+	 * retratos dentro de uma linha do histórico não é cópia, é outro banco. O mesmo vale
 	 * quando a embutida JÁ foi tentada e recusada por tamanho — poucas
 	 * chaves gordas passam do teto sem nunca encostar na contagem.
 	 */
@@ -152,6 +167,24 @@
 		return t(chave, { n: numero(n) });
 	});
 
+	/**
+	 * Enquanto nenhuma chave saiu, o que a janela mostra é a leitura da
+	 * cópia — se houver uma.
+	 *
+	 * A troca é no PRIMEIRO andamento do apagar (`apagados > 0`) e não em
+	 * "li todas": uma chave que sumiu sozinha entre a contagem e a cópia não
+	 * tem retrato a tirar, então a leitura pode terminar em 599 de 600 e a
+	 * frase ficaria presa ali pela exclusão inteira.
+	 */
+	let lendoCopia = $derived(apagando && lidos !== null && (apagados ?? 0) === 0);
+
+	let textoLendo = $derived(
+		t("apagarPrefixo.lendoCopia", {
+			feitas: numero(lidos ?? 0),
+			total: numero(enumeracao?.count ?? 0),
+		}),
+	);
+
 	function confirmar() {
 		if (!liberado) return;
 		onConfirmar(backup, ehProd ? digitado : null);
@@ -211,7 +244,9 @@
 			<p class="contagem">{textoContagem}</p>
 
 			{#if enumeracao.truncated}
-				<p class="aviso">{t("apagarPrefixo.acimaDoTeto")}</p>
+				<p class="aviso">
+					{t("apagarPrefixo.acimaDoTeto", { n: numero(MAX_ENUMERATED) })}
+				</p>
 			{/if}
 
 			{#if enumeracao.unrestorable > 0}
@@ -263,7 +298,9 @@
 		{/if}
 
 		{#if apagando}
-			<p class="andamento" role="status">{textoApagando}</p>
+			<p class="andamento" role="status" data-testid="andamento-apagar">
+				{lendoCopia ? textoLendo : textoApagando}
+			</p>
 		{/if}
 
 		<div class="acoes">

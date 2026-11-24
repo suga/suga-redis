@@ -184,11 +184,31 @@ export interface FailedKey {
  * diálogo com `summary` e, se a pessoa autorizar, repete a mesma chamada
  * com `confirmed: true`. `deleted` e `restored` são as duas pontas da
  * exclusão em massa: uma exclusão que aconteceu, e a volta atrás dela.
+ *
+ * No `deleted`, os três números dizem coisas diferentes e nenhum serve
+ * sozinho:
+ *
+ * - `deleted` é o que o servidor disse ter apagado. É um limite INFERIOR:
+ *   um reenvio depois de uma resposta perdida devolve 0 para chaves que
+ *   saíram, e uma chave que expirou sozinha também não entra na conta.
+ * - `attempted` é o que foi enviado ao servidor — e, por isso, o número que
+ *   diz se a operação PAROU. "O resto continua no banco" é verdade sobre
+ *   ele e mentira sobre `deleted`.
+ * - `enumerated` é o que a contagem tinha prometido.
+ *
+ * `entry_id` vem `null` quando nada foi tentado: não há linha de histórico,
+ * porque ela registraria uma mudança que não aconteceu.
  */
 export type WriteOutcome =
 	| { outcome: "applied"; entry_id: number }
 	| { outcome: "needs_confirmation"; summary: string }
-	| { outcome: "deleted"; entry_id: number; deleted: number; enumerated: number }
+	| {
+			outcome: "deleted";
+			entry_id: number | null;
+			deleted: number;
+			attempted: number;
+			enumerated: number;
+	  }
 	| { outcome: "restored"; restored: number; failed: FailedKey[] };
 
 // -------------------------------------------------------------- histórico
@@ -427,7 +447,7 @@ export interface EnumerationHandle {
 	id: string;
 	count: number;
 	kinds: [KeyKind, number][];
-	/** A varredura bateu no teto de 100.000 chaves antes de terminar. */
+	/** A varredura bateu no teto de `MAX_ENUMERATED` chaves antes de terminar. */
 	truncated: boolean;
 	/** Quantas são de tipo sem volta atrás (set, stream, RedisJSON). */
 	unrestorable: number;
@@ -451,19 +471,48 @@ export type BackupRequest = "inline" | "file" | "none";
 export const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
 
 /**
+ * O teto de chaves que uma enumeração devolve — espelho de `MAX_ENUMERATED`
+ * em `src-tauri/src/core/bulk.rs`.
+ *
+ * Mora aqui pela mesma razão de `MAX_BACKUP_BYTES`, e com o mesmo teste: a
+ * frase que a pessoa lê quando a varredura para no teto cita este número, e
+ * um literal digitado nos três catálogos andaria sozinho no dia em que o
+ * Rust mudasse — em silêncio, porque nada quebra quando só a prosa está
+ * errada. `delete-prefix.test.ts` lê a constante do fonte Rust e compara.
+ */
+export const MAX_ENUMERATED = 100_000;
+
+/**
  * Varre um ou mais prefixos e guarda os nomes achados, sem apagar nada
  * ainda. Acompanhe o andamento com `onBulkScanProgress`.
  *
  * Só existe UMA enumeração por par (host, banco): chamar de novo para o
  * mesmo par descarta a anterior — por isso só um diálogo de exclusão em
  * massa pode estar aberto por banco de cada vez.
+ *
+ * Devolve `null` quando a varredura foi interrompida por
+ * `cancelEnumeration`. Não é falha e não é resposta vazia: a lista que sai
+ * de uma varredura interrompida não descreve o prefixo, então não existe
+ * contagem a mostrar nem id a guardar.
  */
 export function enumeratePrefix(
 	hostId: string,
 	db: number,
 	prefixes: string[],
-): Promise<EnumerationHandle> {
+): Promise<EnumerationHandle | null> {
 	return invoke("cmd_enumerate_prefix", { hostId, db, prefixes });
+}
+
+/**
+ * Pede para parar a varredura de uma enumeração em andamento. `false` não é
+ * falha: pode ser que ela já tenha acabado antes de o clique chegar.
+ *
+ * Endereçada por (host, banco) e não por id porque ainda não existe id — o
+ * da contagem só nasce quando a varredura termina, e a desistência precisa
+ * chegar antes disso.
+ */
+export function cancelEnumeration(hostId: string, db: number): Promise<boolean> {
+	return invoke("cmd_cancel_enumeration", { hostId, db });
 }
 
 /**
@@ -507,6 +556,20 @@ export function onBulkDeleteProgress(
 	handler: (deleted: number) => void,
 ): Promise<UnlistenFn> {
 	return listen<number>("bulk://delete-progress", (event) => handler(event.payload));
+}
+
+/**
+ * Acompanha a LEITURA da cópia de segurança: quantas chaves já foram
+ * retratadas. Chame o retorno para parar.
+ *
+ * Canal próprio, e não o mesmo do apagar, porque os dois números querem
+ * dizer coisas diferentes: esta é a fase longa da operação — uma ida e
+ * volta por chave — e durante ela nenhuma chave saiu ainda.
+ */
+export function onBulkBackupProgress(
+	handler: (read: number) => void,
+): Promise<UnlistenFn> {
+	return listen<number>("bulk://backup-progress", (event) => handler(event.payload));
 }
 
 /** Refaz o índice de busca. Acompanhe o andamento com `onRescanProgress`. */
