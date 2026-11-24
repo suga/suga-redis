@@ -243,7 +243,7 @@ export const es: Catalogo = {
 	"menu.apagarPrefixo": "Borrar todo bajo este prefijo…",
 	"menu.apagarPrefixos": "Borrar todo bajo los {n} prefijos marcados…",
 	"menu.copiarNome": "Copiar nombre",
-	"menu.apagarChave": "Borrar clave…",
+	"menu.apagarChave": "Borrar clave",
 	"erro.aoEnumerarPrefixo": "No se pudo comprobar qué hay bajo este prefijo.",
 	"erro.aoApagarPrefixo": "No se pudieron borrar las claves.",
 	"apagarPrefixo.nadaAqui": "Ninguna clave bajo este prefijo ahora. El recuento del árbol viene de un recorrido anterior; estas claves ya salieron o expiraron.",

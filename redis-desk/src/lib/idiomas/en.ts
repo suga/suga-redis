@@ -243,7 +243,7 @@ export const en: Catalogo = {
 	"menu.apagarPrefixo": "Delete everything under this prefix…",
 	"menu.apagarPrefixos": "Delete everything under the {n} selected prefixes…",
 	"menu.copiarNome": "Copy name",
-	"menu.apagarChave": "Delete key…",
+	"menu.apagarChave": "Delete key",
 	"erro.aoEnumerarPrefixo": "Could not check what is under this prefix.",
 	"erro.aoApagarPrefixo": "Could not delete the keys.",
 	"apagarPrefixo.nadaAqui": "No keys under this prefix right now. The count in the tree comes from an earlier scan; these keys are already gone or expired.",

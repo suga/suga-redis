@@ -241,7 +241,7 @@ export const ptBR = {
 	"menu.apagarPrefixo": "Apagar tudo sob este prefixo…",
 	"menu.apagarPrefixos": "Apagar tudo sob os {n} prefixos marcados…",
 	"menu.copiarNome": "Copiar nome",
-	"menu.apagarChave": "Apagar chave…",
+	"menu.apagarChave": "Apagar chave",
 	"erro.aoEnumerarPrefixo": "Não deu para conferir o que há sob este prefixo.",
 	"erro.aoApagarPrefixo": "Não deu para apagar as chaves.",
 	"apagarPrefixo.nadaAqui": "Nenhuma chave sob este prefixo agora. A contagem da árvore é de uma varredura anterior; estas chaves já saíram ou expiraram.",

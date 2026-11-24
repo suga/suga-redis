@@ -194,8 +194,33 @@ test("o menu de chave traz Copiar nome e Apagar chave", async () => {
 
 	expect(within(menu).getAllByRole("menuitem").map((b) => b.textContent?.trim())).toEqual([
 		"Copiar nome",
-		"Apagar chave…",
+		"Apagar chave",
 	]);
+});
+
+test("as reticências marcam quem tem diálogo próprio, e só esse", async () => {
+	await montar();
+
+	// A reticência é contrato: ela promete um diálogo QUE O ITEM POSSUI.
+	// "Apagar tudo sob este prefixo" abre o seu em qualquer ambiente.
+	const prefixo = await menuSobre(/sessao/);
+	expect(
+		within(prefixo).getByRole("menuitem", { name: /^Apagar tudo/ }).textContent,
+	).toMatch(/…$/);
+	expect(within(prefixo).getByRole("menuitem", { name: "Copiar prefixo" }).textContent)
+		.not.toMatch(/…$/);
+
+	await userEvent.setup().keyboard("{Escape}");
+
+	// "Apagar chave" NÃO possui diálogo nenhum: o que aparece em produção é
+	// a trava de produção, que está na frente de toda escrita deste
+	// aplicativo. Reivindicá-la com reticências faria o item prometer o que
+	// não é dele — e, pela mesma régua, todo controle que escreve teria de
+	// carregar uma.
+	const chave = await menuSobre(/solta/);
+	for (const item of within(chave).getAllByRole("menuitem")) {
+		expect(item.textContent).not.toMatch(/…$/);
+	}
 });
 
 test("Copiar prefixo põe o prefixo na área de transferência", async () => {
@@ -227,7 +252,7 @@ test("Apagar chave usa o writeValue que já existe, não a porta nova", async ()
 	const alvo = await montar();
 
 	const menu = await menuSobre(/solta/);
-	await user.click(within(menu).getByRole("menuitem", { name: "Apagar chave…" }));
+	await user.click(within(menu).getByRole("menuitem", { name: "Apagar chave" }));
 
 	await waitFor(() =>
 		expect(escreveu).toHaveBeenCalledWith(alvo.id, 0, "solta", { op: "delete_key" }, false),
