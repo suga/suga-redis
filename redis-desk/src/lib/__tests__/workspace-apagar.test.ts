@@ -550,3 +550,22 @@ test("uma releitura que falha depois do apagar não desmente o apagar", async ()
 	expect(aviso).not.toHaveTextContent(/não deu para apagar/i);
 	expect(aviso).toHaveTextContent(/Varrer de novo/);
 });
+
+test("o menu segue o segundo clique direito, em vez de ficar onde abriu", async () => {
+	const user = userEvent.setup();
+	await montar();
+
+	const sessao = await screen.findByRole("button", { name: /sessao/ });
+	const solta = await screen.findByRole("button", { name: /solta/ });
+
+	await user.pointer({ keys: "[MouseRight]", target: sessao, coords: { x: 10, y: 20 } });
+	expect(screen.getByRole("menu").getAttribute("style")).toContain("left: 10px");
+
+	// O `ContextMenu` calcula a viragem UMA vez, na montagem — a janela não
+	// muda debaixo dele. Se a segunda abertura reaproveitasse a instância,
+	// o menu apareceria ancorado no clique anterior, falando da linha nova.
+	await user.pointer({ keys: "[MouseRight]", target: solta, coords: { x: 300, y: 400 } });
+	const menu = screen.getByRole("menu");
+	expect(menu.getAttribute("style")).toContain("left: 300px");
+	expect(within(menu).getByRole("menuitem", { name: "Copiar nome" })).toBeInTheDocument();
+});
