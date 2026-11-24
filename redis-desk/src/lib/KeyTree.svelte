@@ -40,9 +40,28 @@
 		onSelect: (key: string) => void;
 		/** Filtra o que já está aberto. Vazio mostra tudo. */
 		filter: string;
+		/**
+		 * Pede o menu de contexto sobre os prefixos marcados, na posição dada.
+		 *
+		 * Opcional porque a árvore não decide o que vai no menu: quem monta a
+		 * lista é quem a desenha, e até lá a árvore segue inteira sem ele.
+		 */
+		onMenuPrefixo?: (prefixos: string[], x: number, y: number) => void;
+		/** O mesmo, para uma chave solta: uma chave não é um prefixo. */
+		onMenuChave?: (chave: string, x: number, y: number) => void;
 	}
 
-	let { hostId, db, root, version, selectedKey, onSelect, filter }: Props = $props();
+	let {
+		hostId,
+		db,
+		root,
+		version,
+		selectedKey,
+		onSelect,
+		filter,
+		onMenuPrefixo,
+		onMenuChave,
+	}: Props = $props();
 
 	/** Altura fixa de cada linha, em pixels. É o que torna a janela calculável. */
 	const ROW_HEIGHT = 26;
@@ -58,6 +77,22 @@
 
 	let niveis = new SvelteMap<string, Estado>();
 	let abertos = new SvelteSet<string>();
+
+	/**
+	 * Os prefixos marcados.
+	 *
+	 * Guardados pelo NOME do prefixo, nunca pela linha: a árvore é desenhada
+	 * por janela, e a linha marcada deixa de existir assim que a rolagem
+	 * passa longe dela.
+	 *
+	 * Só prefixos. Juntar uma chave solta a um galho faria o item do menu
+	 * falar de duas coisas diferentes na mesma frase, e não há redação que
+	 * fique honesta assim.
+	 */
+	let selecionados = new SvelteSet<string>();
+
+	/** De onde a faixa do Shift+clique parte — o prefixo, pela mesma razão. */
+	let ancora: string | null = $state(null);
 	let scrollTop = $state(0);
 	let viewport = $state(0);
 
@@ -104,6 +139,8 @@
 			bancoAberto = chave;
 			niveis.clear();
 			abertos.clear();
+			selecionados.clear();
+			ancora = null;
 		});
 	});
 
@@ -129,6 +166,13 @@
 	function alternar(branch: Branch) {
 		if (abertos.has(branch.full_prefix)) {
 			abertos.delete(branch.full_prefix);
+			// O que fecha some da tela, e seleção invisível é seleção perigosa:
+			// o menu diria "3 prefixos" com dois deles fora da vista.
+			for (const prefixo of selecionados) {
+				if (prefixo !== branch.full_prefix && prefixo.startsWith(branch.full_prefix)) {
+					selecionados.delete(prefixo);
+				}
+			}
 			return;
 		}
 		abertos.add(branch.full_prefix);
@@ -260,6 +304,122 @@
 
 	let linhas = $derived(achatar("", 0, []));
 
+	// ------------------------------------------------------- seleção e menu
+
+	function alternarMarca(branch: Branch) {
+		// Uma chave solta não entra — ver o comentário de `selecionados`.
+		if (branch.leaf_key !== null) return;
+		if (selecionados.has(branch.full_prefix)) {
+			selecionados.delete(branch.full_prefix);
+		} else {
+			selecionados.add(branch.full_prefix);
+		}
+		ancora = branch.full_prefix;
+	}
+
+	/**
+	 * Marca tudo que é prefixo entre a âncora e esta linha.
+	 *
+	 * A faixa é contada sobre `linhas` — a lista achatada inteira —, e não
+	 * sobre a fatia desenhada: só um punhado de linhas existe no DOM de cada
+	 * vez, e contar por ali pegaria a faixa errada assim que a lista passasse
+	 * da janela.
+	 */
+	function marcarFaixa(branch: Branch) {
+		if (branch.leaf_key !== null || ancora === null) return;
+		const de = linhas.findIndex((l) => l.branch?.full_prefix === ancora);
+		const ate = linhas.findIndex((l) => l.branch?.full_prefix === branch.full_prefix);
+		if (de === -1 || ate === -1) return;
+
+		selecionados.clear();
+		for (let i = Math.min(de, ate); i <= Math.max(de, ate); i += 1) {
+			const dentro = linhas[i].branch;
+			if (dentro && dentro.leaf_key === null) selecionados.add(dentro.full_prefix);
+		}
+	}
+
+	/**
+	 * Marca os prefixos de primeiro nível.
+	 *
+	 * Primeiro nível e nada abaixo: o que está dentro de um prefixo marcado
+	 * já vai junto com ele, e marcá-lo também faria o menu contar duas vezes
+	 * a mesma coisa.
+	 */
+	function marcarPrimeiroNivel() {
+		selecionados.clear();
+		for (const linha of linhas) {
+			const branch = linha.branch;
+			if (linha.depth === 0 && branch && branch.leaf_key === null) {
+				selecionados.add(branch.full_prefix);
+			}
+		}
+	}
+
+	function aoClicar(e: MouseEvent, branch: Branch) {
+		if (e.shiftKey) {
+			marcarFaixa(branch);
+			return;
+		}
+		if (e.metaKey || e.ctrlKey) {
+			alternarMarca(branch);
+			return;
+		}
+
+		// O clique simples continua sendo abrir, fechar ou escolher a chave; a
+		// seleção sai do caminho, e a próxima faixa parte daqui.
+		selecionados.clear();
+		ancora = branch.leaf_key === null ? branch.full_prefix : null;
+		if (branch.leaf_key !== null) onSelect(branch.leaf_key);
+		else alternar(branch);
+	}
+
+	/**
+	 * Pede o menu sobre esta linha, na posição dada.
+	 *
+	 * Convenção de gerenciador de arquivos: numa linha que já está marcada,
+	 * vale a seleção inteira; numa linha de fora, a seleção se perde e vale
+	 * só ela — quem errou o alvo perde a seleção em vez de agir sobre o que
+	 * não queria.
+	 */
+	function abrirMenu(branch: Branch, x: number, y: number) {
+		if (branch.leaf_key !== null) {
+			selecionados.clear();
+			ancora = null;
+			onMenuChave?.(branch.leaf_key, x, y);
+			return;
+		}
+
+		if (!selecionados.has(branch.full_prefix)) {
+			selecionados.clear();
+			selecionados.add(branch.full_prefix);
+			ancora = branch.full_prefix;
+		}
+		onMenuPrefixo?.([...selecionados], x, y);
+	}
+
+	function aoMenuContexto(e: MouseEvent, branch: Branch) {
+		// Sem isto o menu do sistema abre por cima do nosso.
+		e.preventDefault();
+		abrirMenu(branch, e.clientX, e.clientY);
+	}
+
+	/**
+	 * O teclado alcança o mesmo: Shift+F10 abre o menu ancorado na linha com
+	 * foco, e ⌘/Ctrl+A marca o primeiro nível.
+	 */
+	function aoTeclar(e: KeyboardEvent, branch: Branch, linha: HTMLElement) {
+		if (e.shiftKey && e.key === "F10") {
+			e.preventDefault();
+			const caixa = linha.getBoundingClientRect();
+			abrirMenu(branch, caixa.left, caixa.bottom);
+			return;
+		}
+		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
+			e.preventDefault();
+			marcarPrimeiroNivel();
+		}
+	}
+
 	/**
 	 * A fatia a desenhar. Enquanto a janela não foi medida (primeira pintura,
 	 * e também em teste fora de um navegador de verdade) `viewport` é zero —
@@ -303,9 +463,11 @@
 						<button
 							class="linha"
 							class:selecionada={branch.leaf_key !== null && branch.leaf_key === selectedKey}
+							class:marcada={selecionados.has(branch.full_prefix)}
 							style="padding-left: {0.5 + linha.depth * 0.85}rem"
-							onclick={() =>
-								branch.leaf_key !== null ? onSelect(branch.leaf_key) : alternar(branch)}
+							onclick={(e) => aoClicar(e, branch)}
+							oncontextmenu={(e) => aoMenuContexto(e, branch)}
+							onkeydown={(e) => aoTeclar(e, branch, e.currentTarget)}
 						>
 							<span class="caret" aria-hidden="true">
 								{branch.leaf_key !== null ? "" : linha.aberto ? "▾" : "▸"}
@@ -393,6 +555,13 @@
 	.selecionada {
 		background: var(--panel-dark);
 		box-shadow: inset 2px 0 0 var(--action);
+	}
+
+	/* A marca da seleção é um cinza mais claro — nunca o vermelho `--prod`
+	   nem caixa alta: os dois significam só o ambiente nesta tela, e
+	   emprestá-los aqui deixaria o aviso de produção ambíguo. */
+	.marcada {
+		background: var(--rule);
 	}
 
 	.caret {
