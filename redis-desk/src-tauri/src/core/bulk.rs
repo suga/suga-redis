@@ -55,6 +55,48 @@ fn combina(modo: &Modo, chave: &str) -> bool {
     }
 }
 
+/// Filtra um lote do `SCAN`, decidindo o que é candidato novo e se o teto
+/// foi batido. Pura e síncrona — não fala com o Redis — para o teste de
+/// deduplicação poder alimentar um lote com repetição à mão, sem depender de
+/// conseguir fazer um servidor de verdade devolver a mesma chave duas vezes.
+///
+/// `vistas` é o conjunto de chaves JÁ aceitas, atravessando lotes: o `SCAN`
+/// garante "pelo menos uma vez", nunca "no máximo uma vez" — a mesma chave
+/// pode voltar no mesmo lote ou num lote seguinte depois de um rehash do
+/// servidor. Sem isto, ela entraria duas vezes na enumeração, inflando a
+/// contagem que o diálogo de exclusão promete ser exata (uma chave apagada
+/// duas vezes também duplicaria a cópia de segurança de uma chave só).
+///
+/// O teto conta chaves DISTINTAS: uma repetição não consome vaga, e o aviso
+/// de corte só liga quando uma chave realmente nova não coube mais.
+fn filtra_lote(
+    modo: &Modo,
+    lote: Vec<String>,
+    vistas: &mut std::collections::HashSet<String>,
+    teto: usize,
+) -> (Vec<String>, bool) {
+    let mut candidatos = Vec::new();
+    let mut truncated = false;
+
+    for chave in lote {
+        if vistas.len() >= teto {
+            truncated = true;
+            break;
+        }
+        if !combina(modo, &chave) {
+            continue;
+        }
+        if !vistas.insert(chave.clone()) {
+            // Já vista — neste lote ou num anterior. Não conta de novo nem
+            // consome vaga do teto.
+            continue;
+        }
+        candidatos.push(chave);
+    }
+
+    (candidatos, truncated)
+}
+
 /// Enumera toda chave sob um ou mais prefixos, com o `TYPE` de cada uma.
 ///
 /// Prefixo é casamento por `starts_with`, nada mais: uma chave que também é
@@ -96,6 +138,7 @@ async fn enumerate_com_teto(
 
             let mut keys: Vec<String> = Vec::new();
             let mut kinds: Vec<(KeyKind, u64)> = Vec::new();
+            let mut vistas: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut truncated = false;
             let mut cursor = 0u64;
 
@@ -107,17 +150,9 @@ async fn enumerate_com_teto(
                 }
                 let (next, lote): (u64, Vec<String>) = comando.query_async(&mut conn).await?;
 
-                // Até o teto: o que sobra do lote nem entra no filtro — a
-                // lista já está cheia e mais checagem não muda o resultado.
-                let mut candidatos: Vec<String> = Vec::new();
-                for chave in lote {
-                    if keys.len() + candidatos.len() >= teto {
-                        truncated = true;
-                        break;
-                    }
-                    if combina(&modo, &chave) {
-                        candidatos.push(chave);
-                    }
+                let (candidatos, cortou) = filtra_lote(&modo, lote, &mut vistas, teto);
+                if cortou {
+                    truncated = true;
                 }
 
                 if !candidatos.is_empty() {
@@ -180,6 +215,76 @@ async fn enumerate_com_teto(
 mod tests {
     use super::*;
     use crate::core::config::{Env, Host};
+
+    /// `filtra_lote` é pura e síncrona — não precisa do Redis de teste para
+    /// provar a deduplicação. Forçar um servidor de verdade a devolver a
+    /// mesma chave duas vezes (o caso real do `SCAN` durante um rehash) não
+    /// é algo que dá para reproduzir de forma confiável num teste; alimentar
+    /// a repetição à mão aqui é a mesma ideia do teste do teto, que também
+    /// controla o parâmetro em vez de recriar a condição real.
+    #[test]
+    fn filtra_lote_dedups_a_key_seen_twice_in_the_same_batch() {
+        let modo = Modo::SemFiltro;
+        let mut vistas = std::collections::HashSet::new();
+
+        let (candidatos, truncated) = filtra_lote(
+            &modo,
+            vec!["a".to_string(), "a".to_string(), "b".to_string()],
+            &mut vistas,
+            10,
+        );
+
+        assert_eq!(candidatos, vec!["a".to_string(), "b".to_string()]);
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn filtra_lote_dedups_a_key_seen_again_in_a_later_batch() {
+        // O caso real: o cursor do `SCAN` percorre de novo um bucket já
+        // visitado depois de um rehash do servidor, e a mesma chave volta
+        // num lote seguinte — não dentro do mesmo lote.
+        let modo = Modo::SemFiltro;
+        let mut vistas = std::collections::HashSet::new();
+
+        let (primeiro, _) = filtra_lote(&modo, vec!["a".to_string()], &mut vistas, 10);
+        assert_eq!(primeiro, vec!["a".to_string()]);
+
+        let (segundo, truncated) = filtra_lote(
+            &modo,
+            vec!["a".to_string(), "c".to_string()],
+            &mut vistas,
+            10,
+        );
+        assert_eq!(
+            segundo,
+            vec!["c".to_string()],
+            "\"a\" já tinha sido aceita no lote anterior"
+        );
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn filtra_lote_repeats_do_not_spend_a_slot_of_the_ceiling() {
+        // O teto conta chaves DISTINTAS: uma repetição não pode empurrar uma
+        // chave nova para fora da lista.
+        let modo = Modo::SemFiltro;
+        let mut vistas = std::collections::HashSet::new();
+
+        let (candidatos, truncated) = filtra_lote(
+            &modo,
+            vec![
+                "a".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ],
+            &mut vistas,
+            2,
+        );
+
+        assert_eq!(candidatos, vec!["a".to_string(), "b".to_string()]);
+        assert!(truncated, "\"c\" não coube no teto de 2 chaves distintas");
+    }
 
     /// Banco 13: nenhum outro teste do projeto usa este número (ver
     /// `docs/CONTEXTO.md`), então os testes deste módulo podem rodar em
