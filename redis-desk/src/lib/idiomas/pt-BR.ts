@@ -259,6 +259,7 @@ export const ptBR = {
 	"op.deletePrefixVariosPrefixos": "Apagar {n} chaves sob {prefixos} prefixos",
 	"erro.aoCopiar": "Não deu para copiar para a área de transferência.",
 	"erro.aoRelerArvore": "As chaves foram apagadas, mas não deu para reler a árvore. Use “Varrer de novo” para a tela acompanhar.",
+	"erro.aoDesistir": "A exclusão continua correndo: não deu para pedir que ela parasse.",
 	"acao.conectar": "Conectar",
 };
 

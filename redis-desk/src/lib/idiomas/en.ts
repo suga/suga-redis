@@ -261,5 +261,6 @@ export const en: Catalogo = {
 	"op.deletePrefixVariosPrefixos": "Delete {n} keys under {prefixos} prefixes",
 	"erro.aoCopiar": "Could not copy to the clipboard.",
 	"erro.aoRelerArvore": "The keys were deleted, but the tree could not be read again. Use “Rescan” so the screen catches up.",
+	"erro.aoDesistir": "The deletion is still running: the request to stop it did not get through.",
 	"acao.conectar": "Connect",
 };

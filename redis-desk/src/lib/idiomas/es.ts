@@ -261,5 +261,6 @@ export const es: Catalogo = {
 	"op.deletePrefixVariosPrefixos": "Borrar {n} claves bajo {prefixos} prefijos",
 	"erro.aoCopiar": "No se pudo copiar al portapapeles.",
 	"erro.aoRelerArvore": "Las claves fueron borradas, pero no se pudo releer el árbol. Usa “Recorrer de nuevo” para que la pantalla se ponga al día.",
+	"erro.aoDesistir": "El borrado sigue corriendo: no se pudo pedir que se detuviera.",
 	"acao.conectar": "Conectar",
 };

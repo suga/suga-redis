@@ -437,6 +437,20 @@ export interface EnumerationHandle {
 export type BackupRequest = "inline" | "file" | "none";
 
 /**
+ * O teto da cópia de segurança, em BYTES — espelho de `MAX_BACKUP_BYTES`
+ * em `src-tauri/src/core/history.rs`.
+ *
+ * Mora aqui, e não solto no diálogo, pela mesma razão que todo o resto
+ * deste arquivo: é um número que precisa bater com o Rust, e ter UM lugar
+ * onde ele mora é o que torna o desencontro consertável. A frase que a
+ * pessoa lê quando a cópia é recusada cita este número; se ele andar de um
+ * lado só, a tela passa a mentir sobre o teto que acabou de recusá-la — em
+ * silêncio, porque nada quebra. `delete-prefix.test.ts` lê a constante do
+ * Rust e compara com esta, para o desencontro falhar alto.
+ */
+export const MAX_BACKUP_BYTES = 64 * 1024 * 1024;
+
+/**
  * Varre um ou mais prefixos e guarda os nomes achados, sem apagar nada
  * ainda. Acompanhe o andamento com `onBulkScanProgress`.
  *

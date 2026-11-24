@@ -2674,6 +2674,20 @@ mod tests {
             state.enumerations.lock().unwrap().contains_key(&id),
             "a contagem precisava voltar ao mapa também no caminho do arquivo"
         );
+
+        // Estar no mapa não é o que importa — poder ser usada é. Como nos
+        // dois irmãos, a prova é a segunda escolha apagando de verdade sob
+        // o mesmo id, sem varredura nenhuma no meio.
+        let outcome = delete_prefix(&state, &id, BackupRequest::None, None, |_| {})
+            .await
+            .unwrap();
+        let WriteOutcome::Deleted { deleted, .. } = outcome else {
+            panic!("a segunda tentativa precisava apagar, veio {outcome:?}")
+        };
+        assert_eq!(deleted, 3);
+        for chave in &chaves {
+            assert!(!still_there(&mut conn, chave).await, "{chave} devia ter saído");
+        }
     }
 
     #[tokio::test]

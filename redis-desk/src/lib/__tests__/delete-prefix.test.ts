@@ -17,6 +17,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import DeletePrefixDialog from "$lib/DeletePrefixDialog.svelte";
+import { MAX_BACKUP_BYTES } from "$lib/api";
 import type { BackupRequest, EnumerationHandle, Host } from "$lib/api";
 
 function hostDe(partes: Partial<Host> = {}): Host {
@@ -269,4 +270,22 @@ test("o aviso de tipo sem volta tem o mesmo peso do irreversível", () => {
 	// E o degrau é peso e traço, nunca a cor do ambiente nem caixa alta.
 	expect(corpo).not.toMatch(/--prod/);
 	expect(corpo).not.toMatch(/uppercase/);
+});
+
+test("o teto citado na frase é o mesmo teto que o Rust aplica", () => {
+	// A frase da recusa diz quantos MB não couberam. Esse número tem que
+	// ser o que de fato recusou a cópia — um literal na tela andaria sozinho
+	// no dia em que o Rust mudasse, e a tela passaria a mentir em silêncio,
+	// porque nada quebra quando só a prosa está errada.
+	const fonte = readFileSync("src-tauri/src/core/history.rs", "utf8");
+	const achado = /pub const MAX_BACKUP_BYTES: usize = ([^;]+);/.exec(fonte);
+	expect(achado).not.toBeNull();
+
+	// "64 * 1024 * 1024" — multiplicado à mão, sem `eval`.
+	const doRust = achado![1]
+		.split("*")
+		.map((parte) => Number(parte.trim()))
+		.reduce((a, b) => a * b);
+
+	expect(doRust).toBe(MAX_BACKUP_BYTES);
 });

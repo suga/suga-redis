@@ -222,7 +222,11 @@
 	 * alguém procurar um estrago que não houve, ou desmentiria um ato que
 	 * aconteceu. Mesmo padrão de `assuntoErro` em `HistoryPanel`.
 	 */
-	type AssuntoApagar = "erro.aoApagarPrefixo" | "erro.aoCopiar" | "erro.aoRelerArvore";
+	type AssuntoApagar =
+		| "erro.aoApagarPrefixo"
+		| "erro.aoCopiar"
+		| "erro.aoDesistir"
+		| "erro.aoRelerArvore";
 	let erroApagar = $state("");
 	let assuntoApagar = $state<AssuntoApagar>("erro.aoApagarPrefixo");
 
@@ -617,7 +621,14 @@
 				apagar = null;
 				avisoApagar = resumoDoApagado(resultado.deleted, resultado.enumerated);
 				depoisDeApagar(atual.prefixos);
+				return;
 			}
+			// Nenhum outro desfecho vem desta porta hoje. Se um dia vier,
+			// fechar é o pior que pode acontecer — deixar o diálogo na tela
+			// com o botão travado em `apagados = 0` e nada a clicar seria
+			// uma janela da qual só se sai pelo Escape, sobre uma operação
+			// de desfecho desconhecido.
+			apagar = null;
 		} catch (err) {
 			if (apagar !== atual) return;
 
@@ -693,7 +704,13 @@
 
 		if (atual.apagados !== null && atual.enumeracao) {
 			cancelDelete(atual.enumeracao.id).catch((err) => {
-				erroApagar = errorMessage(err);
+				// Assunto PRÓPRIO, e nunca o de apagar: o pedido de parada é
+				// que não chegou — a exclusão continua correndo e provavelmente
+				// vai terminar. Dizer "não deu para apagar as chaves" aqui
+				// desmentiria o ato no instante exato em que ele acontece, que
+				// é o mesmo erro que `erro.aoRelerArvore` existe para evitar,
+				// só que de trás para frente.
+				falhouNoApagar("erro.aoDesistir", err);
 			});
 			return;
 		}

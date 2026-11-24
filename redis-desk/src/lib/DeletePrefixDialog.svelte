@@ -29,6 +29,7 @@
 	import { envChrome } from "$lib/env";
 	import { numero } from "$lib/formato";
 	import { t } from "$lib/i18n.svelte";
+	import { MAX_BACKUP_BYTES } from "$lib/api";
 	import type { BackupRequest, EnumerationHandle, Host } from "$lib/api";
 
 	interface Props {
@@ -101,8 +102,13 @@
 		semCopiaPossivel || !comCopia ? "none" : soEmArquivo ? "file" : "inline",
 	);
 
-	/** O teto do Rust, em MB, para a frase dizer o número de verdade. */
-	const TETO_MB = 64;
+	/**
+	 * O teto do Rust em MB, derivado da constante e não digitado de novo:
+	 * a frase diz o número que acabou de recusar a cópia, e um literal
+	 * solto aqui passaria a mentir sem quebrar nada no dia em que o teto
+	 * do Rust mudasse.
+	 */
+	const TETO_MB = Math.round(MAX_BACKUP_BYTES / (1024 * 1024));
 
 	/**
 	 * Byte a byte, como o Rust compara: sem aparar espaço e sem ignorar

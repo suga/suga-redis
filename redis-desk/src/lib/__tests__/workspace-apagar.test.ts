@@ -15,7 +15,7 @@
  * banco sem chaves. Por isso o teste da falha de enumeração não se contenta
  * em ver o diálogo fechado — ele cobra a mensagem na tela.
  */
-import { render, screen, waitFor, within } from "@testing-library/svelte";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -385,14 +385,44 @@ test("dois cliques seguidos em apagar mandam uma chamada só", async () => {
 	const dialogo = await screen.findByRole("dialog");
 	const botao = within(dialogo).getByRole("button", { name: "Apagar 1.200 chaves" });
 
-	// O diálogo não tem trava própria de propósito (uma recusa por nome
-	// precisa deixá-lo usável), então a trava é daqui: sem ela, a segunda
-	// chamada chega com a mesma enumeração e volta `UnknownEnumeration`.
-	await user.click(botao);
-	await user.click(botao);
+	// Cliques SÍNCRONOS, sem flush entre eles: um dedo nervoso não espera o
+	// repintar, e com `await` quem recusaria o segundo seria o atributo
+	// `disabled` já no DOM, que é uma barreira mais fraca que a testada.
+	//
+	// O que este teste prova é o CONTRATO observável — duas chamadas nunca
+	// saem com a mesma enumeração —, não qual das duas travas o cumpriu.
+	// São duas, de propósito: a daqui (`apagados !== null`, em
+	// `confirmarApagar`) e a do diálogo, que não é uma bandeira própria mas
+	// o `liberado = !apagando` derivado do mesmo prop. Tirar uma deixa a
+	// outra de pé, então nenhum clique as distingue; a de cá existe porque
+	// `Workspace` não pode depender da derivação interna de um filho para
+	// uma propriedade que custa um `UnknownEnumeration`. O que pinta a
+	// ordem — `apagados = 0` ANTES da chamada — é o teste seguinte.
+	fireEvent.click(botao);
+	fireEvent.click(botao);
+	await waitFor(() => expect(apagou).toHaveBeenCalled());
 
 	expect(apagou).toHaveBeenCalledTimes(1);
 	liberar({ outcome: "deleted", entry_id: 9, deleted: 1_200, enumerated: 1_200 });
+});
+
+test("o diálogo entra em modo apagando antes do primeiro andamento chegar", async () => {
+	const user = userEvent.setup();
+	// Nenhum evento de andamento é entregue neste teste, de propósito.
+	apagou.mockImplementation(() => new Promise<WriteOutcome>(() => {}));
+	await montar();
+	await pedirApagarPrefixo();
+
+	const dialogo = await screen.findByRole("dialog");
+	const botao = within(dialogo).getByRole("button", { name: "Apagar 1.200 chaves" });
+	await user.click(botao);
+
+	// `apagados` já vale 0 — marcado ANTES de pedir a exclusão, não quando
+	// o primeiro `bulk://delete-progress` chegar. Entre o clique e esse
+	// primeiro evento cabe uma ida ao servidor inteira, e deixar a trava
+	// nascer lá é deixar essa janela aberta para o segundo clique.
+	expect(within(dialogo).getByRole("status")).toHaveTextContent("0");
+	expect(botao).toBeDisabled();
 });
 
 // --------------------------------------------- a cópia que não coube
@@ -604,4 +634,104 @@ test("o menu segue o segundo clique direito, em vez de ficar onde abriu", async 
 	const menu = screen.getByRole("menu");
 	expect(menu.getAttribute("style")).toContain("left: 300px");
 	expect(within(menu).getByRole("menuitem", { name: "Copiar nome" })).toBeInTheDocument();
+});
+
+
+// --------------------------------------------- vários prefixos de uma vez
+
+test("marcados vários prefixos, o menu fala no plural e leva todos", async () => {
+	const user = userEvent.setup();
+	const alvo = await montar();
+
+	const sessao = await screen.findByRole("button", { name: /sessao/ });
+	const pedido = await screen.findByRole("button", { name: /pedido/ });
+	await user.keyboard("{Meta>}");
+	await user.click(sessao);
+	await user.click(pedido);
+	await user.keyboard("{/Meta}");
+
+	await user.pointer({ keys: "[MouseRight]", target: pedido });
+	const menu = screen.getByRole("menu");
+
+	// É o caso de manchete desta função, e o rótulo mora no item
+	// destrutivo: ele precisa dizer QUANTOS prefixos vão junto.
+	expect(menu.textContent).toContain("Copiar os 2 prefixos");
+	expect(menu.textContent).toContain("Apagar tudo sob os 2 prefixos marcados…");
+
+	await user.click(within(menu).getByRole("menuitem", { name: /^Apagar tudo/ }));
+
+	expect(enumerou).toHaveBeenCalledWith(alvo.id, 0, ["sessao:", "pedido:"]);
+	const dialogo = await screen.findByRole("dialog");
+	expect(within(dialogo).getByText("sessao:")).toBeInTheDocument();
+	expect(within(dialogo).getByText("pedido:")).toBeInTheDocument();
+});
+
+test("copiar vários prefixos põe um por linha", async () => {
+	const user = userEvent.setup();
+	await montar();
+
+	const sessao = await screen.findByRole("button", { name: /sessao/ });
+	const pedido = await screen.findByRole("button", { name: /pedido/ });
+	await user.keyboard("{Meta>}");
+	await user.click(sessao);
+	await user.click(pedido);
+	await user.keyboard("{/Meta}");
+
+	await user.pointer({ keys: "[MouseRight]", target: sessao });
+	await user.click(
+		within(screen.getByRole("menu")).getByRole("menuitem", { name: "Copiar os 2 prefixos" }),
+	);
+
+	expect(await navigator.clipboard.readText()).toBe("sessao:\npedido:");
+});
+
+// ------------------------------------------------- a desistência que falha
+
+test("uma desistência que falha não diz que o apagar falhou", async () => {
+	const user = userEvent.setup();
+
+	// Primeiro uma falha de OUTRO assunto, para provar que o assunto não
+	// sobra: sem reatribuí-lo, a tela diria "não deu para copiar" por cima
+	// de um erro de cancelamento.
+	vi.spyOn(navigator.clipboard, "writeText").mockRejectedValue(new Error("sem clipboard"));
+	await montar();
+	const menuCopiar = await menuSobre(/sessao/);
+	await user.click(within(menuCopiar).getByRole("menuitem", { name: "Copiar prefixo" }));
+	await screen.findByTestId("erro-apagar");
+
+	apagou.mockImplementation(() => new Promise<WriteOutcome>(() => {}));
+	desistiu.mockRejectedValue({
+		kind: "unreachable",
+		message: "o pedido de parada não chegou",
+	});
+	await pedirApagarPrefixo();
+	const dialogo = await screen.findByRole("dialog");
+	await user.click(within(dialogo).getByRole("button", { name: "Apagar 1.200 chaves" }));
+	await user.keyboard("{Escape}");
+
+	const aviso = await screen.findByTestId("erro-apagar");
+	expect(aviso).toHaveTextContent("o pedido de parada não chegou");
+	// A exclusão NÃO falhou — ela continua correndo, e provavelmente vai
+	// terminar. Dizer "não deu para apagar as chaves" aqui desmente o ato
+	// no instante exato em que ele acontece.
+	expect(aviso).not.toHaveTextContent(/não deu para apagar as chaves/i);
+	expect(aviso).not.toHaveTextContent(/copiar/i);
+	expect(aviso).toHaveTextContent(/continua correndo/i);
+});
+
+// ------------------------------------------- a máquina de estados é total
+
+test("um desfecho que esta tela não conhece fecha o diálogo em vez de travá-lo", async () => {
+	const user = userEvent.setup();
+	// `applied` é a forma de uma escrita de chave única; a exclusão em
+	// massa nunca a devolve hoje. Se um dia devolver, o diálogo não pode
+	// ficar na tela para sempre com o botão desabilitado e nada a clicar.
+	apagou.mockResolvedValue({ outcome: "applied", entry_id: 1 });
+	await montar();
+	await pedirApagarPrefixo();
+
+	const dialogo = await screen.findByRole("dialog");
+	await user.click(within(dialogo).getByRole("button", { name: "Apagar 1.200 chaves" }));
+
+	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });

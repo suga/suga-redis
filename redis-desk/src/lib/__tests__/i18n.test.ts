@@ -125,6 +125,7 @@ describe("as chaves do menu de índice", () => {
 		"erro.aoEnumerarPrefixo",
 		"erro.aoApagarPrefixo",
 		"erro.aoCopiar",
+		"erro.aoDesistir",
 		"erro.aoRelerArvore",
 		"apagarPrefixo.nadaAqui",
 		"apagarPrefixo.copiaNaoCoube",
