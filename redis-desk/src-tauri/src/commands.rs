@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -188,6 +188,19 @@ pub enum WriteOutcome {
         restored: u64,
         failed: Vec<FailedKey>,
     },
+    /// Uma exclusão em massa que aconteceu: quantas chaves saíram de
+    /// VERDADE e quantas a contagem tinha prometido.
+    ///
+    /// Os dois números, e não só um: enquanto não havia como desistir eles
+    /// eram praticamente sempre o mesmo, e o que a tela mostrava era o da
+    /// contagem. Com `cancel_delete` eles divergem exatamente no caso em
+    /// que a diferença importa — "desistiu: 500 de 600" —, e a tela não
+    /// pode ter que reabrir a entrada do histórico para saber disso.
+    Deleted {
+        entry_id: i64,
+        deleted: u64,
+        enumerated: u64,
+    },
 }
 
 /// Tudo que os comandos precisam, montado uma vez na subida do app.
@@ -216,6 +229,17 @@ pub struct AppState {
     /// que o prefixo guardar no instante do clique, que `delete_prefix`
     /// apaga.
     pub enumerations: Mutex<HashMap<String, StoredEnumeration>>,
+    /// A bandeira de desistência de cada exclusão em massa EM ANDAMENTO,
+    /// pelo id da contagem que a originou.
+    ///
+    /// Separada de `enumerations` porque as duas têm vidas diferentes:
+    /// `delete_prefix` tira a contagem do mapa assim que começa a apagar, e
+    /// é justamente a partir daí que existe algo de que desistir. A entrada
+    /// nasce quando o `UNLINK` vai começar e morre quando ele acaba — de
+    /// qualquer jeito, inclusive por erro —, então `cancel_delete` devolver
+    /// `false` quer dizer "não há exclusão correndo sob esse id", nunca
+    /// "não deu certo".
+    pub deletions: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// O diretório de dados do app, guardado porque `delete_prefix` precisa
     /// dele para gravar a cópia de segurança em arquivo. Pedir a
     /// `data_dir()` de dentro do comando faria os testes escreverem no
@@ -254,6 +278,7 @@ impl AppState {
             approvals: Arc::new(ApprovalQueue::new()),
             trees: Mutex::new(TreeCache::new()),
             enumerations: Mutex::new(HashMap::new()),
+            deletions: Mutex::new(HashMap::new()),
             dir: dir.to_path_buf(),
             logs,
         })
@@ -823,10 +848,10 @@ pub async fn write_value(
 // ------------------------------------------------------ exclusão em massa
 
 /// Andamento da enumeração de um prefixo, enquanto ela corre.
-pub const BULK_SCAN_PROGRESS_EVENT: &str = "bulk-scan-progress";
+pub const BULK_SCAN_PROGRESS_EVENT: &str = "bulk://scan-progress";
 
 /// Andamento da exclusão em massa já confirmada: quantas chaves já saíram.
-pub const BULK_DELETE_PROGRESS_EVENT: &str = "bulk-delete-progress";
+pub const BULK_DELETE_PROGRESS_EVENT: &str = "bulk://delete-progress";
 
 /// Subdiretório do diretório de dados onde ficam as cópias de segurança
 /// gravadas em arquivo (`BackupRequest::File`).
@@ -1048,13 +1073,19 @@ pub async fn delete_prefix(
                         }
                     };
 
-                    // A bandeira existe porque `BulkDelete` a exige, e fica
-                    // sempre em `false`: desistir no meio é uma porta que a
-                    // tela ainda não tem, e inventá-la aqui seria um botão
-                    // sem quem o aperte.
-                    let cancel = AtomicBool::new(false);
+                    // A bandeira entra no mapa ANTES da primeira ida ao
+                    // servidor e sai dele por todos os caminhos — é ela que
+                    // `cancel_delete` acha, e um id que ficasse para trás
+                    // aqui seria um botão "desistir" apontando para uma
+                    // exclusão que já acabou.
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    state
+                        .deletions
+                        .lock()
+                        .unwrap()
+                        .insert(enumeration_id.to_string(), cancel.clone());
 
-                    let feito = state
+                    let resultado = state
                         .history
                         .delete_prefix_with_backup(
                             &state.pool,
@@ -1069,7 +1100,14 @@ pub async fn delete_prefix(
                             },
                             progress,
                         )
-                        .await?;
+                        .await;
+
+                    state.deletions.lock().unwrap().remove(enumeration_id);
+                    // Erro aqui sobe sem mexer em cache nenhum: o parcial diz
+                    // QUANTAS saíram, nunca QUAIS — ao contrário da
+                    // desistência, em que os lotes pararam numa fronteira
+                    // conhecida. Ver o comentário mais abaixo.
+                    let feito = resultado?;
 
                     // Os dois caches precisam esquecer, pela mesma razão
                     // que `write_value` já os faz esquecer num `DeleteKey`:
@@ -1079,27 +1117,37 @@ pub async fn delete_prefix(
                     // coisas que não existem e a busca devolve texto que já
                     // não está lá.
                     //
-                    // Esquece a lista INTEIRA, não só as que o servidor
-                    // disse ter apagado: a diferença entre as duas são
-                    // chaves que sumiram sozinhas entre a contagem e o
-                    // `UNLINK` — e essas também não existem mais.
+                    // Correu até o fim: esquece a lista INTEIRA, não só as
+                    // que o servidor disse ter apagado. A diferença entre as
+                    // duas são chaves que sumiram sozinhas entre a contagem e
+                    // o `UNLINK` — e essas também não existem mais.
                     //
-                    // Só no caminho de sucesso. Quando a conexão morre no
-                    // meio, o `?` acima já subiu o erro e os caches ficam
-                    // como estavam: o parcial diz QUANTAS saíram, nunca
-                    // QUAIS, e tirar a lista toda da árvore esconderia
-                    // chaves que continuam no banco — o erro mais perigoso
-                    // dos dois, porque parece sucesso.
-                    forget_keys_in_tree(
-                        state,
-                        &host_id,
-                        db,
-                        guardada.keys.iter().map(String::as_str),
-                    );
-                    state.index.forget_keys(&host_id, db, &guardada.keys)?;
+                    // Se houve desistência, não: as que sobraram continuam no
+                    // banco, e tirá-las da árvore as esconderia da tela, que é
+                    // indistinguível de tê-las apagado. Aí só esquece as
+                    // `deleted` PRIMEIRAS, que é o único subconjunto
+                    // demonstrável — os lotes correm na ordem da lista, então
+                    // toda chave dentro desse corte ou saiu agora ou já não
+                    // existia. O resto espera a próxima varredura: uma chave
+                    // a mais na árvore se conserta sozinha no primeiro clique
+                    // (`read_value` tira a que sumiu), uma a menos, não.
+                    let apagadas: &[String] = if cancel.load(Ordering::Relaxed) {
+                        // `min` e não fé: o corte vem de um número que o
+                        // servidor mandou, e um índice fora da lista aqui
+                        // derrubaria a fachada no fim de uma exclusão que
+                        // deu certo.
+                        let corte = (feito.deleted as usize).min(guardada.keys.len());
+                        &guardada.keys[..corte]
+                    } else {
+                        &guardada.keys
+                    };
+                    forget_keys_in_tree(state, &host_id, db, apagadas.iter().map(String::as_str));
+                    state.index.forget_keys(&host_id, db, apagadas)?;
 
-                    Ok(WriteOutcome::Applied {
+                    Ok(WriteOutcome::Deleted {
                         entry_id: feito.entry_id,
+                        deleted: feito.deleted,
+                        enumerated: guardada.keys.len() as u64,
                     })
                 },
             )
@@ -1265,6 +1313,26 @@ pub fn resolve_approval(
 /// Recusa uma escrita pedida pela LLM.
 pub fn deny_approval(state: &AppState, request_id: &str) -> Result<ApprovalVerdict> {
     Ok(state.approvals.deny(request_id)?)
+}
+
+/// Manda a exclusão em massa de `enumeration_id` parar.
+///
+/// Devolve se havia o que parar: `false` quer dizer que a exclusão já tinha
+/// terminado quando o clique chegou, e isso não é erro nenhum — é a corrida
+/// normal entre um botão e um laço que acaba.
+pub fn cancel_delete(state: &AppState, enumeration_id: &str) -> bool {
+    match state.deletions.lock().unwrap().get(enumeration_id) {
+        Some(bandeira) => {
+            // `unlink_em_lotes` confere a bandeira ENTRE lotes, nunca
+            // dentro de um: o lote corrente sempre termina. É de propósito —
+            // parar no meio de um `UNLINK` deixaria a exclusão pela metade
+            // dentro do próprio lote, e o número registrado deixaria de
+            // descrever o que aconteceu.
+            bandeira.store(true, Ordering::Relaxed);
+            true
+        }
+        None => false,
+    }
 }
 
 /// A regra da trava, num lugar só, para `write_value` e `rollback` não
@@ -1469,6 +1537,13 @@ pub async fn cmd_delete_prefix(
         },
     )
     .await
+}
+
+/// Devolve se havia exclusão correndo sob esse id. `false` não é falha: a
+/// exclusão acabou antes de o clique chegar.
+#[tauri::command]
+pub fn cmd_cancel_delete(state: tauri::State<'_, AppState>, enumeration_id: String) -> bool {
+    cancel_delete(&state, &enumeration_id)
 }
 
 #[tauri::command]
@@ -2425,9 +2500,19 @@ mod tests {
         .await
         .unwrap();
 
-        let WriteOutcome::Applied { entry_id } = outcome else {
+        let WriteOutcome::Deleted {
+            entry_id,
+            deleted,
+            enumerated,
+        } = outcome
+        else {
             panic!("com o nome exato a exclusão precisava passar, veio {outcome:?}")
         };
+        assert_eq!(
+            (deleted, enumerated),
+            (3, 3),
+            "sem desistência os dois números são o mesmo"
+        );
 
         for chave in &chaves {
             assert!(
@@ -2460,7 +2545,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(outcome, WriteOutcome::Applied { .. }),
+            matches!(outcome, WriteOutcome::Deleted { .. }),
             "fora de produção o nome digitado é ignorado, veio {outcome:?}"
         );
         for chave in &chaves {
@@ -2682,7 +2767,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let WriteOutcome::Applied { entry_id } = outcome else {
+        let WriteOutcome::Deleted { entry_id, .. } = outcome else {
             panic!("a exclusão de partida precisava ter passado, veio {outcome:?}")
         };
 
@@ -2736,7 +2821,7 @@ mod tests {
         let outcome = delete_prefix(&state, &id, BackupRequest::File, None, |_| {})
             .await
             .unwrap();
-        let WriteOutcome::Applied { entry_id } = outcome else {
+        let WriteOutcome::Deleted { entry_id, .. } = outcome else {
             panic!("a exclusão precisava ter passado, veio {outcome:?}")
         };
 
@@ -2788,7 +2873,7 @@ mod tests {
         let outcome = delete_prefix(&state, &id, BackupRequest::Inline, None, |_| {})
             .await
             .unwrap();
-        let WriteOutcome::Applied { entry_id } = outcome else {
+        let WriteOutcome::Deleted { entry_id, .. } = outcome else {
             panic!("a exclusão de partida precisava ter passado, veio {outcome:?}")
         };
         assert!(
@@ -2808,6 +2893,176 @@ mod tests {
 
         for chave in &chaves {
             del(&mut conn, chave).await;
+        }
+    }
+
+    /// Todo nome de evento desta fachada usa a forma `assunto://coisa`.
+    ///
+    /// Está num teste porque a convenção é invisível no ponto de uso: quem
+    /// acrescenta um evento copia a linha do `pub const` ao lado, e a
+    /// primeira versão destes dois saiu como `bulk-scan-progress`, com
+    /// hífen, sem nada reclamar. Um nome fora da forma só aparece do outro
+    /// lado da fronteira, na tela, quando já é tarde para trocá-lo.
+    #[test]
+    fn every_event_name_follows_the_house_convention() {
+        for nome in [
+            TREE_PROGRESS_EVENT,
+            BRANCH_PROGRESS_EVENT,
+            RESCAN_PROGRESS_EVENT,
+            APPROVALS_EVENT,
+            BULK_SCAN_PROGRESS_EVENT,
+            BULK_DELETE_PROGRESS_EVENT,
+        ] {
+            let (assunto, coisa) = nome
+                .split_once("://")
+                .unwrap_or_else(|| panic!("o evento {nome:?} não está na forma assunto://coisa"));
+            assert!(
+                !assunto.is_empty() && !coisa.is_empty(),
+                "o evento {nome:?} tem um dos dois lados vazio"
+            );
+        }
+    }
+
+    /// Desistir para DEPOIS do lote corrente, nunca no meio dele — e o que
+    /// já saiu continua saído, com a tela sabendo o número de verdade.
+    #[tokio::test]
+    async fn cancelling_stops_after_the_current_batch() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:desistir:";
+
+        let lote = crate::core::bulk::UNLINK_BATCH;
+        let quantas = lote + 100;
+        let chaves = seed_bulk(&mut conn, prefixo, quantas).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let id = enumerate_exactly(&state, &host_id, prefixo, quantas as u64).await;
+
+        // O clique em "desistir" chega quando o primeiro lote acabou de cair.
+        let alvo = id.clone();
+        let outcome = delete_prefix(&state, &id, BackupRequest::None, None, |saidas| {
+            if saidas >= lote as u64 {
+                cancel_delete(&state, &alvo);
+            }
+        })
+        .await
+        .unwrap();
+
+        let WriteOutcome::Deleted {
+            entry_id,
+            deleted,
+            enumerated,
+        } = outcome
+        else {
+            panic!(
+                "desistir não é falhar: a exclusão parcial precisa voltar como Deleted, veio {outcome:?}"
+            )
+        };
+        assert_eq!(
+            (deleted, enumerated),
+            (lote as u64, quantas as u64),
+            "é exatamente aqui que os dois números divergem, e é por isso que os dois atravessam \
+             a fronteira"
+        );
+
+        // Quais chaves sobraram é a ordem do `SCAN`, não a da semeadura;
+        // o que o teste tem a provar é QUANTAS, e que a conta fecha com o
+        // número que a tela recebeu.
+        let mut sobraram = 0;
+        for chave in &chaves {
+            if still_there(&mut conn, chave).await {
+                sobraram += 1;
+            }
+            del(&mut conn, chave).await;
+        }
+        assert_eq!(
+            sobraram,
+            quantas - lote,
+            "o banco precisa concordar com o número que voltou pela fronteira"
+        );
+
+        let entrada = state.history.get(entry_id).unwrap();
+        assert!(
+            entrada.summary.contains(&format!("{lote} de {quantas}")),
+            "a entrada única registra o parcial, não o pedido, veio {:?}",
+            entrada.summary
+        );
+    }
+
+    /// Uma chave poupada pela desistência continua na árvore.
+    ///
+    /// É a metade perigosa do conserto de cache: tirar a lista inteira da
+    /// trie depois de uma desistência esconderia chaves que continuam no
+    /// banco — e some-da-tela é exatamente como "foi apagada" se parece.
+    #[tokio::test]
+    async fn cancelling_does_not_hide_the_keys_it_spared() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:desistir_arvore:";
+
+        let lote = crate::core::bulk::UNLINK_BATCH;
+        let quantas = lote + 100;
+        let chaves = seed_bulk(&mut conn, prefixo, quantas).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        scan_tree(&state, &host_id, BULK_TEST_DB, |_| {})
+            .await
+            .unwrap();
+
+        let id = enumerate_exactly(&state, &host_id, prefixo, quantas as u64).await;
+        let alvo = id.clone();
+        delete_prefix(&state, &id, BackupRequest::None, None, |saidas| {
+            if saidas >= lote as u64 {
+                cancel_delete(&state, &alvo);
+            }
+        })
+        .await
+        .unwrap();
+
+        let galho = tree_level(&state, &host_id, BULK_TEST_DB, prefixo)
+            .expect("as 100 poupadas continuam no banco: o galho tem que continuar na árvore");
+        assert_eq!(
+            galho.children.len(),
+            quantas - lote,
+            "a árvore precisa mostrar exatamente as que sobraram"
+        );
+
+        for chave in &chaves {
+            del(&mut conn, chave).await;
+        }
+    }
+
+    /// Desistir de uma exclusão que já acabou não é erro — é a corrida
+    /// normal entre um botão e um laço que termina.
+    #[tokio::test]
+    async fn cancelling_a_delete_that_already_ended_is_not_an_error() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:desistir_tarde:";
+        let chaves = seed_bulk(&mut conn, prefixo, 3).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let id = enumerate_exactly(&state, &host_id, prefixo, 3).await;
+
+        assert!(
+            !cancel_delete(&state, &id),
+            "antes de a exclusão começar não há o que parar"
+        );
+
+        delete_prefix(&state, &id, BackupRequest::None, None, |_| {})
+            .await
+            .unwrap();
+
+        assert!(
+            !cancel_delete(&state, &id),
+            "e depois que ela acabou, também não"
+        );
+
+        for chave in &chaves {
+            assert!(
+                !still_there(&mut conn, chave).await,
+                "a desistência tardia não podia ter poupado {chave}"
+            );
         }
     }
 }

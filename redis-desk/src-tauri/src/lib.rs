@@ -131,6 +131,7 @@ pub fn run() {
             commands::cmd_write_value,
             commands::cmd_enumerate_prefix,
             commands::cmd_delete_prefix,
+            commands::cmd_cancel_delete,
             commands::cmd_list_history,
             commands::cmd_rollback,
             commands::cmd_search,
