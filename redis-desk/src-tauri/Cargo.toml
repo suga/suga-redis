@@ -1,6 +1,6 @@
 [package]
 name = "suga-redis"
-version = "0.1.0"
+version = "0.2.0"
 description = "Suga-Redis: cliente de mesa para Redis, com servidor MCP embutido"
 authors = ["Marco Sugamele"]
 edition = "2024"
