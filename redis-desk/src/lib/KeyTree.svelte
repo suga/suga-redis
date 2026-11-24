@@ -46,9 +46,9 @@
 		 * Opcional porque a árvore não decide o que vai no menu: quem monta a
 		 * lista é quem a desenha, e até lá a árvore segue inteira sem ele.
 		 */
-		onMenuPrefixo?: (prefixos: string[], x: number, y: number) => void;
+		onPrefixMenu?: (prefixos: string[], x: number, y: number) => void;
 		/** O mesmo, para uma chave solta: uma chave não é um prefixo. */
-		onMenuChave?: (chave: string, x: number, y: number) => void;
+		onKeyMenu?: (chave: string, x: number, y: number) => void;
 	}
 
 	let {
@@ -59,8 +59,8 @@
 		selectedKey,
 		onSelect,
 		filter,
-		onMenuPrefixo,
-		onMenuChave,
+		onPrefixMenu,
+		onKeyMenu,
 	}: Props = $props();
 
 	/** Altura fixa de cada linha, em pixels. É o que torna a janela calculável. */
@@ -165,14 +165,11 @@
 
 	function alternar(branch: Branch) {
 		if (abertos.has(branch.full_prefix)) {
+			// O que estava marcado lá dentro CONTINUA marcado: fechar um galho
+			// é arrumar a tela, não desdizer o que a pessoa escolheu. Quem
+			// esconde marca passa a dizer isso na própria linha
+			// (`contemMarcados`), para o menu nunca contar o que ninguém vê.
 			abertos.delete(branch.full_prefix);
-			// O que fecha some da tela, e seleção invisível é seleção perigosa:
-			// o menu diria "3 prefixos" com dois deles fora da vista.
-			for (const prefixo of selecionados) {
-				if (prefixo !== branch.full_prefix && prefixo.startsWith(branch.full_prefix)) {
-					selecionados.delete(prefixo);
-				}
-			}
 			return;
 		}
 		abertos.add(branch.full_prefix);
@@ -268,7 +265,9 @@
 		if (filhosDoNivel === null) return out;
 
 		const visiveis = alvo
-			? filhosDoNivel.filter((b) => b.label.toLowerCase().includes(alvo))
+			? filhosDoNivel.filter(
+					(b) => b.label.toLowerCase().includes(alvo) || guardamMarca.has(b.full_prefix),
+				)
 			: filhosDoNivel;
 
 		for (const branch of visiveis) {
@@ -306,6 +305,59 @@
 
 	// ------------------------------------------------------- seleção e menu
 
+	/**
+	 * Os prefixos que são marca, ou guardam uma debaixo deles.
+	 *
+	 * É o que mantém um prefixo marcado na tela quando o filtro não casa com
+	 * o rótulo dele: esconder o que a pessoa marcou é o mesmo perigo do
+	 * galho fechado entrando por outra porta — o menu falaria de prefixos
+	 * fora da vista.
+	 *
+	 * Montado de uma vez, e não com um `startsWith` por filho: o filtro passa
+	 * por TODOS os filhos de um nível, e um ⌘+A num banco com dezenas de
+	 * milhares de prefixos de primeiro nível faria disso uma varredura
+	 * quadrática a cada tecla digitada.
+	 *
+	 * Os ancestrais saem dos cortes no `:` — `full_prefix` termina nele
+	 * (`api.ts`), e por isso o corte nunca cai no meio de um irmão de nome
+	 * parecido.
+	 */
+	let guardamMarca = $derived.by(() => {
+		const todos = new Set<string>();
+		for (const prefixo of selecionados) {
+			todos.add(prefixo);
+			for (
+				let corte = prefixo.indexOf(":");
+				corte !== -1;
+				corte = prefixo.indexOf(":", corte + 1)
+			) {
+				todos.add(prefixo.slice(0, corte + 1));
+			}
+		}
+		return todos;
+	});
+
+	/** As marcas que nenhuma linha está mostrando — galho fechado, por ora. */
+	let marcadosOcultos = $derived.by(() => {
+		if (selecionados.size === 0) return [];
+		const naTela = new Set<string>();
+		for (const linha of linhas) {
+			if (linha.branch) naTela.add(linha.branch.full_prefix);
+		}
+		return [...selecionados].filter((prefixo) => !naTela.has(prefixo));
+	});
+
+	/**
+	 * O galho fechado que esconde marcas diz isso na própria linha.
+	 *
+	 * Nada do que foi marcado se perde ao fechar um galho, e nada vira
+	 * invisível: as duas marcas que sumiram ficam localizadas no galho que
+	 * as guarda, e a conta do menu continua honesta.
+	 */
+	function contemMarcados(prefixo: string): boolean {
+		return marcadosOcultos.some((marcado) => marcado.startsWith(prefixo));
+	}
+
 	function alternarMarca(branch: Branch) {
 		// Uma chave solta não entra — ver o comentário de `selecionados`.
 		if (branch.leaf_key !== null) return;
@@ -326,10 +378,22 @@
 	 * da janela.
 	 */
 	function marcarFaixa(branch: Branch) {
-		if (branch.leaf_key !== null || ancora === null) return;
-		const de = linhas.findIndex((l) => l.branch?.full_prefix === ancora);
+		if (branch.leaf_key !== null) return;
 		const ate = linhas.findIndex((l) => l.branch?.full_prefix === branch.full_prefix);
-		if (de === -1 || ate === -1) return;
+		const de =
+			ancora === null ? -1 : linhas.findIndex((l) => l.branch?.full_prefix === ancora);
+		if (ate === -1) return;
+
+		// A âncora pode ter saído da tela: galho fechado em volta dela, filtro
+		// novo, ou um retrato da varredura que redesenhou o nível. Sem isto o
+		// Shift+clique morria calado daí em diante — esta linha vira a âncora
+		// e o próximo já pega faixa.
+		if (de === -1) {
+			selecionados.clear();
+			selecionados.add(branch.full_prefix);
+			ancora = branch.full_prefix;
+			return;
+		}
 
 		selecionados.clear();
 		for (let i = Math.min(de, ate); i <= Math.max(de, ate); i += 1) {
@@ -365,10 +429,11 @@
 			return;
 		}
 
-		// O clique simples continua sendo abrir, fechar ou escolher a chave; a
-		// seleção sai do caminho, e a próxima faixa parte daqui.
-		selecionados.clear();
-		ancora = branch.leaf_key === null ? branch.full_prefix : null;
+		// O clique simples é navegação — abrir, fechar, escolher a chave — e
+		// não desdiz o que a pessoa marcou. A marca só muda por gesto de
+		// marcar (⌘, Shift, ⌘+A, o menu de contexto) ou quando o host/banco
+		// troca; fosse diferente, fechar um galho para arrumar a tela apagaria
+		// a seleção, e não haveria como fechá-lo guardando a marca.
 		if (branch.leaf_key !== null) onSelect(branch.leaf_key);
 		else alternar(branch);
 	}
@@ -385,7 +450,7 @@
 		if (branch.leaf_key !== null) {
 			selecionados.clear();
 			ancora = null;
-			onMenuChave?.(branch.leaf_key, x, y);
+			onKeyMenu?.(branch.leaf_key, x, y);
 			return;
 		}
 
@@ -394,7 +459,7 @@
 			selecionados.add(branch.full_prefix);
 			ancora = branch.full_prefix;
 		}
-		onMenuPrefixo?.([...selecionados], x, y);
+		onPrefixMenu?.([...selecionados], x, y);
 	}
 
 	function aoMenuContexto(e: MouseEvent, branch: Branch) {
@@ -464,6 +529,8 @@
 							class="linha"
 							class:selecionada={branch.leaf_key !== null && branch.leaf_key === selectedKey}
 							class:marcada={selecionados.has(branch.full_prefix)}
+							class:guarda-marcados={!selecionados.has(branch.full_prefix) &&
+								contemMarcados(branch.full_prefix)}
 							style="padding-left: {0.5 + linha.depth * 0.85}rem"
 							onclick={(e) => aoClicar(e, branch)}
 							oncontextmenu={(e) => aoMenuContexto(e, branch)}
@@ -562,6 +629,14 @@
 	   emprestá-los aqui deixaria o aviso de produção ambíguo. */
 	.marcada {
 		background: var(--rule);
+	}
+
+	/* "Tem marca aqui dentro": um contorno, não o preenchimento da marca. O
+	   galho em si não está marcado, e preenchê-lo faria o olho contar um
+	   prefixo a mais — e, pela mesma razão das linhas acima, nada de
+	   `--prod` nem de caixa alta. */
+	.guarda-marcados {
+		box-shadow: inset 0 0 0 1px var(--rule-strong);
 	}
 
 	.caret {
