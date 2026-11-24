@@ -1108,9 +1108,11 @@ pub async fn delete_prefix(
                     // oferecê-la de novo seria oferecer um número que deixou
                     // de ser verdade.
                     //
-                    // A única exceção é a recusa por teto de cópia, logo
-                    // abaixo — lá nada chegou a sair, e a lista continua
-                    // valendo inteira.
+                    // As exceções são as duas recusas que acontecem ANTES da
+                    // primeira ida ao servidor — o diretório da cópia que não
+                    // nasce e o teto de bytes estourado. Nas duas nada chegou
+                    // a sair, a lista continua valendo inteira, e as duas a
+                    // devolvem ao mapa sob o mesmo id.
                     let Some(guardada) = state.enumerations.lock().unwrap().remove(enumeration_id)
                     else {
                         return Err(CommandError::UnknownEnumeration(enumeration_id.to_string()));
@@ -1121,7 +1123,22 @@ pub async fn delete_prefix(
                         BackupRequest::Inline => BackupChoice::Inline,
                         BackupRequest::None => BackupChoice::None,
                         BackupRequest::File => {
-                            std::fs::create_dir_all(&destino).map_err(HistoryError::Io)?;
+                            // Mesma régua da recusa por teto, logo abaixo, e a
+                            // segunda saída da mesma função que a devolve: isto
+                            // acontece antes de qualquer ida ao servidor, então
+                            // nenhuma chave saiu e a lista continua descrevendo
+                            // o banco. Um disco cheio ou um diretório de dados
+                            // sem permissão de escrita é justamente a hora em
+                            // que ninguém quer ouvir que precisa varrer o banco
+                            // inteiro de novo.
+                            if let Err(err) = std::fs::create_dir_all(&destino) {
+                                state
+                                    .enumerations
+                                    .lock()
+                                    .unwrap()
+                                    .insert(enumeration_id.to_string(), guardada);
+                                return Err(CommandError::History(HistoryError::Io(err)));
+                            }
                             BackupChoice::File(&destino)
                         }
                     };
@@ -2581,6 +2598,53 @@ mod tests {
         for chave in &chaves {
             assert!(!still_there(&mut conn, chave).await, "{chave} devia ter saído");
         }
+    }
+
+    #[tokio::test]
+    async fn a_backup_dir_that_cannot_be_created_keeps_the_enumeration_alive() {
+        // O outro jeito de a cópia em arquivo ser recusada antes de
+        // qualquer chave sair: o diretório das cópias não pode nascer.
+        // Mesma régua do teto — nada foi apagado, então a contagem
+        // continua descrevendo o banco e não pode ser cobrada de novo. E
+        // um disco cheio ou um diretório de dados sem permissão de escrita
+        // é justamente a hora em que ninguém quer ouvir que precisa varrer
+        // o banco inteiro outra vez.
+        let (dir, state) = test_state();
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:sem_diretorio:";
+        let chaves = seed_bulk(&mut conn, prefixo, 3).await;
+
+        // Um ARQUIVO onde o diretório precisaria nascer. É a forma portátil
+        // de reproduzir o que acontece de verdade lá fora.
+        std::fs::write(dir.path().join(BACKUP_DIR), b"nao sou um diretorio").unwrap();
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let id = enumerate_exactly(&state, &host_id, prefixo, 3).await;
+
+        let erro = delete_prefix(&state, &id, BackupRequest::File, None, |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(erro.kind(), "history", "veio {erro:?}");
+
+        for chave in &chaves {
+            assert!(
+                still_there(&mut conn, chave).await,
+                "nada pode sair quando a cópia nem chegou a ser escrita: {chave} sumiu"
+            );
+        }
+        assert!(
+            state.enumerations.lock().unwrap().contains_key(&id),
+            "a contagem precisava voltar ao mapa quando o diretório da cópia falha"
+        );
+
+        // E vale de verdade, não só está no mapa: a segunda escolha apaga.
+        let outcome = delete_prefix(&state, &id, BackupRequest::None, None, |_| {})
+            .await
+            .unwrap();
+        let WriteOutcome::Deleted { deleted, .. } = outcome else {
+            panic!("a segunda tentativa precisava apagar, veio {outcome:?}")
+        };
+        assert_eq!(deleted, 3);
     }
 
     #[tokio::test]
