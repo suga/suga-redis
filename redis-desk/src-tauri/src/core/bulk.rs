@@ -239,6 +239,14 @@ pub struct BulkError {
 /// `cancel` só é conferido ENTRE lotes, nunca dentro de um: o lote corrente
 /// sempre termina antes de parar, para não deixar uma exclusão pela
 /// metade dentro do próprio lote.
+///
+/// Conferido no TOPO do laço além do fim dele, e não é redundância. Quem
+/// chama este laço (`History::delete_prefix_with_backup`) passa antes pela
+/// leitura dos retratos para a cópia de segurança — uma ida e volta por
+/// chave, que num prefixo grande demora. Um clique em "desistir" cai
+/// naturalmente aí dentro, e só com a conferência no fim o primeiro lote
+/// saía mesmo assim: "para depois do lote corrente" era obedecido ao pé da
+/// letra num momento em que não havia lote corrente nenhum.
 pub(crate) async fn unlink_em_lotes<F, Fut>(
     keys: &[String],
     lote: usize,
@@ -254,6 +262,10 @@ where
     let tamanho_lote = lote.max(1);
 
     for pedaco in keys.chunks(tamanho_lote) {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+
         match apagar(pedaco).await {
             Ok(apagadas) => {
                 total += apagadas;
@@ -790,6 +802,43 @@ mod tests {
             assert_eq!(apagadas, 1, "só \"counts_rs_test:a\" existia de verdade");
         })
         .await;
+    }
+
+    /// Desistir ANTES do primeiro lote não gasta um lote.
+    ///
+    /// Quem chama o laço lê os retratos da cópia de segurança antes dele, uma
+    /// ida e volta por chave, e o clique cai naturalmente aí dentro. Com a
+    /// bandeira conferida só no fim do laço, as 500 primeiras iam embora de
+    /// qualquer jeito.
+    #[tokio::test]
+    async fn cancel_before_the_first_batch_deletes_nothing() {
+        let keys: Vec<String> = (0..6)
+            .map(|i| format!("cancel_rs_test:antes:{i}"))
+            .collect();
+        let cancel = AtomicBool::new(true);
+        // `apagar` é `Fn`, então o contador precisa de mutabilidade interna.
+        let lotes = std::sync::atomic::AtomicUsize::new(0);
+
+        let total = unlink_em_lotes(
+            &keys,
+            2,
+            &cancel,
+            |_| {},
+            |lote: &[String]| {
+                lotes.fetch_add(1, Ordering::Relaxed);
+                let quantas = lote.len() as u64;
+                async move { Ok(quantas) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(total, 0, "nada podia ter saído");
+        assert_eq!(
+            lotes.load(Ordering::Relaxed),
+            0,
+            "nenhum lote podia sequer ter sido tentado"
+        );
     }
 
     #[tokio::test]

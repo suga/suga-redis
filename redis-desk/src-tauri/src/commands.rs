@@ -239,7 +239,7 @@ pub struct AppState {
     /// qualquer jeito, inclusive por erro —, então `cancel_delete` devolver
     /// `false` quer dizer "não há exclusão correndo sob esse id", nunca
     /// "não deu certo".
-    pub deletions: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    pub deletions: Mutex<HashMap<String, RunningDelete>>,
     /// O diretório de dados do app, guardado porque `delete_prefix` precisa
     /// dele para gravar a cópia de segurança em arquivo. Pedir a
     /// `data_dir()` de dentro do comando faria os testes escreverem no
@@ -399,7 +399,36 @@ pub fn update_host(state: &AppState, host: Host, password: Option<String>) -> Re
 
 pub fn remove_host(state: &AppState, host_id: &str) -> Result<()> {
     state.hosts.lock().unwrap().remove(host_id)?;
+    forget_bulk_state(state, host_id);
     Ok(())
+}
+
+/// Esquece as contagens de prefixo do host e manda parar o que estiver
+/// correndo nele.
+///
+/// Chamada por `disconnect` e por `remove_host`, pela mesma razão que as duas
+/// já esquecem (ou deviam esquecer) a árvore: o que fica para trás descreve
+/// um host que a pessoa já deixou. Aqui o peso é maior — uma contagem segura
+/// até `bulk::MAX_ENUMERATED` nomes, e um diálogo deixado aberto ainda podia
+/// ser confirmado depois da desconexão.
+///
+/// Levanta a bandeira ANTES de tirar a exclusão do mapa, e isso não é zelo:
+/// tirá-la sem levantar deixaria a exclusão correndo contra um host
+/// abandonado e sem mais ninguém capaz de pará-la — pior do que não ter
+/// mexido.
+fn forget_bulk_state(state: &AppState, host_id: &str) {
+    state.deletions.lock().unwrap().retain(|_id, correndo| {
+        if correndo.host_id == host_id {
+            correndo.cancel.store(true, Ordering::Relaxed);
+            return false;
+        }
+        true
+    });
+    state
+        .enumerations
+        .lock()
+        .unwrap()
+        .retain(|_id, guardada| guardada.host_id != host_id);
 }
 
 /// Conecta de verdade ao host: abre (ou reaproveita) o socket do `Pool` e
@@ -446,6 +475,7 @@ pub fn disconnect(state: &AppState, host_id: &str) -> Result<()> {
         .lock()
         .unwrap()
         .retain(|(id, _db), _tree| id != host_id);
+    forget_bulk_state(state, host_id);
     Ok(())
 }
 
@@ -885,6 +915,17 @@ pub enum BackupRequest {
     None,
 }
 
+/// Uma exclusão em massa correndo agora: de qual host, e a bandeira por onde
+/// mandá-la parar.
+///
+/// O host está aqui porque desconectar e descadastrar precisam achar o que é
+/// daquele host — a contagem que deu origem a esta exclusão já saiu de
+/// `enumerations` quando ela começou, então não há mais de onde deduzi-lo.
+pub struct RunningDelete {
+    pub host_id: String,
+    pub cancel: Arc<AtomicBool>,
+}
+
 /// Uma enumeração à espera de confirmação: o alvo e os nomes achados.
 pub struct StoredEnumeration {
     pub host_id: String,
@@ -1079,11 +1120,13 @@ pub async fn delete_prefix(
                     // aqui seria um botão "desistir" apontando para uma
                     // exclusão que já acabou.
                     let cancel = Arc::new(AtomicBool::new(false));
-                    state
-                        .deletions
-                        .lock()
-                        .unwrap()
-                        .insert(enumeration_id.to_string(), cancel.clone());
+                    state.deletions.lock().unwrap().insert(
+                        enumeration_id.to_string(),
+                        RunningDelete {
+                            host_id: host_id.clone(),
+                            cancel: cancel.clone(),
+                        },
+                    );
 
                     let resultado = state
                         .history
@@ -1142,7 +1185,30 @@ pub async fn delete_prefix(
                         &guardada.keys
                     };
                     forget_keys_in_tree(state, &host_id, db, apagadas.iter().map(String::as_str));
-                    state.index.forget_keys(&host_id, db, apagadas)?;
+
+                    // Sem `?`: as chaves JÁ saíram e a entrada já as
+                    // registra. Subir um erro aqui mandaria para a tela uma
+                    // falha sobre uma operação que deu certo, e levaria
+                    // junto `entry_id`, `deleted` e `enumerated` — inclusive
+                    // o id por onde o desfazer encontra a cópia de
+                    // segurança. É a mesma forma que `write_with_backup` dá
+                    // ao `after_json`: o que vem depois do ato não pode
+                    // desmentir o ato. A falha vai para o anel, onde se
+                    // conserta com uma revarredura.
+                    if let Err(err) = state.index.forget_keys(&host_id, db, apagadas) {
+                        state.logs.push(LogEntry {
+                            at_ms: now_ms(),
+                            kind: LogKind::Failure,
+                            host: host.name.clone(),
+                            db: Some(db),
+                            operation: "delete_prefix".to_string(),
+                            duration_ms: None,
+                            detail: Some(format!(
+                                "as chaves foram apagadas, mas o índice de busca não as \
+                                 esqueceu: {err} — uma revarredura conserta"
+                            )),
+                        });
+                    }
 
                     Ok(WriteOutcome::Deleted {
                         entry_id: feito.entry_id,
@@ -1322,13 +1388,13 @@ pub fn deny_approval(state: &AppState, request_id: &str) -> Result<ApprovalVerdi
 /// normal entre um botão e um laço que acaba.
 pub fn cancel_delete(state: &AppState, enumeration_id: &str) -> bool {
     match state.deletions.lock().unwrap().get(enumeration_id) {
-        Some(bandeira) => {
+        Some(correndo) => {
             // `unlink_em_lotes` confere a bandeira ENTRE lotes, nunca
             // dentro de um: o lote corrente sempre termina. É de propósito —
             // parar no meio de um `UNLINK` deixaria a exclusão pela metade
             // dentro do próprio lote, e o número registrado deixaria de
             // descrever o que aconteceu.
-            bandeira.store(true, Ordering::Relaxed);
+            correndo.cancel.store(true, Ordering::Relaxed);
             true
         }
         None => false,
@@ -2420,8 +2486,10 @@ mod tests {
                 "apagar em massa em produção sem o nome digitado precisava ser recusado, veio {outcome:?}"
             )
         };
+        // `contains('3')` não serviria: a frase termina em "(banco 13)" e o
+        // dígito entraria pelo número do banco, com a contagem errada.
         assert!(
-            summary.contains(prefixo) && summary.contains('3'),
+            summary.contains(prefixo) && summary.contains("Apagar 3 chaves"),
             "o resumo é o que a pessoa lê antes de digitar o nome: precisa dizer quantas chaves \
              saem e de onde, veio {summary:?}"
         );
@@ -2942,7 +3010,14 @@ mod tests {
         let alvo = id.clone();
         let outcome = delete_prefix(&state, &id, BackupRequest::None, None, |saidas| {
             if saidas >= lote as u64 {
-                cancel_delete(&state, &alvo);
+                // O `true` é a resposta de que a tela depende para saber se
+                // havia o que parar: uma implementação que levantasse a
+                // bandeira e devolvesse `false` apagaria a mensagem certa e
+                // passaria em todo o resto da suíte.
+                assert!(
+                    cancel_delete(&state, &alvo),
+                    "com a exclusão correndo, desistir precisa dizer que havia o que parar"
+                );
             }
         })
         .await
@@ -3064,5 +3139,194 @@ mod tests {
                 "a desistência tardia não podia ter poupado {chave}"
             );
         }
+    }
+
+    /// Desistir ANTES do primeiro lote não pode custar um lote.
+    ///
+    /// A fase que lê os retratos para a cópia de segurança é uma ida e volta
+    /// por chave — num prefixo grande, um bom tempo. O clique cai aí dentro,
+    /// e o laço de `UNLINK` só conferia a bandeira DEPOIS de um lote: as 500
+    /// primeiras iam embora de qualquer jeito, porque "para depois do lote
+    /// corrente" valia ao pé da letra num momento em que não havia lote
+    /// corrente nenhum.
+    #[tokio::test]
+    async fn cancelling_before_the_first_batch_deletes_nothing() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:desistir_antes:";
+
+        let quantas = crate::core::bulk::UNLINK_BATCH + 100;
+        let chaves = seed_bulk(&mut conn, prefixo, quantas).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let id = enumerate_exactly(&state, &host_id, prefixo, quantas as u64).await;
+
+        // Com cópia embutida, de propósito: é a fase dos retratos que dá à
+        // desistência a janela para chegar antes do primeiro `UNLINK`.
+        let apagar = delete_prefix(&state, &id, BackupRequest::Inline, None, |_| {});
+
+        // A bandeira entra no mapa antes da primeira ida ao servidor, então
+        // este laço a encontra durante a leitura dos retratos. O teto existe
+        // só para o teste falhar em vez de travar se isso deixar de valer.
+        let desistir = async {
+            for _ in 0..100_000 {
+                if cancel_delete(&state, &id) {
+                    return true;
+                }
+                tokio::task::yield_now().await;
+            }
+            false
+        };
+
+        let (outcome, desistiu) = tokio::join!(apagar, desistir);
+        assert!(
+            desistiu,
+            "a bandeira precisa estar no mapa enquanto os retratos são lidos"
+        );
+
+        let WriteOutcome::Deleted {
+            deleted,
+            enumerated,
+            ..
+        } = outcome.unwrap()
+        else {
+            panic!("desistir não é falhar")
+        };
+        assert_eq!(
+            (deleted, enumerated),
+            (0, quantas as u64),
+            "nenhum lote tinha começado quando a desistência chegou"
+        );
+
+        for chave in &chaves {
+            assert!(
+                still_there(&mut conn, chave).await,
+                "{chave} não podia ter saído"
+            );
+            del(&mut conn, chave).await;
+        }
+    }
+
+    /// Desconectar esquece as contagens daquele host — e manda parar o que
+    /// estiver correndo nele.
+    ///
+    /// Mesma razão de a árvore ser esquecida: o que ficou para trás descreve
+    /// um host que a pessoa já deixou. E uma contagem pode segurar 100.000
+    /// nomes; vazá-la por (host, banco) a cada desconexão é memória que só
+    /// cresce.
+    #[tokio::test]
+    async fn disconnecting_forgets_the_enumerations_of_that_host() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:desconectar:";
+        let chaves = seed_bulk(&mut conn, prefixo, 3).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let id = enumerate_exactly(&state, &host_id, prefixo, 3).await;
+
+        disconnect(&state, &host_id).unwrap();
+
+        let erro = delete_prefix(&state, &id, BackupRequest::None, None, |_| {})
+            .await
+            .unwrap_err();
+        assert_eq!(
+            erro.kind(),
+            "unknown_enumeration",
+            "um diálogo deixado aberto na desconexão não pode ser confirmado depois, veio {erro:?}"
+        );
+
+        for chave in &chaves {
+            assert!(
+                still_there(&mut conn, chave).await,
+                "{chave} não podia ter saído"
+            );
+            del(&mut conn, chave).await;
+        }
+    }
+
+    /// Descadastrar o host também. A contagem dele não serve mais a ninguém,
+    /// e é o maior pedaço de memória que a fachada guarda por host.
+    #[tokio::test]
+    async fn removing_a_host_forgets_its_enumerations() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:descadastrar:";
+        let chaves = seed_bulk(&mut conn, prefixo, 3).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        enumerate_exactly(&state, &host_id, prefixo, 3).await;
+        assert_eq!(state.enumerations.lock().unwrap().len(), 1);
+
+        remove_host(&state, &host_id).unwrap();
+
+        assert!(
+            state.enumerations.lock().unwrap().is_empty(),
+            "a contagem de um host descadastrado é peso morto com até 100.000 nomes dentro"
+        );
+
+        for chave in &chaves {
+            del(&mut conn, chave).await;
+        }
+    }
+
+    /// O índice de busca falhar não desfaz uma exclusão que já aconteceu.
+    ///
+    /// As chaves já saíram e a entrada do histórico já as registra. Subir um
+    /// `Err` aqui mandaria para a tela um erro sobre uma operação que deu
+    /// certo, e com ele iriam embora `entry_id`, `deleted` e `enumerated` —
+    /// inclusive o id por onde o desfazer encontraria a cópia de segurança.
+    /// A falha do cache vai para o anel de log, onde se conserta com uma
+    /// revarredura.
+    #[tokio::test]
+    async fn a_broken_index_does_not_undo_a_delete_that_happened() {
+        let (_dir, state) = test_state();
+        let mut conn = raw_conn_db(BULK_TEST_DB).await;
+        let prefixo = "commands_rs_bulk:indice_quebrado:";
+        let chaves = seed_bulk(&mut conn, prefixo, 3).await;
+
+        let host_id = add_host(&state, host_spec(Env::Dev), None).unwrap();
+        let id = enumerate_exactly(&state, &host_id, prefixo, 3).await;
+
+        // O jeito honesto de fazer a limpeza do índice falhar: tirar a tabela
+        // de baixo dela. O histórico abre a sua própria conexão e não se
+        // importa.
+        state
+            .index
+            .with_conn(|conn| conn.execute("DROP TABLE key_index", []))
+            .unwrap();
+
+        let outcome = delete_prefix(&state, &id, BackupRequest::Inline, None, |_| {})
+            .await
+            .expect("a exclusão aconteceu: ela não pode voltar como erro");
+
+        let WriteOutcome::Deleted {
+            entry_id,
+            deleted,
+            enumerated,
+        } = outcome
+        else {
+            panic!("veio {outcome:?}")
+        };
+        assert_eq!((deleted, enumerated), (3, 3));
+        assert!(
+            state.history.get(entry_id).is_ok(),
+            "e o id por onde o desfazer acha a cópia precisa ser utilizável"
+        );
+
+        for chave in &chaves {
+            assert!(
+                !still_there(&mut conn, chave).await,
+                "{chave} saiu de verdade"
+            );
+        }
+
+        let linha = logs(&state)
+            .into_iter()
+            .find(|linha| linha.kind == LogKind::Failure && linha.operation == "delete_prefix")
+            .expect("a falha do cache não pode sumir só porque a operação deu certo");
+        assert!(
+            linha.detail.unwrap_or_default().contains("índice"),
+            "e a linha precisa dizer que o que falhou foi o índice, não a exclusão"
+        );
     }
 }

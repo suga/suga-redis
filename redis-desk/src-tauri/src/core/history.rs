@@ -2712,7 +2712,7 @@ mod tests {
         let keys = seed_keys(&mut conn, prefix, UNLINK_BATCH + 100).await;
 
         let (_dir, history) = open_history();
-        let cancel = AtomicBool::new(true);
+        let cancel = AtomicBool::new(false);
         let prefixes = vec![prefix.to_string()];
 
         let outcome = history
@@ -2727,7 +2727,16 @@ mod tests {
                     backup: BackupChoice::None,
                     cancel: &cancel,
                 },
-                |_| {},
+                // A desistência chega com o primeiro lote já no chão. Nascer
+                // marcada não serviria: desde que `unlink_em_lotes` confere a
+                // bandeira também no TOPO do laço, isso não apagaria nada, e
+                // um parcial de zero não distingue a linha corrigida com a
+                // verdade da linha que nasce em zero e nunca é corrigida.
+                |saidas| {
+                    if saidas >= UNLINK_BATCH as u64 {
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                },
             )
             .await
             .unwrap();
