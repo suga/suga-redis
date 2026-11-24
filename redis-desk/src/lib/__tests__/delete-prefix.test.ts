@@ -8,6 +8,10 @@
  * função — um diálogo que engana não falha alto, devolve uma decisão errada
  * com toda a confiança.
  */
+// O peso do aviso de tipo sem volta é conferido na fonte (ver o último teste).
+// @ts-expect-error type error without @types/node package
+import { readFileSync } from "node:fs";
+
 import { render, screen } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
@@ -32,10 +36,14 @@ function hostDe(partes: Partial<Host> = {}): Host {
 function enumeracaoDe(partes: Partial<EnumerationHandle> = {}): EnumerationHandle {
 	return {
 		id: "enum-1",
+		// Os três números não se derivam um do outro de propósito: `count`
+		// não é a soma de `kinds`, e `unrestorable` não é o balde de `set`.
+		// Uma implementação que somasse os baldes em vez de ler o campo
+		// desenharia outros dígitos, e o teste morderia.
 		count: 12_345,
 		kinds: [
-			["string", 12_000],
-			["set", 345],
+			["string", 9_001],
+			["set", 211],
 		],
 		truncated: false,
 		unrestorable: 0,
@@ -113,14 +121,16 @@ test("desmarcar a cópia troca o texto do botão e acende o irreversível", asyn
 });
 
 test("avisa quantas são de tipo sem volta atrás, mesmo com a cópia marcada", () => {
-	montar({ host: DEV, enumeracao: enumeracaoDe({ unrestorable: 345 }) });
+	montar({ host: DEV, enumeracao: enumeracaoDe({ unrestorable: 337 }) });
 
 	// Com a cópia marcada — é justamente o caso em que a pessoa se acha
 	// coberta e não está.
 	expect(screen.getByLabelText("Guardar uma cópia no histórico antes de apagar")).toBeChecked();
 
 	const aviso = screen.getByText(/não recria/);
-	expect(aviso).toHaveTextContent("345");
+	// 337, o campo — não 211, o balde de `set` que está em `kinds`.
+	expect(aviso).toHaveTextContent("337");
+	expect(aviso).not.toHaveTextContent("211");
 	expect(aviso).toHaveTextContent("nem com a cópia");
 });
 
@@ -172,8 +182,10 @@ test("acima do teto oferece gravar em arquivo e não oferece a cópia embutida",
 
 	expect(screen.getByLabelText("Gravar uma cópia em arquivo antes de apagar")).toBeChecked();
 	expect(screen.queryByLabelText("Guardar uma cópia no histórico antes de apagar")).toBeNull();
-	// E diz por quê: a varredura parou no teto, então são mais que isso.
-	expect(screen.getByRole("dialog")).toHaveTextContent("100.000");
+	// E diz por quê, com uma frase da própria ressalva: "100.000" sozinho
+	// já viria da contagem e do rótulo do botão, e passaria mesmo se a
+	// ressalva inteira sumisse da tela.
+	expect(screen.getByText(/parou no teto/)).toBeInTheDocument();
 
 	await user.click(screen.getByRole("button", { name: "Apagar 100.000 chaves" }));
 	expect(onConfirmar).toHaveBeenCalledWith("file", null);
@@ -239,4 +251,22 @@ test("o foco começa em Cancelar e Escape cancela", async () => {
 
 	await user.keyboard("{Escape}");
 	expect(onCancelar).toHaveBeenCalledOnce();
+});
+
+test("o aviso de tipo sem volta tem o mesmo peso do irreversível", () => {
+	// O vitest não aplica o CSS do componente — `getComputedStyle` aqui não
+	// enxerga a regra —, então ela é conferida na fonte. A frase que
+	// CONTRADIZ o que a pessoa acredita (a cópia está marcada e estas chaves
+	// não voltam assim mesmo) não pode ser mais apagada que a que só
+	// confirma uma escolha que ela acabou de fazer.
+	const fonte = readFileSync("src/lib/DeletePrefixDialog.svelte", "utf8");
+	const regra = /\.sem-volta,\s*\n\s*\.irreversivel\s*\{/.exec(fonte);
+	expect(regra).not.toBeNull();
+
+	const corpo = fonte.slice(regra!.index, fonte.indexOf("}", regra!.index));
+	expect(corpo).toMatch(/font-weight: 600/);
+	expect(corpo).toMatch(/border-left/);
+	// E o degrau é peso e traço, nunca a cor do ambiente nem caixa alta.
+	expect(corpo).not.toMatch(/--prod/);
+	expect(corpo).not.toMatch(/uppercase/);
 });

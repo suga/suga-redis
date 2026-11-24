@@ -187,7 +187,7 @@
 			{/if}
 
 			{#if enumeracao.unrestorable > 0}
-				<p class="aviso">{textoSemVolta}</p>
+				<p class="sem-volta">{textoSemVolta}</p>
 			{/if}
 
 			<label class="copia">
@@ -332,6 +332,7 @@
 	}
 
 	.aviso,
+	.sem-volta,
 	.irreversivel,
 	.dica,
 	.andamento {
@@ -340,12 +341,30 @@
 		font-size: 0.9rem;
 	}
 
-	/* O irreversível se distingue por peso e por um traço ao lado, não por
-	   cor, pela mesma razão. */
+	/* O teto é uma ressalva sobre o alcance do número logo acima — texto de
+	   corpo, no tamanho do resto: nem sussurro nem grito. */
+	.aviso {
+		color: var(--text);
+		font-size: 1rem;
+	}
+
+	/* Os dois avisos que contam uma consequência ficam no degrau mais alto,
+	   e se distinguem por PESO E UM TRAÇO AO LADO, nunca por cor: o vermelho
+	   `--prod` significa só o ambiente, e emprestá-lo aqui deixaria o
+	   carimbo ambíguo. Caixa alta, pelo mesmo motivo, também não.
+
+	   `.sem-volta` precisa deste degrau mais que qualquer outra frase da
+	   tela: ela é a única que CONTRADIZ o que a pessoa acredita — a cópia
+	   está marcada, ela se acha coberta, e estas chaves não voltam mesmo
+	   assim. O irreversível, ao lado, só confirma uma escolha que ela
+	   acabou de fazer. Deixar a que contradiz mais apagada que a que
+	   confirma era a ênfase ao contrário. */
+	.sem-volta,
 	.irreversivel {
 		padding-left: 0.6rem;
 		border-left: 2px solid var(--text-dim);
 		color: var(--text);
+		font-size: 1rem;
 		font-weight: 600;
 	}
 
