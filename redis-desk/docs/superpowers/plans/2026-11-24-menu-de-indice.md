@@ -33,7 +33,7 @@ Classes de entrada que o desenho implica e que o caminho feliz não exercita. Ca
 2. **Nome degenerado.** Chave `:`, chave terminada em `:`, `::` no meio, chave vazia. A enumeração não pode perder nenhuma nem inventar prefixo. Pinado na Tarefa 1.
 3. **Chave que expira sozinha entre enumerar e apagar.** O `UNLINK` devolve menos que o pedido; a contagem gravada é a real, não a pedida. Pinado na Tarefa 2.
 4. **Valor binário no retrato.** `Bytes` carrega `base64`; uma cópia que estraga byte não-UTF8 restaura lixo. Pinado na Tarefa 4.
-5. **Conexão cai no meio do apagar.** O que saiu, saiu: a entrada de histórico registra o apagado de verdade e o erro sobe. Pinado na Tarefa 6.
+5. **Conexão cai no meio do apagar.** O que saiu, saiu: o erro carrega o parcial e a entrada de histórico registra o apagado de verdade. Pinado na Tarefa 2 (a falha), reforçado na Tarefa 6 (a entrada).
 
 ---
 
@@ -135,6 +135,10 @@ git commit -m "feat: enumerate every key under one or more prefixes"
 ```rust
 pub const UNLINK_BATCH: usize = 500;
 
+/// Erro que CARREGA o parcial: o que já saiu, saiu, e quem grava o
+/// histórico precisa do número de verdade mesmo quando a conexão morre.
+pub struct BulkError { pub deleted: u64, pub source: ConnError }
+
 /// Devolve quantas chaves o servidor disse ter apagado — que pode ser
 /// menos que `keys.len()` se alguma expirou sozinha no caminho.
 pub async fn unlink_keys(
@@ -143,7 +147,16 @@ pub async fn unlink_keys(
     keys: &[String],
     cancel: &AtomicBool,
     progress: impl Fn(u64),
-) -> Result<u64, ConnError>;
+) -> Result<u64, BulkError>;
+
+/// O laço de lotes, sem Redis: o `apagar` é a costura. `unlink_keys` passa
+/// o pipeline de `UNLINK`; os testes passam um fechamento. É o que torna
+/// o lote e a falha no meio testáveis sem contêiner e sem 1200 chaves.
+pub(crate) async fn unlink_em_lotes<F, Fut>(
+    keys: &[String], lote: usize, cancel: &AtomicBool,
+    progress: impl Fn(u64), apagar: F,
+) -> Result<u64, BulkError>
+where F: Fn(&[String]) -> Fut, Fut: Future<Output = Result<u64, ConnError>>;
 ```
 
 - [ ] **Step 1: Escrever os testes que falham**
@@ -153,8 +166,13 @@ pub async fn unlink_keys(
 #[tokio::test] async fn leaves_the_rest_alone()          // apaga a:*, b:1 continua lá
 #[tokio::test] async fn counts_what_actually_went()      // Review Focus 3: uma chave da lista já não existe → devolve n-1
 #[tokio::test] async fn cancel_stops_and_reports()       // cancel marcado após o 1º lote → devolve o parcial, o resto continua no banco
-#[tokio::test] async fn batches_are_bounded()            // 1200 chaves com UNLINK_BATCH=500 → progress chamado 3 vezes
+#[tokio::test] async fn batches_are_bounded()            // 1200 nomes, lote 500 → o fechamento recebe 500, 500, 200
+#[tokio::test] async fn a_failed_batch_carries_the_partial()  // Review Focus 5: fechamento acerta o 1º lote e falha o 2º → BulkError.deleted == 500
 ```
+
+Os três últimos usam `unlink_em_lotes` com um fechamento, sem tocar no Redis:
+é a costura que torna lote e falha-no-meio testáveis. Os dois primeiros usam
+`unlink_keys` contra o contêiner.
 
 - [ ] **Step 2: Rodar e ver falhar**
 
@@ -163,7 +181,7 @@ Expected: FAIL — `cannot find function unlink_keys`
 
 - [ ] **Step 3: Implementar `unlink_keys`**
 
-`UNLINK` (não `DEL`: `DEL` libera a memória na mesma linha de execução e um lote de valores grandes prende o servidor) em lotes de `UNLINK_BATCH` por `pipeline`, somando o que cada lote devolve. Confere `cancel` **entre** lotes, nunca dentro: o lote corrente termina.
+`unlink_em_lotes` fatia, confere `cancel` **entre** lotes (nunca dentro: o lote corrente termina), soma o que o fechamento devolve, e em erro devolve `BulkError` com a soma até ali. `unlink_keys` passa um fechamento que manda `UNLINK` por `pipeline` — não `DEL`: `DEL` libera a memória na mesma linha de execução e um lote de valores grandes prende o servidor.
 
 - [ ] **Step 4: Rodar e ver passar**
 
@@ -297,6 +315,10 @@ impl History {
 
 O nome do arquivo é `AAAA-MM-DD-hhmmss-<host>-db<N>-<prefixo>.json`, com o prefixo saneado para nome de arquivo.
 
+Como na Tarefa 1, o teto entra por parâmetro numa função interna
+(`delete_prefix_com_teto(.., teto_bytes: usize)`) e a pública chama com
+`MAX_BACKUP_BYTES` — senão o teste do teto teria que criar 64 MiB de valor.
+
 - [ ] **Step 2: Rodar e ver falhar**
 
 Run: `cd src-tauri && cargo test core::history::tests::inline_backup`
@@ -304,7 +326,7 @@ Expected: FAIL — `no method named delete_prefix_with_backup`
 
 - [ ] **Step 3: Implementar `delete_prefix_with_backup`**
 
-Ordem que o teste do teto exige: lê os retratos → **confere o teto** → grava a linha → `bulk::unlink_keys` → atualiza a linha com o `deleted` real. Se o `unlink` falhar inteiro, a linha recém-gravada é removida, como `write_with_backup` já faz. `BackupChoice::None` pula a leitura dos retratos — é o que torna o caminho sem cópia rápido.
+`BulkError` do `unlink` é gravado antes de subir: a linha fica com o `deleted` parcial, e só então o erro propaga. Ordem que o teste do teto exige: lê os retratos → **confere o teto** → grava a linha → `bulk::unlink_keys` → atualiza a linha com o `deleted` real. Se o `unlink` falhar inteiro, a linha recém-gravada é removida, como `write_with_backup` já faz. `BackupChoice::None` pula a leitura dos retratos — é o que torna o caminho sem cópia rápido.
 
 - [ ] **Step 4: Rodar e ver passar**
 
@@ -668,6 +690,7 @@ it("escolher o item do menu chama enumeratePrefix e abre o diálogo")
 it("confirmar chama deletePrefix com a escolha de cópia")
 it("needs_confirmation reabre o diálogo pedindo o nome digitado")
 it("uma falha ao enumerar aparece na tela, não vira banco vazio")
+it("BackupTooLarge reabre o diálogo oferecendo gravar em arquivo")
 it("terminado o apagar, a árvore é relida")
 it("o menu de prefixo traz Apagar tudo e Copiar prefixo, e nada cinza")
 it("Copiar prefixo põe o prefixo na área de transferência")
