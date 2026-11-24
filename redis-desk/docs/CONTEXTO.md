@@ -110,12 +110,17 @@ colidir ao escrever novos:
 | 12 | `approval` |
 | 13 | `core::bulk`, os testes de exclusão em massa de `commands.rs`, e os de conectar/desconectar de `core::conn` e `commands.rs` |
 | 14 | os testes de exclusão em massa de `core::history` |
-| 15 | medições descartáveis |
+| 15 | **de ninguém** — reservado por convenção para medições descartáveis |
 
 **O 13 é o banco mais povoado, e isso impõe uma disciplina:** quem escrever
 teste nele dá a cada caso um prefixo de chave só dele, não enumera o banco
 inteiro e **não confere `DBSIZE`** — a contagem do banco é de todo mundo. O que
 prova que uma exclusão não aconteceu é a própria chave continuar lá.
+
+**O 15 é a única linha da tabela que não sai do código de um teste.** Nenhum
+teste o toma; a única menção é um comentário em `commands.rs` que o dá por
+tomado, e nada o corrobora. Está reservado por costume, não por uso — quem
+precisar de um banco confira esta linha no código antes de confiar nela.
 
 ## O que mudou depois de 2026-11-05
 
@@ -161,6 +166,7 @@ dele**, então um idioma que esquece uma chave não compila.
 ```
 src-tauri/src/
   core/          núcleo, independente do Tauri
+    mod.rs       só declara os módulos; `sqlite` é privado ao núcleo
     config.rs    hosts; senha no chaveiro do SO, nunca em arquivo
     conn.rs      pool por (host, banco); classificação de erro
     keys.rs      varredura, trie de prefixos, paginação de galho
@@ -169,6 +175,7 @@ src-tauri/src/
     index.rs     índice FTS5 (trigram) para busca em VALORES
     search.rs    busca; nome ao vivo + valor pelo índice
     history.rs   cópia de segurança, histórico, volta atrás
+    log.rs       anel de log em memória; nunca toca disco
     sqlite.rs    abertura compartilhada (WAL + busy_timeout)
   commands.rs    fachada Tauri; AQUI mora a trava de produção
   approval/      trava de escrita da LLM (socket unix)
@@ -195,20 +202,30 @@ Duas regras seguidas de ponta a ponta:
   é `scripts/test-redis.sh`, contra o contêiner de teste.
 - **Apagar em massa é sempre enumerar e apagar o enumerado**, nunca `FLUSHDB`
   — inclusive quando o alvo são todos os prefixos de primeiro nível, que no
-  efeito esvazia o banco. **A contagem mostrada é a contagem apagada**: apaga-se
-  a lista que o diálogo exibiu, não o que o prefixo tiver no instante de
-  apagar. A diferença entre os dois caminhos não é cosmética — o enumerado tem
-  contagem conferida, cópia de segurança, linha de histórico e volta atrás, e o
-  `FLUSHDB` não tem nenhum dos quatro.
+  efeito esvazia o banco. **Apaga-se a lista que o diálogo exibiu**, não o que o
+  prefixo tiver no instante de apagar: chave criada no meio não é apagada,
+  chave que sumiu sozinha já estava fora. O número que a linha de histórico
+  guarda é **o que de fato saiu** (`deleted`), ao lado do que foi enumerado
+  (`enumerated`) — os dois diferem quando uma chave expira ou some entre a
+  contagem e a exclusão, e quando o "desistir" interrompe a exclusão no meio do
+  caminho. A linha não pode prometer de volta uma chave que já não existia
+  (`core/history.rs`, `delete_prefix_with_backup`). A diferença entre os dois
+  caminhos não é cosmética — o enumerado tem contagem conferida, cópia de
+  segurança, linha de histórico e volta atrás, e o `FLUSHDB` não tem nenhum dos
+  quatro.
 - **Escrita em host `prod` exige confirmação**, decidida em `commands.rs`
   (não na tela — um botão pode esquecer de perguntar).
 - **Escrita pedida pela LLM exige o dono digitar o nome do host**,
   exatamente, em qualquer ambiente. Sem app aberto não há socket e a escrita
   não acontece. Isso vale por construção.
 - **Exclusão em massa em host `prod` também exige o nome do host digitado**,
-  byte a byte — sem aparar espaço e sem ignorar caixa, como o Rust compara
-  (`DeletePrefixDialog.svelte`, `liberado`). É uma **divergência deliberada**,
-  não uma inconsistência a corrigir: o `ConfirmDialog.svelte` diz em comentário
+  byte a byte — sem aparar espaço e sem ignorar caixa. Quem **decide** é
+  `commands.rs` (`delete_prefix` compara `typed_host_name` com `host.name` e
+  passa o resultado ao mesmo `needs_confirmation` do `write_value`), pela razão
+  que a invariante do `prod` acima já dá: um botão pode esquecer de perguntar.
+  Na tela, `DeletePrefixDialog.svelte` só **espelha** a regra em `liberado`,
+  para o botão não acender antes da hora. É uma **divergência deliberada**, não
+  uma inconsistência a corrigir: o `ConfirmDialog.svelte` diz em comentário
   que a decisão do produto é "que a pessoa seja avisada, não que seja obrigada
   a datilografar", e essa decisão continua valendo para o que ela governa —
   **uma** escrita, em **uma** chave, com cópia automática e volta atrás a um
@@ -294,7 +311,10 @@ texto. O validador em `src/lib/json.ts` usa o `JSON.parse` só para o
 - **Um `$derived` se recalcula na hora em que é lido.** Mexer no que ele lê,
   no meio de um laço que indexa o resultado dele, move o chão: a lista se
   refaz menor debaixo de índices contados na lista maior. Em `KeyTree.svelte`
-  a lista achatada `linhas` depende da seleção, e limpar a seleção antes de
+  a lista achatada `linhas` depende da seleção **quando há filtro digitado** —
+  só aí ela lê `guardamMarca`, para segurar na tela a marca que o filtro não
+  casa; sem filtro não depende, e é por isso que o defeito era intermitente e
+  não se reproduz sem digitar no filtro. Limpar a seleção antes de
   percorrer custou duas coisas — um `TypeError` saindo do manipulador de
   clique no `Shift+clique` (`atuais[i]` virava `undefined`) e, pior porque
   ninguém reporta, um estreitamento calado no `⌘+A`, que marcava menos linhas
