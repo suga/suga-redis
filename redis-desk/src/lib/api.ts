@@ -149,14 +149,26 @@ export function textBytes(text: string): Bytes {
 }
 
 /**
+ * Uma chave que a volta atrás de uma exclusão em massa não conseguiu trazer
+ * de volta, com o motivo já em texto.
+ */
+export interface FailedKey {
+	key: string;
+	reason: string;
+}
+
+/**
  * O que aconteceu com um pedido de escrita. `needs_confirmation` significa
  * que NADA foi escrito: é produção e falta confirmar. A tela mostra o
  * diálogo com `summary` e, se a pessoa autorizar, repete a mesma chamada
- * com `confirmed: true`.
+ * com `confirmed: true`. `deleted` e `restored` são as duas pontas da
+ * exclusão em massa: uma exclusão que aconteceu, e a volta atrás dela.
  */
 export type WriteOutcome =
 	| { outcome: "applied"; entry_id: number }
-	| { outcome: "needs_confirmation"; summary: string };
+	| { outcome: "needs_confirmation"; summary: string }
+	| { outcome: "deleted"; entry_id: number; deleted: number; enumerated: number }
+	| { outcome: "restored"; restored: number; failed: FailedKey[] };
 
 // -------------------------------------------------------------- histórico
 
@@ -374,6 +386,84 @@ export function onTreeProgress(
 	handler: (retrato: TreeProgress) => void,
 ): Promise<UnlistenFn> {
 	return listen<TreeProgress>("tree://progress", (event) => handler(event.payload));
+}
+
+// --------------------------------------------------- exclusão em massa
+
+/**
+ * O resumo de uma enumeração de prefixo — e só o resumo. A lista de nomes
+ * fica no Rust; só a contagem e os tipos atravessam a fronteira.
+ */
+export interface EnumerationHandle {
+	id: string;
+	count: number;
+	kinds: [KeyKind, number][];
+	/** A varredura bateu no teto de 100.000 chaves antes de terminar. */
+	truncated: boolean;
+	/** Quantas são de tipo sem volta atrás (set, stream, RedisJSON). */
+	unrestorable: number;
+}
+
+/** O que a pessoa escolheu no diálogo sobre a cópia de segurança. */
+export type BackupRequest = "inline" | "file" | "none";
+
+/**
+ * Varre um ou mais prefixos e guarda os nomes achados, sem apagar nada
+ * ainda. Acompanhe o andamento com `onBulkScanProgress`.
+ *
+ * Só existe UMA enumeração por par (host, banco): chamar de novo para o
+ * mesmo par descarta a anterior — por isso só um diálogo de exclusão em
+ * massa pode estar aberto por banco de cada vez.
+ */
+export function enumeratePrefix(
+	hostId: string,
+	db: number,
+	prefixes: string[],
+): Promise<EnumerationHandle> {
+	return invoke("cmd_enumerate_prefix", { hostId, db, prefixes });
+}
+
+/**
+ * Apaga as chaves de uma enumeração já feita. Em host de produção,
+ * `typedHostName` precisa ser exatamente o nome do host — fora de
+ * produção ele é ignorado. Acompanhe o andamento com
+ * `onBulkDeleteProgress`.
+ *
+ * Uma recusa (`needs_confirmation`) NÃO consome a enumeração: o mesmo
+ * `enumerationId` continua válido, e a tela repete a chamada com o nome
+ * digitado em vez de varrer tudo de novo.
+ */
+export function deletePrefix(
+	enumerationId: string,
+	backup: BackupRequest,
+	typedHostName: string | null,
+): Promise<WriteOutcome> {
+	return invoke("cmd_delete_prefix", { enumerationId, backup, typedHostName });
+}
+
+/**
+ * Pede para parar uma exclusão em massa em andamento. `false` não é falha:
+ * pode ser que a exclusão já tenha acabado antes de o clique chegar.
+ */
+export function cancelDelete(enumerationId: string): Promise<boolean> {
+	return invoke("cmd_cancel_delete", { enumerationId });
+}
+
+/** Acompanha a varredura de uma enumeração. Chame o retorno para parar. */
+export function onBulkScanProgress(
+	handler: (tick: ScanTick) => void,
+): Promise<UnlistenFn> {
+	return listen<ScanTick>("bulk://scan-progress", (event) => handler(event.payload));
+}
+
+/**
+ * Acompanha a exclusão em massa já confirmada: quantas chaves já saíram.
+ * Chame o retorno para parar.
+ */
+export function onBulkDeleteProgress(
+	handler: (deleted: number) => void,
+): Promise<UnlistenFn> {
+	return listen<number>("bulk://delete-progress", (event) => handler(event.payload));
 }
 
 /** Refaz o índice de busca. Acompanhe o andamento com `onRescanProgress`. */
