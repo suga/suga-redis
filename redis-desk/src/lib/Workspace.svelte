@@ -619,6 +619,14 @@
 			}
 			if (resultado.outcome === "deleted") {
 				apagar = null;
+				// A frase que estava na tela descrevia uma exclusão EM CURSO —
+				// tipicamente "a exclusão continua correndo", de um pedido de
+				// parada que não chegou. Ela acabou de parar de ser verdade, e
+				// o modal que a escondia saiu junto: deixá-la aqui faria a tela
+				// dizer, lado a lado, que as chaves saíram e que ainda estão
+				// saindo. Zerada ANTES de `depoisDeApagar`, que pode pôr no
+				// mesmo lugar uma falha nova e legítima.
+				erroApagar = "";
 				avisoApagar = resumoDoApagado(resultado.deleted, resultado.enumerated);
 				depoisDeApagar(atual.prefixos);
 				return;

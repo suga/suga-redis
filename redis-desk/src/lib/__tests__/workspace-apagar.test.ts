@@ -735,3 +735,32 @@ test("um desfecho que esta tela não conhece fecha o diálogo em vez de travá-l
 
 	await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });
+
+test("o desfecho apaga a frase da desistência que não vale mais", async () => {
+	const user = userEvent.setup();
+	let concluir!: (saida: WriteOutcome) => void;
+	apagou.mockImplementation(
+		() => new Promise<WriteOutcome>((resolve) => (concluir = resolve)),
+	);
+	desistiu.mockRejectedValue({
+		kind: "unreachable",
+		message: "o pedido de parada não chegou",
+	});
+	await montar();
+	await pedirApagarPrefixo();
+
+	const dialogo = await screen.findByRole("dialog");
+	await user.click(within(dialogo).getByRole("button", { name: "Apagar 1.200 chaves" }));
+	await user.keyboard("{Escape}");
+	expect(await screen.findByTestId("erro-apagar")).toHaveTextContent(/continua correndo/i);
+
+	// A exclusão termina normalmente: o que não chegou foi o pedido de
+	// parada, e nada obriga o apagar a falhar junto.
+	concluir({ outcome: "deleted", entry_id: 9, deleted: 1_200, enumerated: 1_200 });
+
+	expect(await screen.findByTestId("aviso-apagar")).toHaveTextContent("1.200");
+	// A frase descrevia uma exclusão em curso, e agora o modal que a
+	// escondia saiu. Deixá-la faria a tela afirmar, lado a lado, que as
+	// chaves saíram e que ainda estão saindo.
+	expect(screen.queryByTestId("erro-apagar")).toBeNull();
+});

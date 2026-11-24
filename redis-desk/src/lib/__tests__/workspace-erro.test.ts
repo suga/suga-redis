@@ -4,7 +4,11 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 // Mesmo mínimo de mock que `workspace-conn.test.ts`: `Workspace` monta
 // `KeyTree` de qualquer jeito, então o mock cobre tudo que ele chama também.
-vi.mock("$lib/api", () => ({
+vi.mock("$lib/api", async (importOriginal) => ({
+	// Do módulo real, e não um número repetido aqui: um mock literal que
+	// esquece um export novo mata o primeiro teste que montar o diálogo,
+	// com uma mensagem que não tem nada a ver com o que ele testava.
+	MAX_BACKUP_BYTES: (await importOriginal<typeof import("$lib/api")>()).MAX_BACKUP_BYTES,
 	errorMessage: (err: unknown) => String(err),
 	textBytes: (text: string) => ({ text, base64: null, truncated: false }),
 	isApiError: (err: unknown) =>
