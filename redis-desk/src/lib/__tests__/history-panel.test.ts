@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/svelte";
+import { render, screen, waitFor, within } from "@testing-library/svelte";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 
@@ -9,7 +9,7 @@ vi.mock("$lib/api", async (importOriginal) => {
 
 import { listHistory, rollback } from "$lib/api";
 import HistoryPanel from "$lib/HistoryPanel.svelte";
-import type { HistoryEntry } from "$lib/api";
+import type { HistoryEntry, WriteOp } from "$lib/api";
 
 const listou = vi.mocked(listHistory);
 const desfez = vi.mocked(rollback);
@@ -111,4 +111,89 @@ test("histórico vazio convida a fazer a primeira mudança", async () => {
 	expect(await screen.findByTestId("vazio")).toHaveTextContent(
 		"Nenhuma mudança ainda",
 	);
+});
+
+// ------------------------------------------------- a exclusão em massa
+
+/** A operação que o Rust grava numa exclusão em massa. */
+function apagouPrefixo(
+	backup: { backup: "inline" } | { backup: "file"; path: string } | { backup: "none" },
+): WriteOp {
+	return {
+		op: "delete_prefix",
+		prefixes: ["sessao:"],
+		deleted: 1_200,
+		enumerated: 1_200,
+		backup,
+	};
+}
+
+test("a entrada sem cópia não oferece voltar atrás e diz por quê", async () => {
+	listou.mockResolvedValue([
+		entrada({
+			id: 7,
+			key: "sessao:",
+			op: apagouPrefixo({ backup: "none" }),
+			before_json: null,
+			after_json: null,
+		}),
+	]);
+	montar();
+
+	const linha = (await screen.findAllByTestId("entrada"))[0];
+	// O botão não fica cinza esperando: ele não está lá. Um botão
+	// desabilitado promete que um dia acende, e este nunca acende.
+	expect(within(linha).queryByRole("button", { name: "Voltar atrás" })).toBeNull();
+	expect(within(linha).getByTestId("sem-volta")).toHaveTextContent(/sem cópia/i);
+});
+
+test("a entrada COM cópia continua oferecendo voltar atrás", async () => {
+	listou.mockResolvedValue([
+		entrada({ id: 8, key: "sessao:", op: apagouPrefixo({ backup: "inline" }) }),
+	]);
+	montar();
+
+	const linha = (await screen.findAllByTestId("entrada"))[0];
+	expect(within(linha).getByRole("button", { name: "Voltar atrás" })).toBeEnabled();
+	expect(within(linha).queryByTestId("sem-volta")).toBeNull();
+});
+
+test("uma volta atrás parcial mostra quais chaves não voltaram", async () => {
+	const user = userEvent.setup();
+	listou.mockResolvedValue([
+		entrada({ id: 9, key: "sessao:", op: apagouPrefixo({ backup: "inline" }) }),
+	]);
+	desfez.mockResolvedValue({
+		outcome: "restored",
+		restored: 1_198,
+		failed: [
+			{ key: "sessao:alpha", reason: "a chave mudou de tipo desde a cópia" },
+			{ key: "sessao:beta", reason: "a chave já existia de novo" },
+		],
+	});
+	montar();
+
+	await user.click(await screen.findByRole("button", { name: "Voltar atrás" }));
+
+	// "Pronto" esconderia o que ficou para trás. Os números E os nomes: sem
+	// os nomes não há como ir conferir as duas que faltaram.
+	const parcial = await screen.findByTestId("volta-parcial");
+	expect(parcial).toHaveTextContent("1.198");
+	expect(parcial).toHaveTextContent("sessao:alpha");
+	expect(parcial).toHaveTextContent("sessao:beta");
+	expect(parcial).toHaveTextContent("a chave mudou de tipo desde a cópia");
+});
+
+test("uma volta atrás inteira não inventa aviso de parcial", async () => {
+	const user = userEvent.setup();
+	listou.mockResolvedValue([
+		entrada({ id: 10, key: "sessao:", op: apagouPrefixo({ backup: "inline" }) }),
+	]);
+	desfez.mockResolvedValue({ outcome: "restored", restored: 1_200, failed: [] });
+	montar();
+
+	await user.click(await screen.findByRole("button", { name: "Voltar atrás" }));
+
+	await waitFor(() => expect(desfez).toHaveBeenCalled());
+	expect(screen.queryByTestId("volta-parcial")).toBeNull();
 });

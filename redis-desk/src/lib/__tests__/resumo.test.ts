@@ -68,6 +68,41 @@ describe("resumo da operação", () => {
 		);
 	});
 
+	test("uma exclusão em massa diz o prefixo e a contagem", () => {
+		const op: WriteOp = {
+			op: "delete_prefix",
+			prefixes: ["sessao:"],
+			deleted: 1_200,
+			enumerated: 1_200,
+			backup: { backup: "inline" },
+		};
+
+		// `deleted`, o que saiu de verdade — não `enumerated`, que é o que a
+		// varredura prometeu antes de alguém poder desistir no meio.
+		expect(resumoDaOperacao("sessao:", op)).toBe(
+			"Apagar 1.200 chaves sob “sessao:”",
+		);
+
+		definirIdioma("en");
+		expect(resumoDaOperacao("sessao:", { ...op, deleted: 1 })).toBe(
+			"Delete 1 key under “sessao:”",
+		);
+	});
+
+	test("vários prefixos de uma vez não fingem ser um só", () => {
+		const op: WriteOp = {
+			op: "delete_prefix",
+			prefixes: ["sessao:", "pedido:", "carrinho:"],
+			deleted: 90,
+			enumerated: 90,
+			backup: { backup: "none" },
+		};
+
+		// Nomear só o primeiro faria a linha do histórico descrever menos do
+		// que de fato aconteceu.
+		expect(resumoDaOperacao("sessao:", op)).toBe("Apagar 90 chaves sob 3 prefixos");
+	});
+
 	test("membro binário não tem texto para mostrar, e a frase diz isso", () => {
 		definirIdioma("en");
 		const op: WriteOp = {

@@ -7,6 +7,8 @@ import { beforeEach, expect, test, vi } from "vitest";
 vi.mock("$lib/api", () => ({
 	errorMessage: (err: unknown) => String(err),
 	textBytes: (text: string) => ({ text, base64: null, truncated: false }),
+	isApiError: (err: unknown) =>
+		typeof err === "object" && err !== null && "kind" in err && "message" in err,
 	listDbs: vi.fn(async () => []),
 	onRescanProgress: vi.fn(async () => () => {}),
 	onTreeProgress: vi.fn(async () => () => {}),
@@ -16,6 +18,13 @@ vi.mock("$lib/api", () => ({
 	writeValue: vi.fn(),
 	treeLevel: vi.fn(async () => null),
 	loadMoreChildren: vi.fn(),
+	// O `Workspace` passou a assinar os dois andamentos da exclusão em
+	// massa na montagem; sem eles aqui, ele nem monta.
+	onBulkScanProgress: vi.fn(async () => () => {}),
+	onBulkDeleteProgress: vi.fn(async () => () => {}),
+	enumeratePrefix: vi.fn(),
+	deletePrefix: vi.fn(),
+	cancelDelete: vi.fn(async () => true),
 }));
 
 import { listDbs, rescan, scanStatus, scanTree } from "$lib/api";

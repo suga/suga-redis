@@ -145,6 +145,14 @@ impl CommandError {
             CommandError::Conn(ConnError::Protocol(_)) => "protocol",
             CommandError::Config(_) => "config",
             CommandError::Index(_) => "index",
+            // Aberta variante a variante pela mesma razão dos erros de
+            // conexão logo acima: a tela precisa distinguir ESTE erro do
+            // resto do histórico. Uma cópia que não coube no teto não é
+            // uma falha a mostrar e pronto — é uma escolha a refazer
+            // (gravar em arquivo, ou apagar sem cópia), e decidir isso
+            // lendo o texto da mensagem casaria a interface com a redação
+            // dela.
+            CommandError::History(HistoryError::BackupTooLarge { .. }) => "backup_too_large",
             CommandError::History(_) => "history",
             CommandError::UnknownHost(_) => "unknown_host",
             CommandError::UnknownEnumeration(_) => "unknown_enumeration",
@@ -1780,6 +1788,24 @@ mod tests {
     /// `DBSIZE` — o que prova que a exclusão não aconteceu é a própria
     /// chave continuar lá, não a contagem do banco, que é de todo mundo.
     const BULK_TEST_DB: u8 = 13;
+
+    /// Não precisa de Redis nem de 64 MiB de valor: o que está sendo
+    /// provado é o DISCRIMINANTE, e ele se lê do próprio erro.
+    #[test]
+    fn a_backup_that_did_not_fit_has_its_own_kind() {
+        let nao_coube = CommandError::History(HistoryError::BackupTooLarge { bytes: 70_000_000 });
+        assert_eq!(
+            nao_coube.kind(),
+            "backup_too_large",
+            "a tela reabre o diálogo oferecendo o arquivo só se conseguir \
+             distinguir este erro do resto do histórico, veio {nao_coube:?}"
+        );
+
+        // E o resto do histórico continua indistinto, como sempre foi: só
+        // este caso ganhou nome próprio, porque só ele vira uma escolha.
+        let qualquer_outro = CommandError::History(HistoryError::NotFound(7));
+        assert_eq!(qualquer_outro.kind(), "history");
+    }
 
     fn host_spec(env: Env) -> Host {
         Host {

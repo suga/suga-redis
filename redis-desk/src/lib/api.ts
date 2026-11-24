@@ -141,7 +141,28 @@ export type WriteOp =
 	| { op: "set_zset_member"; member: Bytes; score: number }
 	| { op: "remove_zset_member"; member: Bytes }
 	| { op: "set_ttl"; ttl_ms: number | null }
-	| { op: "delete_key" };
+	| { op: "delete_key" }
+	| {
+			op: "delete_prefix";
+			prefixes: string[];
+			/** Quantas saíram de VERDADE — desistir no meio faz isto ser menor. */
+			deleted: number;
+			/** Quantas a varredura tinha achado quando a pessoa confirmou. */
+			enumerated: number;
+			backup: BackupKind;
+	  };
+
+/**
+ * Onde (e se) a cópia de segurança de uma exclusão em massa ficou guardada.
+ *
+ * É por esta variante, e só por ela, que o histórico sabe se tem o que
+ * restaurar: uma entrada gravada com `none` não oferece volta atrás — não
+ * porque o botão esteja cinza, mas porque não existe nada para repor.
+ */
+export type BackupKind =
+	| { backup: "inline" }
+	| { backup: "file"; path: string }
+	| { backup: "none" };
 
 /** Atalho para montar um `Bytes` a partir de texto digitado na tela. */
 export function textBytes(text: string): Bytes {
@@ -285,7 +306,15 @@ export interface ApiError {
 		| "history"
 		| "unknown_host"
 		| "name_mismatch"
-		| "approval";
+		| "approval"
+		/** A contagem guardada venceu: é preciso enumerar de novo antes de apagar. */
+		| "unknown_enumeration"
+		/**
+		 * A cópia de segurança passou do teto de bytes e NENHUMA chave foi
+		 * apagada. Tem nome próprio porque a tela reage a ele refazendo a
+		 * escolha da cópia, não mostrando um erro — ver `Workspace`.
+		 */
+		| "backup_too_large";
 	message: string;
 }
 

@@ -15,6 +15,7 @@
 		errorMessage,
 		listHistory,
 		rollback,
+		type FailedKey,
 		type HistoryEntry,
 	} from "$lib/api";
 
@@ -38,6 +39,15 @@
 	);
 	let pendente = $state<{ id: number; summary: string } | null>(null);
 	let desfazendo = $state(false);
+	/**
+	 * A última volta atrás que não trouxe tudo de volta.
+	 *
+	 * Uma exclusão em massa repõe retrato a retrato, e um retrato pode
+	 * falhar sozinho — a chave voltou a existir no meio tempo, mudou de
+	 * tipo, expirou. Dizer só "pronto" esconderia exatamente o que ficou
+	 * para trás, que é a única parte que ainda pede ação de alguém.
+	 */
+	let parcial = $state<{ id: number; restored: number; failed: FailedKey[] } | null>(null);
 
 	async function carregar() {
 		carregando = true;
@@ -60,12 +70,16 @@
 	async function desfazer(id: number, confirmado: boolean) {
 		desfazendo = true;
 		erro = "";
+		parcial = null;
 		try {
 			const resultado = await rollback(id, confirmado);
 			if (resultado.outcome === "needs_confirmation") {
 				pendente = { id, summary: resultado.summary };
 			} else {
 				pendente = null;
+				if (resultado.outcome === "restored" && resultado.failed.length > 0) {
+					parcial = { id, restored: resultado.restored, failed: resultado.failed };
+				}
 				await carregar();
 				onRolledBack?.();
 			}
@@ -117,6 +131,19 @@
 	function quando(ms: number): string {
 		return new Date(ms).toLocaleString(idioma());
 	}
+
+	/**
+	 * Onde está a cópia de segurança de uma exclusão em massa — `null`
+	 * quando a entrada não é uma, e `{ backup: "none" }` quando é uma que
+	 * foi feita sem cópia.
+	 *
+	 * É esta variante, e só ela, que diz se há o que restaurar. A entrada
+	 * guarda `before_json` vazio nos dois casos de cópia em arquivo e sem
+	 * cópia, então olhar para ele confundiria os dois.
+	 */
+	function copiaDa(entrada: HistoryEntry) {
+		return entrada.op?.op === "delete_prefix" ? entrada.op.backup : null;
+	}
 </script>
 
 <section>
@@ -133,6 +160,7 @@
 	{:else}
 		<ul>
 			{#each entradas as entrada (entrada.id)}
+				{@const copia = copiaDa(entrada)}
 				<li data-testid="entrada" class:revertida={entrada.rolled_back}>
 					<div class="cabeca">
 						<span class="resumo">
@@ -142,6 +170,14 @@
 						</span>
 						{#if entrada.rolled_back}
 							<span class="marca">{t("historico.jaRevertida")}</span>
+						{:else if copia?.backup === "none"}
+							<!--
+								Nada de botão cinza aqui. Um botão desabilitado promete
+								que um dia acende, e este nunca acende: a cópia não
+								existe, e nenhuma espera vai criá-la. A frase ao lado
+								diz isso em vez de deixar a pessoa procurar o motivo.
+							-->
+							<span class="marca" data-testid="sem-volta">{t("historico.semCopia")}</span>
 						{:else}
 							<button
 								disabled={desfazendo}
@@ -151,6 +187,23 @@
 							</button>
 						{/if}
 					</div>
+
+					{#if copia?.backup === "file"}
+						<p class="copia mono">{t("historico.copiaEmArquivo", { caminho: copia.path })}</p>
+					{/if}
+
+					{#if parcial && parcial.id === entrada.id}
+						<div class="parcial" data-testid="volta-parcial" role="status">
+							<p class="parcial-linha">
+								{t("historico.voltouParcial", { n: numero(parcial.restored) })}
+							</p>
+							<ul class="faltaram" aria-label={t("historico.naoVoltaram")}>
+								{#each parcial.failed as falha (falha.key)}
+									<li><span class="mono">{falha.key}</span> — {falha.reason}</li>
+								{/each}
+							</ul>
+						</div>
+					{/if}
 
 					<div class="meta">
 						<span class="chave mono">{entrada.key}</span>
@@ -235,6 +288,37 @@
 		color: var(--text-faint);
 		font-size: 0.88rem;
 		white-space: nowrap;
+	}
+
+	/* O caminho do arquivo e o aviso de parcial são prosa de corpo, não
+	   sussurro: os dois dizem onde a pessoa precisa ir olhar em seguida. */
+	.copia {
+		margin: 0.3rem 0 0;
+		color: var(--text-dim);
+		font-size: 0.88rem;
+		word-break: break-all;
+	}
+
+	/* Mesmo degrau do aviso que contradiz uma crença no diálogo de apagar:
+	   peso e um traço ao lado, nunca cor — o vermelho `--prod` significa só
+	   o ambiente. Quem acabou de clicar em "Voltar atrás" acredita que
+	   voltou tudo, e esta é a frase que diz que não. */
+	.parcial {
+		margin-top: 0.45rem;
+		padding-left: 0.6rem;
+		border-left: 2px solid var(--text-dim);
+	}
+
+	.parcial-linha {
+		margin: 0;
+		font-weight: 600;
+	}
+
+	.faltaram {
+		margin: 0.25rem 0 0;
+		padding-left: 1.1rem;
+		color: var(--text-dim);
+		font-size: 0.88rem;
 	}
 
 	.meta {

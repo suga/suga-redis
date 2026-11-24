@@ -46,6 +46,19 @@
 		 * primeiro andamento chegar.
 		 */
 		apagados: number | null;
+		/**
+		 * Qual escolha de cópia o Rust acabou de recusar por tamanho, se
+		 * alguma. É a volta do `BackupTooLarge`, que não é uma falha a
+		 * mostrar e pronto: nenhuma chave foi apagada, e o que resta é
+		 * refazer a escolha com uma opção a menos.
+		 *
+		 * `"inline"` — a cópia no histórico não coube; sobra o arquivo.
+		 * `"file"` — nem em arquivo coube (o teto é em BYTES e vale para os
+		 * dois caminhos), e aí sobram duas saídas, apagar sem cópia ou
+		 * desistir. Oferecer o arquivo de novo seria oferecer o que acabou
+		 * de ser recusado, e apagar com uma cópia que não coube não é saída.
+		 */
+		copiaRecusada?: BackupRequest | null;
 		onConfirmar: (backup: BackupRequest, nomeDigitado: string | null) => void;
 		onCancelar: () => void;
 	}
@@ -57,6 +70,7 @@
 		enumeracao,
 		progresso,
 		apagados,
+		copiaRecusada = null,
 		onConfirmar,
 		onCancelar,
 	}: Props = $props();
@@ -74,13 +88,21 @@
 
 	/**
 	 * Acima do teto a cópia só pode ir para arquivo: 100.000 retratos dentro
-	 * de uma linha do histórico não é cópia, é outro banco.
+	 * de uma linha do histórico não é cópia, é outro banco. O mesmo vale
+	 * quando a embutida JÁ foi tentada e recusada por tamanho — poucas
+	 * chaves gordas passam do teto sem nunca encostar na contagem.
 	 */
-	let soEmArquivo = $derived(enumeracao?.truncated ?? false);
+	let soEmArquivo = $derived((enumeracao?.truncated ?? false) || copiaRecusada === "inline");
+
+	/** Nem em arquivo coube: não há cópia nenhuma a oferecer. */
+	let semCopiaPossivel = $derived(copiaRecusada === "file");
 
 	let backup = $derived<BackupRequest>(
-		!comCopia ? "none" : soEmArquivo ? "file" : "inline",
+		semCopiaPossivel || !comCopia ? "none" : soEmArquivo ? "file" : "inline",
 	);
+
+	/** O teto do Rust, em MB, para a frase dizer o número de verdade. */
+	const TETO_MB = 64;
 
 	/**
 	 * Byte a byte, como o Rust compara: sem aparar espaço e sem ignorar
@@ -108,7 +130,7 @@
 	let textoApagar = $derived.by(() => {
 		const n = enumeracao?.count ?? 0;
 		const uma = n === 1;
-		const chave = comCopia
+		const chave = comCopia && !semCopiaPossivel
 			? uma
 				? "apagarPrefixo.apagarUma"
 				: "apagarPrefixo.apagarVarias"
@@ -190,16 +212,26 @@
 				<p class="sem-volta">{textoSemVolta}</p>
 			{/if}
 
-			<label class="copia">
-				<input type="checkbox" bind:checked={comCopia} disabled={apagando} />
-				<span>
-					{soEmArquivo
-						? t("apagarPrefixo.copiaArquivo")
-						: t("apagarPrefixo.copiaHistorico")}
-				</span>
-			</label>
+			{#if copiaRecusada}
+				<p class="aviso" data-testid="copia-recusada">
+					{semCopiaPossivel
+						? t("apagarPrefixo.copiaNemEmArquivo", { mb: numero(TETO_MB) })
+						: t("apagarPrefixo.copiaNaoCoube", { mb: numero(TETO_MB) })}
+				</p>
+			{/if}
 
-			{#if !comCopia}
+			{#if !semCopiaPossivel}
+				<label class="copia">
+					<input type="checkbox" bind:checked={comCopia} disabled={apagando} />
+					<span>
+						{soEmArquivo
+							? t("apagarPrefixo.copiaArquivo")
+							: t("apagarPrefixo.copiaHistorico")}
+					</span>
+				</label>
+			{/if}
+
+			{#if !comCopia || semCopiaPossivel}
 				<p class="irreversivel" role="status">{t("apagarPrefixo.irreversivel")}</p>
 			{/if}
 

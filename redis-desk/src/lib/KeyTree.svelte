@@ -479,9 +479,18 @@
 		abrirMenu(branch, e.clientX, e.clientY);
 	}
 
+	/** Larga tudo que estava marcado, e a âncora junto. */
+	function limparMarcas() {
+		selecionados.clear();
+		// A âncora precisa ir junto: deixá-la para trás faria o próximo
+		// Shift+clique pegar a faixa até um prefixo que ninguém vê mais
+		// marcado — uma seleção grande saindo de um gesto que parecia pequeno.
+		ancora = null;
+	}
+
 	/**
 	 * O teclado alcança o mesmo: Shift+F10 abre o menu ancorado na linha com
-	 * foco, e ⌘/Ctrl+A marca o primeiro nível.
+	 * foco, ⌘/Ctrl+A marca o primeiro nível, e Escape larga tudo.
 	 */
 	function aoTeclar(e: KeyboardEvent, branch: Branch, linha: HTMLElement) {
 		if (e.shiftKey && e.key === "F10") {
@@ -493,6 +502,19 @@
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "a") {
 			e.preventDefault();
 			marcarPrimeiroNivel();
+			return;
+		}
+		// O clique simples deixou de limpar a seleção — ele é navegação, e
+		// fechar um galho para arrumar a tela não pode desdizer o que a
+		// pessoa marcou. Sem isto não sobra gesto barato nenhum para largar
+		// tudo, e a única saída seria desmarcar prefixo a prefixo.
+		if (e.key === "Escape") {
+			// Só engole a tecla quando há o que largar: um diálogo aberto por
+			// cima da árvore também escuta Escape, e tomá-la de graça o
+			// deixaria preso.
+			if (selecionados.size === 0) return;
+			e.preventDefault();
+			limparMarcas();
 		}
 	}
 

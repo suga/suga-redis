@@ -108,6 +108,58 @@ describe("os catálogos", () => {
 	}
 });
 
+describe("as chaves do menu de índice", () => {
+	/**
+	 * Nomeadas uma a uma, e não só pela igualdade de forma logo acima: a
+	 * comparação de formas passa verde se as TRÊS esquecerem a mesma chave,
+	 * que é exatamente o que acontece quando alguém acrescenta uma frase na
+	 * tela e não a traz para cá.
+	 */
+	const NOVAS = [
+		"menu.copiarPrefixo",
+		"menu.copiarPrefixos",
+		"menu.apagarPrefixo",
+		"menu.apagarPrefixos",
+		"menu.copiarNome",
+		"menu.apagarChave",
+		"erro.aoEnumerarPrefixo",
+		"erro.aoApagarPrefixo",
+		"erro.aoCopiar",
+		"erro.aoRelerArvore",
+		"apagarPrefixo.nadaAqui",
+		"apagarPrefixo.copiaNaoCoube",
+		"apagarPrefixo.copiaNemEmArquivo",
+		"apagarPrefixo.feitoUma",
+		"apagarPrefixo.feitoVarias",
+		"apagarPrefixo.feitoParcial",
+		"historico.semCopia",
+		"historico.voltouParcial",
+		"historico.naoVoltaram",
+		"historico.copiaEmArquivo",
+		"op.deletePrefixUma",
+		"op.deletePrefixVarias",
+		"op.deletePrefixVariosPrefixos",
+	];
+
+	for (const [nome, catalogo] of Object.entries(CATALOGOS)) {
+		test(`${nome} tem as chaves novas`, () => {
+			const faltando = NOVAS.filter((chave) => !(chave in catalogo));
+			expect(faltando).toEqual([]);
+		});
+	}
+
+	test("os três dizem coisas diferentes, não o português copiado", () => {
+		// Copiar o português nos outros dois passaria na checagem de forma e
+		// na de texto vazio, e deixaria o produto monolíngue sem ninguém ver.
+		for (const chave of ["menu.copiarPrefixo", "apagarPrefixo.nadaAqui"] as const) {
+			definirIdioma("pt-BR");
+			const base = t(chave);
+			definirIdioma("en");
+			expect(t(chave)).not.toBe(base);
+		}
+	});
+});
+
 describe("número, tempo e data", () => {
 	test("o separador de milhar segue o idioma", () => {
 		expect(numero(1234567)).toBe("1.234.567");

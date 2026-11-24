@@ -445,3 +445,40 @@ test("a marca sobrevive à linha sair da janela", async () => {
 
 	expect(linha(/p00/)).toHaveClass("marcada");
 });
+
+test("Escape na árvore larga tudo que estava marcado", async () => {
+	const user = userEvent.setup();
+	const { onPrefixMenu } = montar();
+
+	await cliqueComando(user, linha(/catalogo/));
+	await cliqueComando(user, linha(/sessao/));
+	expect(linha(/catalogo/)).toHaveClass("marcada");
+
+	// O clique simples deixou de limpar a seleção (é navegação, não gesto de
+	// marcar), e sem isto não sobrou nenhum jeito barato de largar tudo.
+	linha(/sessao/).focus();
+	await user.keyboard("{Escape}");
+
+	expect(linha(/catalogo/)).not.toHaveClass("marcada");
+	expect(linha(/sessao/)).not.toHaveClass("marcada");
+
+	// E a âncora foi junto: o próximo Shift+clique parte da linha nova, em
+	// vez de pegar uma faixa até um prefixo que ninguém vê mais marcado.
+	await cliqueShift(user, linha(/pedido/));
+	fireEvent.contextMenu(linha(/pedido/), { clientX: 0, clientY: 0 });
+	expect(onPrefixMenu).toHaveBeenLastCalledWith(["pedido:"], 0, 0);
+});
+
+test("Escape sem nada marcado não engole a tecla", async () => {
+	const user = userEvent.setup();
+	montar();
+
+	linha(/catalogo/).focus();
+	const evento = createEvent.keyDown(linha(/catalogo/), { key: "Escape" });
+	fireEvent(linha(/catalogo/), evento);
+
+	// Um diálogo aberto por cima da árvore também escuta Escape: engoli-lo
+	// quando não há marca nenhuma para largar deixaria o diálogo preso.
+	expect(evento.defaultPrevented).toBe(false);
+	await user.keyboard("{Escape}");
+});

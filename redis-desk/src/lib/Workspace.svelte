@@ -5,6 +5,9 @@
 	 * chaves à esquerda, painel do valor à direita.
 	 */
 	import ConfirmDialog from "$lib/ConfirmDialog.svelte";
+	import ContextMenu from "$lib/ContextMenu.svelte";
+	import type { Item } from "$lib/ContextMenu.svelte";
+	import DeletePrefixDialog from "$lib/DeletePrefixDialog.svelte";
 	import Divisor from "$lib/Divisor.svelte";
 	import KeyEditor from "$lib/KeyEditor.svelte";
 	import KeyTree from "$lib/KeyTree.svelte";
@@ -17,15 +20,24 @@
 	import { t } from "$lib/i18n.svelte";
 	import { resumoDaOperacao } from "$lib/resumo";
 	import {
+		cancelDelete,
+		deletePrefix,
+		enumeratePrefix,
 		errorMessage,
+		isApiError,
 		listDbs,
+		onBulkDeleteProgress,
+		onBulkScanProgress,
 		onRescanProgress,
 		onTreeProgress,
 		scanTree,
 		rescan,
 		scanStatus,
 		textBytes,
+		treeLevel,
 		writeValue,
+		type BackupRequest,
+		type EnumerationHandle,
 		type Host,
 		type ScanProgress,
 		type Branch,
@@ -131,10 +143,101 @@
 	let varrendo = $state(false);
 	let erro = $state("");
 	let criando = $state(false);
-	/** Criação recusada em produção, esperando confirmação. */
-	let criacaoPendente = $state<{ key: string; op: WriteOp; summary: string } | null>(null);
+	/** Escrita de chave única recusada em produção, esperando confirmação. */
+	let escritaPendente = $state<{ key: string; op: WriteOp; summary: string } | null>(null);
 	/** Força o painel a reler a chave depois de uma escrita. */
 	let revisao = $state(0);
+
+	// ------------------------------------------- menu de contexto e exclusão
+
+	/** Sobre o que o menu aberto fala. Uma chave não é um prefixo. */
+	type AlvoMenu =
+		| { tipo: "prefixos"; prefixos: string[] }
+		| { tipo: "chave"; chave: string };
+
+	let menu = $state<{ x: number; y: number; alvo: AlvoMenu } | null>(null);
+
+	/**
+	 * A lista de itens é montada AQUI, não dentro do `ContextMenu` — ele é
+	 * genérico e não sabe o que é um prefixo.
+	 *
+	 * Busca e estatística não entram desabilitadas: não entram. Um item
+	 * cinza que nunca acende ensina a pessoa a parar de abrir o menu, e aí
+	 * os itens que funcionam somem junto.
+	 *
+	 * O item destrutivo fica por último, e é o único com `perigoso` — a
+	 * marca é um traço acima dele, que só faz sentido com algo acima.
+	 */
+	let itensDoMenu = $derived.by<Item[]>(() => {
+		if (!menu) return [];
+		if (menu.alvo.tipo === "chave") {
+			return [
+				{ id: "copiar-nome", rotulo: t("menu.copiarNome") },
+				{ id: "apagar-chave", rotulo: t("menu.apagarChave"), perigoso: true },
+			];
+		}
+		const n = menu.alvo.prefixos.length;
+		return [
+			{
+				id: "copiar-prefixo",
+				rotulo: n === 1 ? t("menu.copiarPrefixo") : t("menu.copiarPrefixos", { n: numero(n) }),
+			},
+			{
+				id: "apagar-prefixo",
+				rotulo: n === 1 ? t("menu.apagarPrefixo") : t("menu.apagarPrefixos", { n: numero(n) }),
+				perigoso: true,
+			},
+		];
+	});
+
+	/** A exclusão em massa aberta na tela. Só uma por vez, por contrato. */
+	interface Apagar {
+		prefixos: string[];
+		/** `null` enquanto a enumeração ainda corre. */
+		enumeracao: EnumerationHandle | null;
+		progresso: { scanned: number; total: number } | null;
+		/** Não-nulo enquanto as chaves saem: quantas já saíram. */
+		apagados: number | null;
+		/** Qual escolha de cópia o Rust acabou de recusar por tamanho. */
+		copiaRecusada: BackupRequest | null;
+	}
+	let apagar = $state<Apagar | null>(null);
+
+	/**
+	 * Falha ao enumerar — estado PRÓPRIO, como `erroBancos` e `erroIndice`.
+	 *
+	 * Sem ele, uma pergunta que não alcançou o servidor viraria "não há nada
+	 * sob este prefixo": a mesma troca de uma falha por uma resposta vazia
+	 * que já custou caro duas vezes neste arquivo.
+	 */
+	let erroEnumerar = $state("");
+	/**
+	 * A falha que não é da enumeração, com o ASSUNTO dela junto.
+	 *
+	 * O assunto viaja com a mensagem porque três coisas diferentes caem
+	 * neste slot, e a frase de cima é o que a pessoa lê para decidir o que
+	 * fazer. Dizer "não deu para apagar as chaves" depois de uma cópia para
+	 * a área de transferência que falhou — ou, pior, depois de uma exclusão
+	 * que DEU certo e só não conseguiu redesenhar a árvore — mandaria
+	 * alguém procurar um estrago que não houve, ou desmentiria um ato que
+	 * aconteceu. Mesmo padrão de `assuntoErro` em `HistoryPanel`.
+	 */
+	type AssuntoApagar = "erro.aoApagarPrefixo" | "erro.aoCopiar" | "erro.aoRelerArvore";
+	let erroApagar = $state("");
+	let assuntoApagar = $state<AssuntoApagar>("erro.aoApagarPrefixo");
+
+	function falhouNoApagar(assunto: AssuntoApagar, err: unknown) {
+		assuntoApagar = assunto;
+		erroApagar = errorMessage(err);
+	}
+	/** O desfecho de um apagar — ou o aviso de que não havia nada para apagar. */
+	let avisoApagar = $state("");
+	/**
+	 * Sobe a cada pedido de exclusão. Uma resposta atrasada de um pedido que
+	 * já foi substituído (ou desistido) não pode aterrissar na tela — mesma
+	 * régua de `geracaoIndice` e `geracaoArvore`.
+	 */
+	let geracaoApagar = 0;
 
 	type Aba = "valor" | "busca" | "historico" | "logs";
 	let aba = $state<Aba>("valor");
@@ -160,9 +263,26 @@
 			// `done` apaga a barra, mas a raiz fica: ela É a árvore.
 			lendo = retrato.done ? null : retrato;
 		});
+		// Os dois eventos da exclusão em massa não vêm endereçados (o Rust
+		// manda só os números), e não precisam: só existe uma exclusão por
+		// vez na tela, e sem `apagar` aberto não há onde o número pousar.
+		const pararVarreduraEmMassa = onBulkScanProgress((tick) => {
+			if (apagar) {
+				apagar.progresso = { scanned: tick.scanned, total: tick.total_estimate };
+			}
+		});
+		const pararExclusao = onBulkDeleteProgress((saidas) => {
+			// Só enquanto as chaves de fato saem: `apagados` é a trava contra o
+			// segundo clique, e deixá-la nascer de um evento a acenderia por
+			// um andamento de outra exclusão qualquer.
+			if (apagar && apagar.apagados !== null) apagar.apagados = saidas;
+		});
+
 		return () => {
 			pararVarredura.then((fn) => fn());
 			pararLeitura.then((fn) => fn());
+			pararVarreduraEmMassa.then((fn) => fn());
+			pararExclusao.then((fn) => fn());
 		};
 	});
 
@@ -185,6 +305,12 @@
 	async function abrirBanco(hostId: string, banco: number) {
 		erro = "";
 		erroIndice = "";
+		// Os avisos da exclusão falam do banco que estava aberto: "1.200
+		// chaves apagadas" é verdade, mas sobre outro banco, e deixá-lo na
+		// tela do banco novo o torna uma frase falsa sem mudar uma palavra.
+		erroEnumerar = "";
+		erroApagar = "";
+		avisoApagar = "";
 		relatorio = null;
 		perguntandoIndice = true;
 		selecionada = null;
@@ -344,23 +470,227 @@
 	async function criar(nova: { key: string; kind: "string" | "hash" | "list" | "zset" }) {
 		const op = opDeCriacao(nova.kind);
 		criando = false;
-		await aplicarCriacao(nova.key, op, false);
+		await aplicarEscrita(nova.key, op, false);
 	}
 
-	async function aplicarCriacao(key: string, op: WriteOp, confirmado: boolean) {
+	/**
+	 * Uma escrita de chave ÚNICA — criar aqui, apagar pelo menu de contexto.
+	 *
+	 * A exclusão em massa não passa por aqui: ela tem outra trava (o nome do
+	 * host digitado), outra cópia de segurança e uma linha de histórico só
+	 * dela. Mandar uma chave solta por lá seria pedir o nome do host para
+	 * apagar uma chave.
+	 */
+	async function aplicarEscrita(key: string, op: WriteOp, confirmado: boolean) {
 		erro = "";
 		try {
 			const resultado = await writeValue(host.id, db, key, op, confirmado);
 			if (resultado.outcome === "needs_confirmation") {
-				criacaoPendente = { key, op, summary: resultado.summary };
+				escritaPendente = { key, op, summary: resultado.summary };
 				return;
 			}
-			criacaoPendente = null;
-			selecionada = key;
+			escritaPendente = null;
+			if (op.op === "delete_key") {
+				// A chave não existe mais: tirá-la da seleção e mandar a árvore
+				// reler, como `chaveSumiu` faz quando o painel a encontra morta.
+				if (selecionada === key) selecionada = null;
+				versaoArvore += 1;
+			} else {
+				selecionada = key;
+			}
 		} catch (err) {
-			criacaoPendente = null;
+			escritaPendente = null;
 			erro = errorMessage(err);
 		}
+	}
+
+	// ----------------------------------------- menu de contexto da árvore
+
+	/**
+	 * Põe texto na área de transferência.
+	 *
+	 * Falhar aqui não é motivo para derrubar nada: um navegador que recusa o
+	 * acesso deixa a pessoa sem a cópia, não sem a árvore. O que não pode é
+	 * o `catch` ficar mudo — a frase vai para o mesmo slot dos outros avisos.
+	 */
+	async function copiar(texto: string) {
+		try {
+			await navigator.clipboard.writeText(texto);
+		} catch (err) {
+			falhouNoApagar("erro.aoCopiar", err);
+		}
+	}
+
+	function escolherNoMenu(id: string) {
+		const alvo = menu?.alvo;
+		// O menu sai da frente antes da ação: uma ação que já aconteceu não
+		// fica com o menu aberto por cima dela.
+		menu = null;
+		if (!alvo) return;
+
+		if (alvo.tipo === "chave") {
+			if (id === "copiar-nome") copiar(alvo.chave);
+			if (id === "apagar-chave") aplicarEscrita(alvo.chave, { op: "delete_key" }, false);
+			return;
+		}
+		if (id === "copiar-prefixo") copiar(alvo.prefixos.join("\n"));
+		if (id === "apagar-prefixo") comecarApagar(alvo.prefixos);
+	}
+
+	// ------------------------------------------------- exclusão em massa
+
+	/**
+	 * Confere o que há sob os prefixos e abre o diálogo com o número de
+	 * agora.
+	 *
+	 * A contagem da árvore é de uma varredura antiga, e a decisão de apagar
+	 * não pode pesar um número velho — é essa diferença que faz a enumeração
+	 * ser um passo à parte.
+	 *
+	 * `copiaRecusada` só vem preenchido na reabertura depois de um
+	 * `BackupTooLarge`: a enumeração anterior já tinha sido consumida pela
+	 * fachada quando a cópia foi recusada, então a volta custa uma varredura
+	 * nova — e é por isso que o diálogo volta mostrando "Varrendo…".
+	 */
+	async function comecarApagar(
+		prefixos: string[],
+		copiaRecusada: BackupRequest | null = null,
+	) {
+		erroEnumerar = "";
+		erroApagar = "";
+		avisoApagar = "";
+		apagar = { prefixos, enumeracao: null, progresso: null, apagados: null, copiaRecusada };
+
+		const minha = ++geracaoApagar;
+		try {
+			const achado = await enumeratePrefix(host.id, db, prefixos);
+			if (minha !== geracaoApagar || !apagar) return;
+
+			if (achado.count === 0) {
+				// Consentimento para apagar zero chaves é consentimento para um
+				// não-evento, e a linha de histórico descreveria nada. As chaves
+				// expiraram entre a árvore e a varredura; dizer isso é a resposta
+				// inteira.
+				apagar = null;
+				avisoApagar = t("apagarPrefixo.nadaAqui");
+				return;
+			}
+			apagar.enumeracao = achado;
+		} catch (err) {
+			if (minha !== geracaoApagar) return;
+			// NUNCA "não há nada sob este prefixo": uma pergunta que falhou e
+			// uma resposta vazia são coisas diferentes, e confundi-las é o
+			// defeito que este projeto já pagou duas vezes.
+			apagar = null;
+			erroEnumerar = errorMessage(err);
+		}
+	}
+
+	async function confirmarApagar(backup: BackupRequest, nomeDigitado: string | null) {
+		const atual = apagar;
+		if (!atual?.enumeracao) return;
+		// A trava contra o segundo clique mora AQUI, e não no diálogo: ele
+		// precisa seguir usável depois de uma recusa por nome, para a pessoa
+		// digitar e repetir sem pagar outra varredura. Sem esta linha, dois
+		// cliques rápidos mandam a mesma enumeração duas vezes e a segunda
+		// volta `UnknownEnumeration`.
+		if (atual.apagados !== null) return;
+		atual.apagados = 0;
+
+		const id = atual.enumeracao.id;
+		erroApagar = "";
+		try {
+			const resultado = await deletePrefix(id, backup, nomeDigitado);
+			if (apagar !== atual) return;
+
+			if (resultado.outcome === "needs_confirmation") {
+				// Nada foi apagado e a enumeração continua valendo: destravar o
+				// botão é o bastante, e o nome digitado segue na caixa.
+				atual.apagados = null;
+				return;
+			}
+			if (resultado.outcome === "deleted") {
+				apagar = null;
+				avisoApagar = resumoDoApagado(resultado.deleted, resultado.enumerated);
+				depoisDeApagar(atual.prefixos);
+			}
+		} catch (err) {
+			if (apagar !== atual) return;
+
+			if (isApiError(err) && err.kind === "backup_too_large") {
+				// Nenhuma chave saiu: o Rust lê os retratos ANTES de apagar, e
+				// recusa inteiro quando eles passam do teto. Isto não é uma
+				// falha a mostrar e pronto — é a escolha da cópia voltando com
+				// uma opção a menos. Apagar com uma cópia que não coube não é
+				// uma terceira saída.
+				await comecarApagar(atual.prefixos, backup);
+				return;
+			}
+			apagar = null;
+			falhouNoApagar("erro.aoApagarPrefixo", err);
+		}
+	}
+
+	/** A frase do desfecho: o que saiu, e se saiu tudo que foi prometido. */
+	function resumoDoApagado(saidas: number, prometidas: number): string {
+		if (saidas < prometidas) {
+			return t("apagarPrefixo.feitoParcial", {
+				feitas: numero(saidas),
+				prometidas: numero(prometidas),
+			});
+		}
+		const chave = saidas === 1 ? "apagarPrefixo.feitoUma" : "apagarPrefixo.feitoVarias";
+		return t(chave, { n: numero(saidas) });
+	}
+
+	/**
+	 * Põe a árvore de acordo com o banco depois de uma exclusão.
+	 *
+	 * Os galhos abertos releem sozinhos de `versaoArvore`, mas a RAIZ não:
+	 * ela é desenhada dos retratos da varredura, que já terminou. Sem reler
+	 * o nível de cima, o prefixo apagado continuaria listado com a contagem
+	 * que tinha antes — a tela mostrando o que não existe mais.
+	 */
+	function depoisDeApagar(prefixos: string[]) {
+		if (selecionada && prefixos.some((prefixo) => selecionada?.startsWith(prefixo))) {
+			selecionada = null;
+		}
+		versaoArvore += 1;
+		treeLevel(host.id, db, "")
+			.then((nivel) => {
+				if (nivel) raiz = nivel.children;
+			})
+			.catch((err) => {
+				// A exclusão deu certo; o que falhou foi redesenhar. Dizer que
+				// falhou "o apagar" desmentiria o ato, e as chaves apagadas
+				// continuam apagadas — por isso o assunto é outro, e o
+				// desfecho em `avisoApagar` fica onde está, inteiro.
+				falhouNoApagar("erro.aoRelerArvore", err);
+			});
+	}
+
+	/**
+	 * Escape, clique fora e o botão Cancelar chegam todos aqui.
+	 *
+	 * Antes de a exclusão começar, fechar é só fechar. Depois que as chaves
+	 * começaram a sair, fechar a janela esconderia uma exclusão que continua
+	 * correndo — então aqui o gesto vira DESISTIR, e o diálogo fica de pé
+	 * mostrando o andamento até ele parar.
+	 */
+	function cancelarApagar() {
+		const atual = apagar;
+		if (!atual) return;
+
+		if (atual.apagados !== null && atual.enumeracao) {
+			cancelDelete(atual.enumeracao.id).catch((err) => {
+				erroApagar = errorMessage(err);
+			});
+			return;
+		}
+		// Descarta uma enumeração que ainda esteja em voo: sem isto, ela
+		// voltaria e reabriria o diálogo que a pessoa acabou de fechar.
+		geracaoApagar += 1;
+		apagar = null;
 	}
 
 	/** Uma escrita foi aplicada: relê a chave e atualiza a árvore. */
@@ -460,6 +790,26 @@
 			{#if erroIndice}
 				<ErroTecnico assunto="erro.aoLerIndice" detalhe={erroIndice} testid="erro-indice" />
 			{/if}
+
+			<!--
+				Os avisos da exclusão em massa ficam AQUI, ao lado da árvore de
+				que falam, e não no painel da direita: é a árvore que mudou (ou
+				deixou de mudar), e é para ela que a pessoa está olhando.
+				Cada falha tem o seu, como `erroBancos` e `erroIndice`.
+			-->
+			{#if erroEnumerar}
+				<ErroTecnico
+					assunto="erro.aoEnumerarPrefixo"
+					detalhe={erroEnumerar}
+					testid="erro-enumerar"
+				/>
+			{/if}
+			{#if erroApagar}
+				<ErroTecnico assunto={assuntoApagar} detalhe={erroApagar} testid="erro-apagar" />
+			{/if}
+			{#if avisoApagar}
+				<p class="aviso-apagar" role="status" data-testid="aviso-apagar">{avisoApagar}</p>
+			{/if}
 		</div>
 
 		{#if lendo}
@@ -494,6 +844,8 @@
 				selectedKey={selecionada}
 				onSelect={(key) => (selecionada = key)}
 				filter={filtro}
+				onPrefixMenu={(prefixos, x, y) => (menu = { x, y, alvo: { tipo: "prefixos", prefixos } })}
+				onKeyMenu={(chave, x, y) => (menu = { x, y, alvo: { tipo: "chave", chave } })}
 			/>
 		</div>
 	</div>
@@ -558,13 +910,37 @@
 	<NewKeyDialog onCreate={criar} onCancel={() => (criando = false)} />
 {/if}
 
-{#if criacaoPendente}
+{#if escritaPendente}
 	<ConfirmDialog
-		summary={resumoDaOperacao(criacaoPendente.key, criacaoPendente.op)}
+		summary={resumoDaOperacao(escritaPendente.key, escritaPendente.op)}
 		onConfirm={() =>
-			criacaoPendente &&
-			aplicarCriacao(criacaoPendente.key, criacaoPendente.op, true)}
-		onCancel={() => (criacaoPendente = null)}
+			escritaPendente &&
+			aplicarEscrita(escritaPendente.key, escritaPendente.op, true)}
+		onCancel={() => (escritaPendente = null)}
+	/>
+{/if}
+
+{#if menu}
+	<ContextMenu
+		x={menu.x}
+		y={menu.y}
+		itens={itensDoMenu}
+		onEscolher={escolherNoMenu}
+		onFechar={() => (menu = null)}
+	/>
+{/if}
+
+{#if apagar}
+	<DeletePrefixDialog
+		{host}
+		{db}
+		prefixos={apagar.prefixos}
+		enumeracao={apagar.enumeracao}
+		progresso={apagar.progresso}
+		apagados={apagar.apagados}
+		copiaRecusada={apagar.copiaRecusada}
+		onConfirmar={confirmarApagar}
+		onCancelar={cancelarApagar}
 	/>
 {/if}
 
@@ -682,6 +1058,15 @@
 		margin: 0;
 		padding: 0.8rem 0.2rem;
 		color: var(--text-faint);
+	}
+
+	/* O desfecho de uma exclusão é prosa de corpo: ele conta o que acabou
+	   de acontecer com dados de produção, e não é nota de rodapé. Sem cor
+	   nenhuma — o vermelho `--prod` significa só o ambiente. */
+	.aviso-apagar {
+		margin: 0;
+		color: var(--text);
+		font-size: 0.9rem;
 	}
 
 	.lendo {
