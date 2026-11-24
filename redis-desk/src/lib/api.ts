@@ -425,9 +425,9 @@ export function enumeratePrefix(
 
 /**
  * Apaga as chaves de uma enumeração já feita. Em host de produção,
- * `typedHostName` precisa ser exatamente o nome do host — fora de
- * produção ele é ignorado. Acompanhe o andamento com
- * `onBulkDeleteProgress`.
+ * `typedHostName` é comparado byte a byte com o nome do host — sem
+ * aparar espaços e sem ignorar maiúsculas/minúsculas; fora de produção
+ * ele é ignorado. Acompanhe o andamento com `onBulkDeleteProgress`.
  *
  * Uma recusa (`needs_confirmation`) NÃO consome a enumeração: o mesmo
  * `enumerationId` continua válido, e a tela repete a chamada com o nome
