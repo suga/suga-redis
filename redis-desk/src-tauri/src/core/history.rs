@@ -483,13 +483,18 @@ fn backup_file_name(host: &Host, db: u8, prefixes: &[String], at_ms: i64) -> Str
     )
 }
 
-/// Tudo que não for letra ASCII, dígito, `-` ou `_` vira `_`, e o resultado
-/// é cortado em 40 caracteres: o nome do host e o prefixo são texto de
-/// pessoa (`:`, `/`, acento, espaço) e entram num nome de arquivo.
+/// Tudo que não for letra ASCII, dígito, `-` ou `_` vira `_`, e só então o
+/// resultado é cortado em 40 caracteres: o nome do host e o prefixo são
+/// texto de pessoa (`:`, `/`, acento, espaço) e entram num nome de arquivo.
+///
+/// O corte é do NOME, não do texto de entrada — cortar antes de sanear
+/// mediria um comprimento que não é o que vai para o disco. Ele também
+/// significa que dois prefixos com os mesmos 40 primeiros caracteres caem no
+/// mesmo nome; quem garante que eles não caem no mesmo ARQUIVO é
+/// `write_backup_file`, não este saneamento.
 fn sanitize_for_name(text: &str) -> String {
     let clean: String = text
         .chars()
-        .take(40)
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
                 ch
@@ -497,12 +502,63 @@ fn sanitize_for_name(text: &str) -> String {
                 '_'
             }
         })
+        .take(40)
         .collect();
     if clean.is_empty() {
         "_".to_string()
     } else {
         clean
     }
+}
+
+/// Quantos nomes `write_backup_file` tenta antes de desistir. Alto o
+/// bastante para qualquer colisão real (mesmo host, mesmo banco, mesmo
+/// segundo), baixo o bastante para um diretório inesperadamente cheio virar
+/// erro em vez de laço infinito.
+const MAX_BACKUP_FILE_TRIES: u32 = 1_000;
+
+/// Grava `json` em `dir` com o nome `name`, ou — se já houver um arquivo
+/// com esse nome — com `-2`, `-3` … antes do `.json`. Devolve o caminho
+/// realmente usado.
+///
+/// `create_new` em vez de `std::fs::write` porque `write` TRUNCA: dois
+/// pedidos com o mesmo host, banco, prefixo e segundo montam o mesmo nome, e
+/// o segundo apagaria a cópia do primeiro — bem na hora em que ela mais
+/// importa, a da repetição depois de uma falha parcial. Dois prefixos
+/// diferentes que saneiam igual (`app:cache:` e `app/cache/`), ou que
+/// compartilham os 40 primeiros caracteres, colidem pelo mesmo caminho. O
+/// `create_new` recusa a sobrescrita no próprio sistema de arquivos, sem
+/// janela entre conferir e gravar.
+fn write_backup_file(dir: &Path, name: &str, json: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write as _;
+
+    std::fs::create_dir_all(dir)?;
+    let stem = name.strip_suffix(".json").unwrap_or(name);
+
+    for attempt in 1..=MAX_BACKUP_FILE_TRIES {
+        let path = dir.join(if attempt == 1 {
+            name.to_string()
+        } else {
+            format!("{stem}-{attempt}.json")
+        });
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(json.as_bytes())?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("já existem {MAX_BACKUP_FILE_TRIES} cópias com o nome \"{name}\" neste diretório"),
+    ))
 }
 
 /// `AAAA-MM-DD-hhmmss` em UTC, a partir do epoch em milissegundos.
@@ -784,9 +840,8 @@ impl History {
             }
             BackupChoice::File(dir) => {
                 let json = read_snapshots(pool, alvo, plan.keys, now, max_backup_bytes).await?;
-                let path = dir.join(backup_file_name(host, db, plan.prefixes, now));
-                std::fs::create_dir_all(dir).map_err(HistoryError::BackupIo)?;
-                std::fs::write(&path, json).map_err(HistoryError::BackupIo)?;
+                let name = backup_file_name(host, db, plan.prefixes, now);
+                let path = write_backup_file(dir, &name, &json).map_err(HistoryError::BackupIo)?;
                 (
                     BackupKind::File {
                         path: path.to_string_lossy().into_owned(),
@@ -2575,6 +2630,103 @@ mod tests {
         assert_eq!(timestamp_for_name(0), "1970-01-01-000000");
         // 2026-11-24T15:04:05Z = 1_795_532_645 s desde a época.
         assert_eq!(timestamp_for_name(1_795_532_645_000), "2026-11-24-150405");
+    }
+
+    /// O formato do nome é mandado pelo plano: `AAAA-MM-DD-hhmmss-<host>-
+    /// db<N>-<prefixo>.json`. Igualdade exata porque é a forma inteira que
+    /// está sendo fixada, não um pedaço dela.
+    #[test]
+    fn the_backup_file_name_follows_the_mandated_shape() {
+        let name = backup_file_name(
+            &bulk_host(),
+            14,
+            &["wallet:".to_string(), "session:".to_string()],
+            1_795_532_645_000,
+        );
+
+        assert_eq!(name, "2026-11-24-150405-Redis_de_teste-db14-wallet_.json");
+    }
+
+    /// Dois prefixos diferentes que saneiam para o mesmo nome. O nome é o
+    /// mesmo de propósito — o que não pode é o ARQUIVO ser o mesmo, porque
+    /// a segunda cópia apagaria a primeira.
+    #[test]
+    fn two_prefixes_that_sanitize_alike_land_in_different_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = bulk_host();
+        let um = backup_file_name(&host, 14, &["app:cache:".to_string()], 1_795_532_645_000);
+        let outro = backup_file_name(&host, 14, &["app/cache/".to_string()], 1_795_532_645_000);
+        assert_eq!(
+            um, outro,
+            "os dois prefixos precisam mesmo colidir no nome; é esse o caso sob teste"
+        );
+
+        let primeiro = write_backup_file(dir.path(), &um, "[\"primeira\"]").unwrap();
+        let segundo = write_backup_file(dir.path(), &outro, "[\"segunda\"]").unwrap();
+
+        assert_ne!(primeiro, segundo, "duas cópias, dois arquivos");
+        assert_eq!(
+            std::fs::read_to_string(&primeiro).unwrap(),
+            "[\"primeira\"]",
+            "a primeira cópia não pode ter sido sobrescrita"
+        );
+        assert_eq!(std::fs::read_to_string(&segundo).unwrap(), "[\"segunda\"]");
+    }
+
+    /// O saneamento corta em 40 caracteres, então dois prefixos que só
+    /// diferem depois do 40º caem no mesmo nome.
+    #[test]
+    fn prefixes_that_share_the_first_40_characters_land_in_different_files() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = bulk_host();
+        let comum = "a".repeat(40);
+        let um = backup_file_name(&host, 14, &[format!("{comum}:um:")], 1_795_532_645_000);
+        let outro = backup_file_name(&host, 14, &[format!("{comum}:dois:")], 1_795_532_645_000);
+        assert_eq!(
+            um, outro,
+            "os dois prefixos precisam mesmo colidir no nome; é esse o caso sob teste"
+        );
+
+        let primeiro = write_backup_file(dir.path(), &um, "[\"primeira\"]").unwrap();
+        let segundo = write_backup_file(dir.path(), &outro, "[\"segunda\"]").unwrap();
+
+        assert_ne!(primeiro, segundo, "duas cópias, dois arquivos");
+        assert_eq!(
+            std::fs::read_to_string(&primeiro).unwrap(),
+            "[\"primeira\"]",
+            "a primeira cópia não pode ter sido sobrescrita"
+        );
+    }
+
+    /// O pior caso concreto: a pessoa repete a exclusão por engano no mesmo
+    /// segundo, a segunda passada não acha nada para apagar e grava `[]`.
+    /// Se isso caísse sobre o arquivo da primeira, a linha de histórico dela
+    /// continuaria apontando para um caminho que diz ter cópia e não tem —
+    /// o fracasso invisível-até-precisar que esta tarefa inteira existe
+    /// para impedir.
+    #[test]
+    fn a_second_backup_in_the_same_second_does_not_overwrite_the_first() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let name = backup_file_name(
+            &bulk_host(),
+            14,
+            &["wallet:".to_string()],
+            1_795_532_645_000,
+        );
+
+        let primeiro = write_backup_file(dir.path(), &name, "[\"a cópia que importa\"]").unwrap();
+        let segundo = write_backup_file(dir.path(), &name, "[]").unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&primeiro).unwrap(),
+            "[\"a cópia que importa\"]",
+            "a cópia de verdade precisa continuar inteira no disco"
+        );
+        assert_eq!(
+            segundo.file_name().unwrap().to_str().unwrap(),
+            "2026-11-24-150405-Redis_de_teste-db14-wallet_-2.json",
+            "a segunda cópia ganha sufixo, mantendo a forma do nome"
+        );
     }
 
     /// Mesma lógica de `now_unix_ms` (privada), usada pelos testes
