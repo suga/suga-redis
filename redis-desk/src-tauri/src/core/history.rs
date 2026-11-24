@@ -16,7 +16,7 @@
 use std::future::Future;
 use std::path::Path;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -24,7 +24,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
-use super::bulk::{BulkError, unlink_keys};
+use super::bulk::{BulkDeleted, BulkError, unlink_keys};
 use super::config::{Env, Host};
 use super::conn::{ConnError, Pool};
 use super::keys::{Alvo, KeyKind};
@@ -75,12 +75,48 @@ pub struct BulkDelete<'a> {
     pub cancel: &'a AtomicBool,
 }
 
+/// O andamento de uma exclusão em massa, com a FASE junto do número.
+///
+/// Um canal só, e não dois, porque as duas fases são da mesma operação e
+/// quem acompanha precisa saber em qual delas o número foi medido: 12.000
+/// retratos lidos e 12.000 chaves apagadas são frases diferentes, e mandar
+/// os dois pelo mesmo `u64` faria a tela dizer "12.000 chaves apagadas"
+/// enquanto nenhuma tinha saído.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkTick {
+    /// Quantas chaves já foram percorridas na leitura dos retratos — a fase
+    /// LONGA, uma ida e volta por chave, durante a qual nada saiu ainda.
+    Lendo(u64),
+    /// Quantas chaves o servidor já disse ter apagado.
+    Apagando(u64),
+}
+
 /// O que sobrou de uma exclusão em massa: a entrada única de histórico que
-/// a registra e quantas chaves saíram de verdade.
+/// a registra, quantas chaves saíram de verdade e quantas foram tentadas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BulkOutcome {
-    pub entry_id: i64,
+    /// `None` quando NADA foi tentado: a linha registraria uma mudança que
+    /// não aconteceu, então ela é removida — ver `delete_prefix_com_teto`.
+    /// Não é um erro, é o desfecho de uma desistência que chegou a tempo.
+    pub entry_id: Option<i64>,
+    /// O que o servidor disse ter apagado. Limite INFERIOR — ver
+    /// `bulk::BulkDeleted`.
     pub deleted: u64,
+    /// O que foi enviado ao servidor. Limite SUPERIOR, e o único número que
+    /// descreve um CONJUNTO (`keys[..attempted]`) e não só uma quantidade.
+    pub attempted: u64,
+}
+
+/// A cópia recém-tirada, do jeito que `close_bulk_row` precisa dela para
+/// apará-la: onde ela mora, os retratos um a um, e a lista enumerada contra
+/// a qual o corte é medido.
+///
+/// Os três andam juntos e só servem juntos — `parts` é uma subsequência de
+/// `keys`, e `backup` diz se o recorte vai para a linha ou para o arquivo.
+struct BackupTrim<'a> {
+    backup: &'a BackupKind,
+    parts: &'a [(String, String)],
+    keys: &'a [String],
 }
 
 /// Uma chave que a volta atrás de uma exclusão em massa não conseguiu
@@ -467,28 +503,50 @@ fn now_unix_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// Lê o valor inteiro de cada chave de `keys` e devolve os retratos já
-/// montados como o JSON que vai para `before_json` (ou para o arquivo da
-/// cópia). Um JSON por vez, com o tamanho somado a cada retrato: assim o
-/// teto recusa a cópia grande demais SEM antes carregar tudo na memória —
-/// que é justamente o que ele existe para evitar.
+/// Lê o valor inteiro de cada chave de `keys` e devolve os retratos um a
+/// um, cada qual já serializado, ao lado do nome da chave que descreve. Um
+/// JSON por vez, com o tamanho somado a cada retrato: assim o teto recusa a
+/// cópia grande demais SEM antes carregar tudo na memória — que é justamente
+/// o que ele existe para evitar.
+///
+/// Devolve as PARTES, e não o `[...]` pronto, porque quem fecha a linha
+/// pode precisar de um subconjunto delas: uma exclusão que parou no meio
+/// tem de gravar a cópia do conjunto TENTADO, não do enumerado (ver
+/// `delete_prefix_com_teto`). Montar o vetor aqui dentro jogaria fora a
+/// única informação que permite recortá-lo.
 ///
 /// Uma chave que sumiu entre a varredura e a cópia (expirou, ou outra
 /// conexão apagou) é pulada em silêncio: não há retrato a tirar de algo que
-/// já não existe, e isso não é motivo para recusar a exclusão inteira.
+/// já não existe, e isso não é motivo para recusar a exclusão inteira. Por
+/// isso o resultado é uma SUBSEQUÊNCIA de `keys`, na mesma ordem, e nunca
+/// mais longa.
+///
+/// `cancel` é conferido a cada chave, e `lendo` chama a cada retrato lido.
+/// Esta é a fase LONGA da exclusão — uma ida e volta por chave, com leitura
+/// inteira — e, sem as duas coisas, o botão "desistir" não tem efeito
+/// observável nela e a janela fica parada em "0 chaves apagadas" enquanto
+/// quem opera não consegue distinguir "está trabalhando" de "travou".
 async fn read_snapshots(
     pool: &Pool,
     alvo: Alvo<'_>,
     keys: &[String],
     now_ms: i64,
     max_bytes: usize,
-) -> Result<String> {
+    cancel: &AtomicBool,
+    lendo: impl Fn(u64),
+) -> Result<Vec<(String, String)>> {
     let Alvo { host, pw, db } = alvo;
-    let mut parts: Vec<String> = Vec::with_capacity(keys.len());
+    let mut parts: Vec<(String, String)> = Vec::with_capacity(keys.len());
     // Os dois colchetes do vetor já contam para o teto.
     let mut bytes = 2usize;
 
-    for key in keys {
+    for (lidas, key) in keys.iter().enumerate() {
+        // Sair com o que já leu é seguro porque quem chama passa a MESMA
+        // bandeira ao laço de `UNLINK`: ela continua levantada lá, nenhum
+        // lote sai, e o desfecho é "nada foi tentado".
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let view = match read_value(pool, host, pw, db, key, FULL_READ_LIMIT).await {
             Ok(view) => view,
             Err(ConnError::KeyGone(_)) => continue,
@@ -503,10 +561,43 @@ async fn read_snapshots(
         if bytes > max_bytes {
             return Err(HistoryError::BackupTooLarge { bytes });
         }
-        parts.push(part);
+        parts.push((key.clone(), part));
+        // Quantas CHAVES foram percorridas, não quantos retratos couberam:
+        // a frase da tela conta contra a lista enumerada, e uma chave que
+        // sumiu sozinha não pode travar o andamento num número menor para
+        // sempre.
+        lendo(lidas as u64 + 1);
     }
 
-    Ok(format!("[{}]", parts.join(",")))
+    Ok(parts)
+}
+
+/// Monta o `[...]` que vai para `before_json` (ou para o arquivo) a partir
+/// das partes que `read_snapshots` devolveu, descartando as que não estão
+/// em `manter`.
+///
+/// `manter` é sempre um PREFIXO da lista enumerada (`keys[..attempted]`),
+/// porque os lotes do `UNLINK` correm na ordem dela — ver
+/// `bulk::BulkDeleted`. O conjunto existe para a conferência ser por nome e
+/// não por posição: as partes já são uma subsequência de `keys` (chaves que
+/// sumiram sozinhas não têm retrato), e contar posições nas duas listas ao
+/// mesmo tempo seria uma aritmética a errar.
+fn montar_copia(parts: &[(String, String)], manter: &[String]) -> String {
+    let dentro: std::collections::HashSet<&str> = manter.iter().map(String::as_str).collect();
+    let mut json = String::from("[");
+    let mut primeira = true;
+    for (key, part) in parts {
+        if !dentro.contains(key.as_str()) {
+            continue;
+        }
+        if !primeira {
+            json.push(',');
+        }
+        primeira = false;
+        json.push_str(part);
+    }
+    json.push(']');
+    json
 }
 
 /// `AAAA-MM-DD-hhmmss-<host>-db<N>-<prefixo>.json`, com host e prefixo
@@ -600,6 +691,18 @@ fn write_backup_file(dir: &Path, name: &str, json: &str) -> std::io::Result<std:
         std::io::ErrorKind::AlreadyExists,
         format!("já existem {MAX_BACKUP_FILE_TRIES} cópias com o nome \"{name}\" neste diretório"),
     ))
+}
+
+/// Regrava, por cima, uma cópia que ESTA mesma operação acabou de criar —
+/// é como a cópia em arquivo é aparada ao conjunto tentado quando a
+/// exclusão para no meio (ver `close_bulk_row`).
+///
+/// `std::fs::write` trunca, e aqui isso é exatamente o que se quer: o
+/// caminho nasceu neste mesmo método, segundos atrás, com `create_new`
+/// (ver `write_backup_file`) — não existe segunda cópia a proteger, e o
+/// conteúdo que ele tem agora é um superconjunto do que vai ficar.
+fn rewrite_backup_file(path: &str, json: &str) -> std::io::Result<()> {
+    std::fs::write(path, json)
 }
 
 /// `AAAA-MM-DD-hhmmss` em UTC, a partir do epoch em milissegundos.
@@ -750,6 +853,19 @@ impl History {
         Ok(())
     }
 
+    /// Regrava a cópia embutida de uma entrada já inserida. Só a exclusão
+    /// em massa precisa disto, e pelo mesmo motivo de `update_op`: o
+    /// conjunto que o `UNLINK` tentou só se conhece DEPOIS dele, e a cópia é
+    /// tirada antes — ver `close_bulk_row`.
+    fn update_before_json(&self, id: i64, before_json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE history SET before_json = ?1 WHERE id = ?2",
+            params![before_json, id],
+        )?;
+        Ok(())
+    }
+
     fn delete_row(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM history WHERE id = ?1", params![id])?;
@@ -849,15 +965,25 @@ impl History {
         pw: Option<&str>,
         db: u8,
         plan: BulkDelete<'_>,
-        progress: impl Fn(u64),
+        progress: impl Fn(BulkTick),
     ) -> Result<BulkOutcome> {
         let alvo = Alvo { host, pw, db };
         let keys = plan.keys;
         let cancel = plan.cancel;
+        let progress = &progress;
 
-        self.delete_prefix_com_teto(pool, alvo, plan, self.max_backup_bytes, move || {
-            unlink_keys(pool, alvo, keys, cancel, progress)
-        })
+        self.delete_prefix_com_teto(
+            pool,
+            alvo,
+            plan,
+            self.max_backup_bytes,
+            |lidas| progress(BulkTick::Lendo(lidas)),
+            move || {
+                unlink_keys(pool, alvo, keys, cancel, |saidas| {
+                    progress(BulkTick::Apagando(saidas))
+                })
+            },
+        )
         .await
     }
 
@@ -875,11 +1001,12 @@ impl History {
         alvo: Alvo<'_>,
         plan: BulkDelete<'_>,
         max_backup_bytes: usize,
+        lendo: impl Fn(u64),
         apagar: F,
     ) -> Result<BulkOutcome>
     where
         F: FnOnce() -> Fut,
-        Fut: Future<Output = std::result::Result<u64, BulkError>>,
+        Fut: Future<Output = std::result::Result<BulkDeleted, BulkError>>,
     {
         let Alvo { host, db, .. } = alvo;
         // Um único instante serve para converter os TTLs lidos (relativos)
@@ -889,23 +1016,51 @@ impl History {
 
         // Primeiro os retratos e o teto — tudo que pode recusar a operação
         // acontece antes de a primeira chave sair.
-        let (backup, before_json) = match plan.backup {
-            BackupChoice::None => (BackupKind::None, None),
+        let (backup, parts) = match plan.backup {
+            BackupChoice::None => (BackupKind::None, Vec::new()),
             BackupChoice::Inline => {
-                let json = read_snapshots(pool, alvo, plan.keys, now, max_backup_bytes).await?;
-                (BackupKind::Inline, Some(json))
+                let parts = read_snapshots(
+                    pool,
+                    alvo,
+                    plan.keys,
+                    now,
+                    max_backup_bytes,
+                    plan.cancel,
+                    &lendo,
+                )
+                .await?;
+                (BackupKind::Inline, parts)
             }
             BackupChoice::File(dir) => {
-                let json = read_snapshots(pool, alvo, plan.keys, now, max_backup_bytes).await?;
+                let parts = read_snapshots(
+                    pool,
+                    alvo,
+                    plan.keys,
+                    now,
+                    max_backup_bytes,
+                    plan.cancel,
+                    &lendo,
+                )
+                .await?;
                 let name = backup_file_name(host, db, plan.prefixes, now);
+                // O arquivo nasce com a cópia INTEIRA, antes de a primeira
+                // chave sair: a ordem do método é essa, e uma cópia que só
+                // existisse depois do `UNLINK` não protegeria nada. Se a
+                // exclusão parar no meio, o arquivo é reescrito com o
+                // conjunto tentado mais abaixo.
+                let json = montar_copia(&parts, plan.keys);
                 let path = write_backup_file(dir, &name, &json).map_err(HistoryError::BackupIo)?;
                 (
                     BackupKind::File {
                         path: path.to_string_lossy().into_owned(),
                     },
-                    None,
+                    parts,
                 )
             }
+        };
+        let before_json = match backup {
+            BackupKind::Inline => Some(montar_copia(&parts, plan.keys)),
+            BackupKind::None | BackupKind::File { .. } => None,
         };
 
         let key = bulk_entry_key(plan.prefixes);
@@ -934,17 +1089,31 @@ impl History {
         )?;
 
         match apagar().await {
-            Ok(deleted) => {
-                self.update_op(id, key, &entry_op(deleted))?;
+            Ok(feito) => {
+                self.close_bulk_row(
+                    id,
+                    key,
+                    &entry_op(feito.deleted),
+                    BackupTrim {
+                        backup: &backup,
+                        parts: &parts,
+                        keys: plan.keys,
+                    },
+                    feito.attempted,
+                )?;
                 Ok(BulkOutcome {
-                    entry_id: id,
-                    deleted,
+                    entry_id: if feito.attempted == 0 { None } else { Some(id) },
+                    deleted: feito.deleted,
+                    attempted: feito.attempted,
                 })
             }
-            // Nada saiu: a linha registraria uma mudança que não aconteceu,
-            // e isso é pior do que não ter linha — mesma decisão de
-            // `write_with_backup`.
-            Err(err) if err.deleted == 0 => {
+            // Nada foi TENTADO: a linha registraria uma mudança que não
+            // aconteceu, e isso é pior do que não ter linha — mesma decisão
+            // de `write_with_backup`. A conferência é por `attempted` e não
+            // por `deleted` porque um lote enviado cuja resposta se perdeu
+            // pode ter apagado tudo que mandou: aí há o que registrar e há
+            // o que restaurar, mesmo com a contagem em zero.
+            Err(err) if err.attempted == 0 => {
                 self.delete_row(id)?;
                 Err(HistoryError::Conn(err.source))
             }
@@ -952,10 +1121,90 @@ impl History {
             // verdade ANTES de o erro subir, senão o histórico promete de
             // volta chaves que não existem mais.
             Err(err) => {
-                self.update_op(id, key, &entry_op(err.deleted))?;
+                self.close_bulk_row(
+                    id,
+                    key,
+                    &entry_op(err.deleted),
+                    BackupTrim {
+                        backup: &backup,
+                        parts: &parts,
+                        keys: plan.keys,
+                    },
+                    err.attempted,
+                )?;
                 Err(HistoryError::Conn(err.source))
             }
         }
+    }
+
+    /// Fecha a linha de uma exclusão em massa: corrige a contagem e apara a
+    /// cópia ao conjunto que foi TENTADO.
+    ///
+    /// É aqui que mora o conserto do buraco mais caro deste caminho. A cópia
+    /// é tirada do conjunto ENUMERADO — tem de ser, ela nasce antes de a
+    /// primeira chave sair —, mas a linha que a oferece de volta precisa
+    /// descrever o conjunto TENTADO. Uma desistência durante a leitura dos
+    /// retratos (o desfecho mais provável de um clique em "desistir", porque
+    /// essa é a fase longa) deixava uma linha com `deleted: 0`, os N
+    /// retratos inteiros, e um botão "Voltar atrás" ao lado: um clique
+    /// escrevia N valores velhos por cima de N chaves vivas, e `rollback`
+    /// não guarda retrato do que sobrescreve.
+    ///
+    /// Três desfechos, e o do meio é o que exige o recorte:
+    ///
+    /// - tentou a lista inteira → a cópia já está certa, só a contagem muda;
+    /// - tentou um pedaço → a cópia é reescrita com `keys[..attempted]`;
+    /// - não tentou nada → a linha é REMOVIDA.
+    ///
+    /// Uma falha ao aparar apaga a linha em vez de deixá-la como está: uma
+    /// linha cuja cópia descreve mais do que a operação tocou é exatamente o
+    /// defeito que este método existe para impedir, e ficar sem volta atrás
+    /// para chaves que de fato saíram é o lado recuperável do erro — a cópia
+    /// em arquivo continua no disco, e a linha pode ser refeita; o dado
+    /// sobrescrito, não.
+    fn close_bulk_row(
+        &self,
+        id: i64,
+        key: &str,
+        op: &WriteOp,
+        copia: BackupTrim<'_>,
+        attempted: u64,
+    ) -> Result<()> {
+        let BackupTrim {
+            backup,
+            parts,
+            keys,
+        } = copia;
+        // `min` e não fé: `attempted` vem de uma soma de tamanhos de lote, e
+        // um índice fora da lista aqui derrubaria o núcleo no fim de uma
+        // exclusão que deu certo.
+        let corte = (attempted as usize).min(keys.len());
+
+        if corte == 0 {
+            // O arquivo de cópia, se houver, fica onde está: ninguém mais
+            // aponta para ele, e removê-lo no caminho de saída seria mais um
+            // caminho de erro para errar (a mesma decisão do arquivo órfão de
+            // uma exclusão que falha por inteiro).
+            return self.delete_row(id);
+        }
+
+        if corte < keys.len() {
+            let aparada = montar_copia(parts, &keys[..corte]);
+            let recorte = match backup {
+                BackupKind::Inline => self.update_before_json(id, &aparada),
+                BackupKind::File { path } => {
+                    rewrite_backup_file(path, &aparada).map_err(HistoryError::BackupIo)
+                }
+                // Sem cópia não há o que aparar.
+                BackupKind::None => Ok(()),
+            };
+            if let Err(err) = recorte {
+                self.delete_row(id)?;
+                return Err(err);
+            }
+        }
+
+        self.update_op(id, key, op)
     }
 
     /// As `limit` entradas mais recentes do host, mais novas primeiro.
@@ -1525,6 +1774,17 @@ mod tests {
         for key in keys {
             let _: () = redis::cmd("DEL").arg(key).query_async(conn).await.unwrap();
         }
+    }
+
+    /// O id da linha que a exclusão deixou.
+    ///
+    /// `expect` com motivo: uma exclusão que TENTOU chaves sempre deixa
+    /// linha — a única que não deixa é a que não tentou nenhuma, e essa tem
+    /// testes próprios (ver `close_bulk_row`).
+    fn linha(outcome: &BulkOutcome) -> i64 {
+        outcome
+            .entry_id
+            .expect("a exclusão tentou chaves, logo deixou linha")
     }
 
     fn open_history() -> (tempfile::TempDir, History) {
@@ -2471,7 +2731,7 @@ mod tests {
             "as três chaves precisam ter saído do banco"
         );
 
-        let entry = history.get(outcome.entry_id).unwrap();
+        let entry = history.get(linha(&outcome)).unwrap();
         let retratos = snapshots_of(
             entry
                 .before_json
@@ -2544,7 +2804,7 @@ mod tests {
             .await
             .unwrap();
 
-        let entry = history.get(outcome.entry_id).unwrap();
+        let entry = history.get(linha(&outcome)).unwrap();
         let retratos = snapshots_of(entry.before_json.as_deref().unwrap());
         let valor = &retratos[0]["elements"][0]["value"];
 
@@ -2594,7 +2854,7 @@ mod tests {
         assert_eq!(outcome.deleted, 2);
         assert_eq!(exists(&mut conn, &keys).await, 0);
 
-        let entry = history.get(outcome.entry_id).unwrap();
+        let entry = history.get(linha(&outcome)).unwrap();
         assert!(
             entry.before_json.is_none(),
             "quem recusou a cópia não pode acabar com uma: {:?}",
@@ -2637,6 +2897,7 @@ mod tests {
                     cancel: &cancel,
                 },
                 10,
+                |_| {},
                 || unlink_keys(&pool, alvo, &keys, &cancel, |_| {}),
             )
             .await
@@ -2690,7 +2951,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.deleted, 2);
-        let entry = history.get(outcome.entry_id).unwrap();
+        let entry = history.get(linha(&outcome)).unwrap();
         assert!(
             entry.before_json.is_none(),
             "a cópia foi para o arquivo; before_json não pode repeti-la"
@@ -2748,9 +3009,9 @@ mod tests {
                 // bandeira também no TOPO do laço, isso não apagaria nada, e
                 // um parcial de zero não distingue a linha corrigida com a
                 // verdade da linha que nasce em zero e nunca é corrigida.
-                |saidas| {
-                    if saidas >= UNLINK_BATCH as u64 {
-                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                |tick| {
+                    if matches!(tick, BulkTick::Apagando(saidas) if saidas >= UNLINK_BATCH as u64) {
+                        cancel.store(true, Ordering::Relaxed);
                     }
                 },
             )
@@ -2760,7 +3021,7 @@ mod tests {
         assert_eq!(outcome.deleted, UNLINK_BATCH as u64);
 
         match history
-            .get(outcome.entry_id)
+            .get(linha(&outcome))
             .unwrap()
             .op
             .expect("a entrada precisa carregar a operação")
@@ -2816,9 +3077,11 @@ mod tests {
                     cancel: &cancel,
                 },
                 MAX_BACKUP_BYTES,
+                |_| {},
                 || async {
                     Err(BulkError {
                         deleted: 2,
+                        attempted: 5,
                         source: ConnError::Unreachable {
                             host: "host de teste".to_string(),
                             detail: "conexão caiu no meio do lote".to_string(),
@@ -2932,7 +3195,7 @@ mod tests {
         );
 
         let relatorio = history
-            .rollback(&pool, &host, None, apagada.entry_id)
+            .rollback(&pool, &host, None, linha(&apagada))
             .await
             .unwrap();
 
@@ -2973,7 +3236,7 @@ mod tests {
             "o prazo precisa voltar junto do valor, veio {prazo}"
         );
         assert!(
-            history.get(apagada.entry_id).unwrap().rolled_back,
+            history.get(linha(&apagada)).unwrap().rolled_back,
             "o lote inteiro voltou: a entrada é um desfeito de verdade"
         );
 
@@ -3001,12 +3264,12 @@ mod tests {
         )
         .await;
         assert!(
-            history.get(apagada.entry_id).unwrap().before_json.is_none(),
+            history.get(linha(&apagada)).unwrap().before_json.is_none(),
             "a cópia está no arquivo: é de lá que a restauração tem de sair"
         );
 
         let relatorio = history
-            .rollback(&pool, &host, None, apagada.entry_id)
+            .rollback(&pool, &host, None, linha(&apagada))
             .await
             .unwrap();
 
@@ -3048,7 +3311,7 @@ mod tests {
             delete_all(&history, &pool, &host, &prefixes, &keys, BackupChoice::None).await;
 
         let erro = history
-            .rollback(&pool, &host, None, apagada.entry_id)
+            .rollback(&pool, &host, None, linha(&apagada))
             .await
             .unwrap_err();
 
@@ -3066,7 +3329,7 @@ mod tests {
             "uma recusa não pode escrever nada"
         );
         assert!(
-            !history.get(apagada.entry_id).unwrap().rolled_back,
+            !history.get(linha(&apagada)).unwrap().rolled_back,
             "uma recusa não desfez coisa nenhuma"
         );
     }
@@ -3096,7 +3359,7 @@ mod tests {
         .await;
 
         let relatorio = history
-            .rollback(&pool, &host, None, apagada.entry_id)
+            .rollback(&pool, &host, None, linha(&apagada))
             .await
             .unwrap();
 
@@ -3109,7 +3372,7 @@ mod tests {
         }
 
         assert!(
-            !history.get(apagada.entry_id).unwrap().rolled_back,
+            !history.get(linha(&apagada)).unwrap().rolled_back,
             "desfeito pela metade não é desfeito"
         );
         assert_eq!(
@@ -3145,7 +3408,7 @@ mod tests {
         .await;
 
         let relatorio = history
-            .rollback(&pool, &host, None, apagada.entry_id)
+            .rollback(&pool, &host, None, linha(&apagada))
             .await
             .unwrap();
 
@@ -3192,7 +3455,7 @@ mod tests {
         drop(destino);
 
         let erro = history
-            .rollback(&pool, &host, None, apagada.entry_id)
+            .rollback(&pool, &host, None, linha(&apagada))
             .await
             .unwrap_err();
 
@@ -3206,14 +3469,420 @@ mod tests {
             "sem a cópia não há o que escrever"
         );
         assert!(
-            !history.get(apagada.entry_id).unwrap().rolled_back,
+            !history.get(linha(&apagada)).unwrap().rolled_back,
             "nada foi desfeito"
         );
     }
 
-    /// Uma queda no meio do `UNLINK` deixa `deleted` em 0 para sempre, com
-    /// a cópia inteira e perfeitamente usável do lado. Quem decide o que
-    /// restaurar é a cópia, nunca essa contagem.
+    /// O andamento sai com a FASE junto do número, e nenhum teste conferia
+    /// os valores — só que o fechamento era chamado.
+    ///
+    /// Importa porque, durante a leitura dos retratos, o andamento é a única
+    /// coisa que a pessoa vê: nenhuma chave saiu ainda, e um número sem fase
+    /// faria a janela dizer "3 chaves apagadas" antes de a primeira sair.
+    #[tokio::test]
+    async fn progress_names_the_phase_of_every_number_it_reports() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:fases:";
+        let keys = seed_keys(&mut conn, prefix, 3).await;
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+        let vistos = std::sync::Mutex::new(Vec::<BulkTick>::new());
+
+        history
+            .delete_prefix_with_backup(
+                &pool,
+                &host,
+                None,
+                host.db,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::Inline,
+                    cancel: &cancel,
+                },
+                |tick| vistos.lock().unwrap().push(tick),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *vistos.lock().unwrap(),
+            vec![
+                BulkTick::Lendo(1),
+                BulkTick::Lendo(2),
+                BulkTick::Lendo(3),
+                // Um lote só: três chaves cabem de sobra em `UNLINK_BATCH`.
+                BulkTick::Apagando(3),
+            ],
+            "a leitura conta chave a chave e vem ANTES; o apagar conta por lote"
+        );
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    /// **O teste do conserto.** Uma exclusão que parou no meio só pode
+    /// oferecer de volta o que ELA tentou apagar.
+    ///
+    /// A cópia nasce do conjunto ENUMERADO — tem de nascer, ela é tirada
+    /// antes de a primeira chave sair. A linha que a oferece de volta, não:
+    /// se a linha guardar os retratos das chaves que nunca foram tocadas,
+    /// um clique em "Voltar atrás" escreve valores velhos por cima de
+    /// valores vivos, e `rollback` não tira retrato do que sobrescreve —
+    /// não há segunda volta atrás.
+    ///
+    /// Por isso a asserção que importa aqui não é sobre as chaves que
+    /// voltaram: é sobre a que ficou FORA do corte, reescrita depois da
+    /// desistência, que precisa manter o valor novo.
+    #[tokio::test]
+    async fn a_cancelled_delete_only_offers_back_what_it_tried_to_delete() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:corte:";
+        let keys = seed_keys(&mut conn, prefix, 4).await;
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+        let alvo = Alvo {
+            host: &host,
+            pw: None,
+            db: host.db,
+        };
+
+        // Dois lotes de dois, com a desistência entre eles: o fechamento
+        // apaga o primeiro lote de verdade e devolve `attempted: 2`. É a
+        // mesma forma que `unlink_em_lotes` devolveria, e forjá-la aqui é o
+        // que permite pinar o corte sem depender de tempo.
+        let tentadas = 2usize;
+        let outcome = history
+            .delete_prefix_com_teto(
+                &pool,
+                alvo,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::Inline,
+                    cancel: &cancel,
+                },
+                MAX_BACKUP_BYTES,
+                |_| {},
+                || async {
+                    unlink_keys(
+                        &pool,
+                        alvo,
+                        &keys[..tentadas],
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
+                    .await
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (outcome.deleted, outcome.attempted),
+            (2, 2),
+            "duas saíram e duas foram tentadas"
+        );
+
+        let copia = history
+            .get(linha(&outcome))
+            .unwrap()
+            .before_json
+            .expect("tentou chaves, então a linha guarda a cópia delas");
+        let nomes: Vec<String> = snapshots_of(&copia)
+            .into_iter()
+            .map(|retrato| retrato["key"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            nomes,
+            keys[..tentadas].to_vec(),
+            "a cópia da linha tem de descrever o conjunto TENTADO, não o enumerado"
+        );
+
+        // As duas que ficaram são reescritas: é a vida normal de um banco
+        // entre a desistência e o clique em "Voltar atrás".
+        for key in &keys[tentadas..] {
+            let _: () = redis::cmd("SET")
+                .arg(key)
+                .arg("valor-novo")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+        }
+
+        let relatorio = history
+            .rollback(&pool, &host, None, linha(&outcome))
+            .await
+            .unwrap();
+        match relatorio {
+            RollbackOutcome::Bulk { restored, failed } => {
+                assert_eq!(restored, keys[..tentadas].to_vec(), "só as tentadas voltam");
+                assert!(failed.is_empty(), "nenhuma devia falhar: {failed:?}");
+            }
+            outro => panic!("a exclusão em massa precisa relatar o lote: {outro:?}"),
+        }
+
+        for key in &keys[..tentadas] {
+            let valor: String = redis::cmd("GET")
+                .arg(key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(valor, format!("valor-{key}"), "{key} tinha de voltar");
+        }
+        for key in &keys[tentadas..] {
+            let valor: String = redis::cmd("GET")
+                .arg(key)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(
+                valor, "valor-novo",
+                "{key} NUNCA foi apagada: a volta atrás não pode escrever por cima dela"
+            );
+        }
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    /// O mesmo corte, na cópia em ARQUIVO. O arquivo nasce com a cópia
+    /// inteira (tem de nascer, antes da primeira chave sair) e é reescrito
+    /// com o conjunto tentado quando a exclusão para no meio.
+    #[tokio::test]
+    async fn a_cancelled_delete_trims_the_file_backup_too() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:corte_arquivo:";
+        let keys = seed_keys(&mut conn, prefix, 4).await;
+
+        let (_dir, history) = open_history();
+        let destino = tempfile::TempDir::new().unwrap();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+        let alvo = Alvo {
+            host: &host,
+            pw: None,
+            db: host.db,
+        };
+
+        let tentadas = 3usize;
+        let outcome = history
+            .delete_prefix_com_teto(
+                &pool,
+                alvo,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::File(destino.path()),
+                    cancel: &cancel,
+                },
+                MAX_BACKUP_BYTES,
+                |_| {},
+                || async {
+                    unlink_keys(
+                        &pool,
+                        alvo,
+                        &keys[..tentadas],
+                        &AtomicBool::new(false),
+                        |_| {},
+                    )
+                    .await
+                },
+            )
+            .await
+            .unwrap();
+
+        let entry = history.get(linha(&outcome)).unwrap();
+        let WriteOp::DeletePrefix {
+            backup: BackupKind::File { path },
+            ..
+        } = entry.op.expect("a entrada precisa carregar a operação")
+        else {
+            panic!("a cópia tinha de ser a de arquivo")
+        };
+        let nomes: Vec<String> = snapshots_of(&std::fs::read_to_string(&path).unwrap())
+            .into_iter()
+            .map(|retrato| retrato["key"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            nomes,
+            keys[..tentadas].to_vec(),
+            "o arquivo também tem de descrever só o conjunto tentado"
+        );
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    /// Desistir ANTES do primeiro lote não deixa linha nenhuma.
+    ///
+    /// Uma linha com `deleted: 0` e os N retratos registraria uma mudança
+    /// que não aconteceu — e, pior, ofereceria "Voltar atrás" ao lado de uma
+    /// frase que diz "Apagar 0 chaves". É a mesma decisão que
+    /// `write_with_backup` já toma quando a escrita falha.
+    #[tokio::test]
+    async fn a_delete_that_tried_nothing_leaves_no_row() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:nada_tentado:";
+        let keys = seed_keys(&mut conn, prefix, 3).await;
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+
+        let outcome = history
+            .delete_prefix_com_teto(
+                &pool,
+                Alvo {
+                    host: &host,
+                    pw: None,
+                    db: host.db,
+                },
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::Inline,
+                    cancel: &cancel,
+                },
+                MAX_BACKUP_BYTES,
+                |_| {},
+                || async {
+                    Ok(BulkDeleted {
+                        deleted: 0,
+                        attempted: 0,
+                    })
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.attempted, 0);
+        assert!(
+            outcome.entry_id.is_none(),
+            "sem nada tentado não há linha, e o desfecho tem de dizer isso"
+        );
+        assert!(
+            history.list(&host.id, 10).unwrap().is_empty(),
+            "a linha que oferecia a volta atrás de uma exclusão que não aconteceu precisa ter sido \
+             removida"
+        );
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            3,
+            "e as chaves continuam todas no banco"
+        );
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    /// Desistir durante a LEITURA DOS RETRATOS para a leitura, em vez de
+    /// esperar as N idas e voltas terminarem.
+    ///
+    /// Essa é a fase longa da exclusão, e era a que não conferia a bandeira:
+    /// o "desistir" não tinha efeito observável nela até o último retrato
+    /// ser lido. O andamento conta as chaves percorridas, que é o único
+    /// sinal que a pessoa tem enquanto nenhuma chave saiu ainda.
+    #[tokio::test]
+    async fn cancelling_during_the_snapshot_phase_stops_reading() {
+        let pool = Pool::new();
+        let host = bulk_host();
+        let mut conn = pool.get(&host, host.db, None).await.unwrap();
+        let prefix = "history_rs_bulk:lendo:";
+        let keys = seed_keys(&mut conn, prefix, 6).await;
+
+        let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
+        let prefixes = vec![prefix.to_string()];
+        let lidas = std::sync::Mutex::new(Vec::<u64>::new());
+
+        let outcome = history
+            .delete_prefix_com_teto(
+                &pool,
+                Alvo {
+                    host: &host,
+                    pw: None,
+                    db: host.db,
+                },
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::Inline,
+                    cancel: &cancel,
+                },
+                MAX_BACKUP_BYTES,
+                |quantas| {
+                    lidas.lock().unwrap().push(quantas);
+                    if quantas >= 2 {
+                        cancel.store(true, Ordering::Relaxed);
+                    }
+                },
+                || async {
+                    unlink_keys(
+                        &pool,
+                        Alvo {
+                            host: &host,
+                            pw: None,
+                            db: host.db,
+                        },
+                        &keys,
+                        &cancel,
+                        |_| {},
+                    )
+                    .await
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *lidas.lock().unwrap(),
+            vec![1, 2],
+            "o andamento é o acumulado de CHAVES percorridas, e a leitura para na \
+             primeira conferência depois da bandeira — nunca percorre as 6"
+        );
+        assert_eq!(
+            (outcome.deleted, outcome.attempted),
+            (0, 0),
+            "a mesma bandeira segue levantada no laço de lotes: nada é tentado"
+        );
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            6,
+            "nenhuma chave podia ter saído"
+        );
+        assert!(
+            history.list(&host.id, 10).unwrap().is_empty(),
+            "e a desistência na fase dos retratos é justamente a que deixava a linha perigosa \
+             para trás"
+        );
+
+        drop_keys(&mut conn, &keys).await;
+    }
+
+    /// `deleted: 0` com a cópia inteira do lado é um estado ALCANÇÁVEL, e
+    /// não o que o comentário antigo dizia.
+    ///
+    /// Não é uma queda de conexão: uma exclusão que não TENTA nada já não
+    /// deixa linha nenhuma (ver `a_delete_that_tried_nothing_leaves_no_row`).
+    /// O que produz esta linha é o caso que `BulkDeleted` documenta —
+    /// `Pool::with_retry` reenvia um `UNLINK` cuja resposta se perdeu, o
+    /// servidor já o tinha aplicado, e o reenvio devolve 0 para chaves que
+    /// saíram. As chaves foram tentadas, a cópia descreve exatamente elas, e
+    /// a contagem é um limite inferior.
+    ///
+    /// Por isso a regra continua valendo e tem de valer: quem decide o que
+    /// restaurar é a CÓPIA — agora que ela descreve o conjunto tentado —,
+    /// nunca essa contagem.
     #[tokio::test]
     async fn a_row_that_counted_no_deletion_still_restores_its_backup() {
         let pool = Pool::new();
@@ -3223,41 +3892,60 @@ mod tests {
         let keys = seed_keys(&mut conn, prefix, 2).await;
 
         let (_dir, history) = open_history();
+        let cancel = AtomicBool::new(false);
         let prefixes = vec![prefix.to_string()];
-        let apagada = delete_all(
-            &history,
-            &pool,
-            &host,
-            &prefixes,
-            &keys,
-            BackupChoice::Inline,
-        )
-        .await;
-        let copia = history
-            .get(apagada.entry_id)
-            .unwrap()
-            .before_json
-            .expect("a cópia inline precisa estar na linha");
-
-        // A mesma cópia numa linha que nunca chegou a contar o que apagou.
-        let travada = WriteOp::DeletePrefix {
-            prefixes: prefixes.clone(),
-            deleted: 0,
-            enumerated: keys.len() as u64,
-            backup: BackupKind::Inline,
+        let alvo = Alvo {
+            host: &host,
+            pw: None,
+            db: host.db,
         };
-        let id = history
-            .insert_entry(
-                &host,
-                host.db,
-                prefix,
-                &op_summary(prefix, &travada),
-                serde_json::to_string(&travada).ok().as_deref(),
-                Some(&copia),
-                Actor::Human,
-                now_unix_ms(),
+
+        // Montada pelo caminho de verdade: as duas chaves saem (o `UNLINK`
+        // é o real), mas a contagem que volta é zero — o retrato exato de um
+        // reenvio depois de uma resposta perdida. É `attempted`, e só ele,
+        // que faz a linha sobreviver.
+        let apagada = history
+            .delete_prefix_com_teto(
+                &pool,
+                alvo,
+                BulkDelete {
+                    prefixes: &prefixes,
+                    keys: &keys,
+                    backup: BackupChoice::Inline,
+                    cancel: &cancel,
+                },
+                MAX_BACKUP_BYTES,
+                |_| {},
+                || async {
+                    let feito =
+                        unlink_keys(&pool, alvo, &keys, &AtomicBool::new(false), |_| {}).await?;
+                    Ok(BulkDeleted {
+                        deleted: 0,
+                        attempted: feito.attempted,
+                    })
+                },
             )
+            .await
             .unwrap();
+
+        assert_eq!(
+            exists(&mut conn, &keys).await,
+            0,
+            "as duas saíram de verdade, por mais que a contagem diga zero"
+        );
+        let id = linha(&apagada);
+        assert_eq!(
+            snapshots_of(
+                &history
+                    .get(id)
+                    .unwrap()
+                    .before_json
+                    .expect("a cópia inline precisa estar na linha")
+            )
+            .len(),
+            2,
+            "tentadas foram as duas, então a cópia guarda as duas"
+        );
 
         let relatorio = history.rollback(&pool, &host, None, id).await.unwrap();
 

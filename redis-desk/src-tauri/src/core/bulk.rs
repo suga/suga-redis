@@ -19,7 +19,7 @@ use super::keys::{Alvo, KeyKind, SCAN_COUNT, ScanTick, escapar_glob};
 pub const MAX_ENUMERATED: usize = 100_000;
 
 /// O resultado de enumerar um ou mais prefixos: os nomes encontrados, quantos
-/// de cada tipo, e se a lista parou no teto antes de esgotar o prefixo.
+/// de cada tipo, e por que a lista parou — no teto, ou numa desistência.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Enumeration {
     pub keys: Vec<String>,
@@ -27,6 +27,12 @@ pub struct Enumeration {
     pub kinds: Vec<(KeyKind, u64)>,
     /// Parou no teto: há mais do que isto sob o prefixo.
     pub truncated: bool,
+    /// Parou porque alguém desistiu. A lista que sai daqui não descreve o
+    /// prefixo e NÃO pode virar a contagem de um diálogo: quem recebe isto
+    /// joga fora. Separado de `truncated` porque as duas paradas pedem
+    /// respostas opostas — o teto é um aviso para repetir a operação, a
+    /// desistência é um pedido para esquecê-la.
+    pub cancelled: bool,
 }
 
 /// Como a varredura decide se uma chave pertence ao pedido.
@@ -111,9 +117,10 @@ pub async fn enumerate(
     pool: &Pool,
     alvo: Alvo<'_>,
     prefixes: &[String],
+    cancel: &AtomicBool,
     progress: impl Fn(ScanTick),
 ) -> Result<Enumeration, ConnError> {
-    enumerate_com_teto(pool, alvo, prefixes, progress, MAX_ENUMERATED).await
+    enumerate_com_teto(pool, alvo, prefixes, cancel, progress, MAX_ENUMERATED).await
 }
 
 /// `enumerate` com o teto como parâmetro, para o teste do caso de corte não
@@ -122,6 +129,7 @@ async fn enumerate_com_teto(
     pool: &Pool,
     alvo: Alvo<'_>,
     prefixes: &[String],
+    cancel: &AtomicBool,
     progress: impl Fn(ScanTick),
     teto: usize,
 ) -> Result<Enumeration, ConnError> {
@@ -143,9 +151,23 @@ async fn enumerate_com_teto(
             let mut kinds: Vec<(KeyKind, u64)> = Vec::new();
             let mut vistas: std::collections::HashSet<String> = std::collections::HashSet::new();
             let mut truncated = false;
+            let mut cancelled = false;
             let mut cursor = 0u64;
 
             loop {
+                // Conferido no TOPO, antes da primeira volta do cursor: o
+                // `MATCH` do `SCAN` não encurta o trabalho do servidor (ver
+                // `Modo`), então num banco grande cujo prefixo tem poucas
+                // chaves o teto nunca dispara e o cursor percorre o espaço de
+                // chaves INTEIRO. Quem clicou no prefixo errado precisa
+                // conseguir parar isso, e precisa conseguir parar antes da
+                // primeira ida também — a desistência pode chegar enquanto a
+                // tarefa ainda nem foi escalonada.
+                if cancel.load(Ordering::Relaxed) {
+                    cancelled = true;
+                    break;
+                }
+
                 let mut comando = redis::cmd("SCAN");
                 comando.arg(cursor).arg("COUNT").arg(SCAN_COUNT);
                 if let Modo::Match(padrao) = &modo {
@@ -208,6 +230,7 @@ async fn enumerate_com_teto(
                 keys,
                 kinds,
                 truncated,
+                cancelled,
             })
         }
     })
@@ -227,7 +250,39 @@ pub const UNLINK_BATCH: usize = 500;
 #[derive(Debug)]
 pub struct BulkError {
     pub deleted: u64,
+    /// Quantas chaves foram TENTADAS — ver `BulkDeleted::attempted`. Inclui
+    /// o lote que falhou: ele foi enviado, e um `UNLINK` que o servidor
+    /// aplicou antes de a resposta se perder apagou essas chaves de
+    /// qualquer jeito. A cópia de segurança precisa continuar descrevendo-as.
+    pub attempted: u64,
     pub source: ConnError,
+}
+
+/// O que uma exclusão em lotes fez: quantas o servidor disse ter apagado e
+/// quantas foram TENTADAS.
+///
+/// Os dois números existem porque nenhum dos dois serve sozinho:
+///
+/// - `deleted` é um **limite inferior**. `Pool::with_retry` reenvia o mesmo
+///   `UNLINK` quando a conexão morre, e `UNLINK` é idempotente no estado
+///   final mas não no valor de retorno: se o servidor aplicou o primeiro
+///   envio e a resposta se perdeu, o reenvio devolve 0 para chaves que já
+///   saíram. Ele também é menor que o pedido quando uma chave expirou
+///   sozinha entre a contagem e a exclusão.
+/// - `attempted` é um **limite superior**, e não depende de resposta
+///   nenhuma: é a soma dos tamanhos dos lotes enviados. Como os lotes correm
+///   na ORDEM da lista e `cancel` só é conferido entre eles, `keys[..attempted]`
+///   descreve exatamente o conjunto tentado — nem mais, nem menos. É por isso
+///   que um `u64` basta e não é preciso devolver nomes.
+///
+/// Quem recorta a cópia de segurança e os caches da tela usa `attempted`:
+/// errar para o lado de guardar o retrato de uma chave que ficou é
+/// recuperável; oferecer a volta atrás de uma chave que nunca foi tocada,
+/// não.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BulkDeleted {
+    pub deleted: u64,
+    pub attempted: u64,
 }
 
 /// O laço de lotes, sem Redis: `apagar` é a costura que de fato conversa
@@ -253,18 +308,24 @@ pub(crate) async fn unlink_em_lotes<F, Fut>(
     cancel: &AtomicBool,
     progress: impl Fn(u64),
     apagar: F,
-) -> Result<u64, BulkError>
+) -> Result<BulkDeleted, BulkError>
 where
     F: Fn(&[String]) -> Fut,
     Fut: Future<Output = Result<u64, ConnError>>,
 {
     let mut total: u64 = 0;
+    let mut attempted: u64 = 0;
     let tamanho_lote = lote.max(1);
 
     for pedaco in keys.chunks(tamanho_lote) {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
+
+        // Somado ANTES de pedir, e não depois de a resposta chegar: um lote
+        // enviado foi tentado mesmo que a resposta se perca, e é justamente
+        // nesse caso que a cópia de segurança precisa descrevê-lo.
+        attempted += pedaco.len() as u64;
 
         match apagar(pedaco).await {
             Ok(apagadas) => {
@@ -274,6 +335,7 @@ where
             Err(source) => {
                 return Err(BulkError {
                     deleted: total,
+                    attempted,
                     source,
                 });
             }
@@ -284,7 +346,10 @@ where
         }
     }
 
-    Ok(total)
+    Ok(BulkDeleted {
+        deleted: total,
+        attempted,
+    })
 }
 
 /// Apaga as chaves enumeradas, em lotes de `UNLINK_BATCH`, via `UNLINK` —
@@ -293,17 +358,20 @@ where
 /// enquanto libera; `UNLINK` manda essa liberação para uma thread de
 /// segundo plano.
 ///
-/// Devolve quantas chaves o servidor disse ter apagado de verdade — que
-/// pode ser menos que `keys.len()` se alguma já tiver sumido sozinha
-/// (expirado, ou apagada por outra conexão) no caminho entre a enumeração
-/// e a exclusão.
+/// Devolve `BulkDeleted`: quantas o servidor disse ter apagado e quantas
+/// foram tentadas. O primeiro número pode ser menor que `keys.len()` por
+/// dois motivos diferentes — uma chave que sumiu sozinha (expirou, ou outra
+/// conexão a apagou) entre a enumeração e a exclusão, e um lote que
+/// `Pool::with_retry` reenviou depois de perder a resposta de um `UNLINK`
+/// que o servidor JÁ tinha aplicado. O segundo caso faz `deleted` ser um
+/// **limite inferior**, não um número exato: ver `BulkDeleted`.
 pub async fn unlink_keys(
     pool: &Pool,
     alvo: Alvo<'_>,
     keys: &[String],
     cancel: &AtomicBool,
     progress: impl Fn(u64),
-) -> Result<u64, BulkError> {
+) -> Result<BulkDeleted, BulkError> {
     let Alvo { host, pw, db } = alvo;
 
     unlink_em_lotes(keys, UNLINK_BATCH, cancel, progress, |lote: &[String]| {
@@ -472,10 +540,15 @@ mod tests {
             let pool = Pool::new();
             let host = test_host();
 
-            let enumeration =
-                enumerate(&pool, alvo(&host), &prefixos(&["only_rs_test:a:"]), |_| {})
-                    .await
-                    .unwrap();
+            let enumeration = enumerate(
+                &pool,
+                alvo(&host),
+                &prefixos(&["only_rs_test:a:"]),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .await
+            .unwrap();
 
             assert_eq!(
                 ordenadas(enumeration.keys),
@@ -506,6 +579,7 @@ mod tests {
                 &pool,
                 alvo(&host),
                 &prefixos(&["prefix_itself_rs_test:wallet"]),
+                &AtomicBool::new(false),
                 |_| {},
             )
             .await
@@ -536,6 +610,7 @@ mod tests {
                 &pool,
                 alvo(&host),
                 &prefixos(&["wildcard_rs_test:lit*"]),
+                &AtomicBool::new(false),
                 |_| {},
             )
             .await
@@ -559,9 +634,15 @@ mod tests {
             let pool = Pool::new();
             let host = test_host();
 
-            let enumeration = enumerate(&pool, alvo(&host), &prefixos(&[""]), |_| {})
-                .await
-                .unwrap();
+            let enumeration = enumerate(
+                &pool,
+                alvo(&host),
+                &prefixos(&[""]),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .await
+            .unwrap();
 
             for chave in chaves {
                 assert!(
@@ -585,14 +666,23 @@ mod tests {
             let pool = Pool::new();
             let host = test_host();
 
-            let sem_prefixo_nenhum = enumerate(&pool, alvo(&host), &[], |_| {}).await.unwrap();
+            let sem_prefixo_nenhum =
+                enumerate(&pool, alvo(&host), &[], &AtomicBool::new(false), |_| {})
+                    .await
+                    .unwrap();
             for chave in chaves {
                 assert!(sem_prefixo_nenhum.keys.iter().any(|k| k == chave));
             }
 
-            let com_prefixo_vazio = enumerate(&pool, alvo(&host), &prefixos(&[""]), |_| {})
-                .await
-                .unwrap();
+            let com_prefixo_vazio = enumerate(
+                &pool,
+                alvo(&host),
+                &prefixos(&[""]),
+                &AtomicBool::new(false),
+                |_| {},
+            )
+            .await
+            .unwrap();
             for chave in chaves {
                 assert!(com_prefixo_vazio.keys.iter().any(|k| k == chave));
             }
@@ -615,6 +705,7 @@ mod tests {
                 &pool,
                 alvo(&host),
                 &prefixos(&["several_rs_test:a:", "several_rs_test:c:"]),
+                &AtomicBool::new(false),
                 |_| {},
             )
             .await
@@ -662,7 +753,14 @@ mod tests {
             .await
             .unwrap();
 
-        let resultado = enumerate(&pool, alvo(&host), &prefixos(&[prefix]), |_| {}).await;
+        let resultado = enumerate(
+            &pool,
+            alvo(&host),
+            &prefixos(&[prefix]),
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .await;
 
         for chave in [&string1, &string2, &hash1] {
             let _: () = redis::cmd("DEL")
@@ -700,6 +798,7 @@ mod tests {
                 &pool,
                 alvo(&host),
                 &prefixos(&["ceiling_rs_test:"]),
+                &AtomicBool::new(false),
                 |_| {},
                 5,
             )
@@ -731,7 +830,8 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(apagadas, 3);
+            assert_eq!(apagadas.deleted, 3);
+            assert_eq!(apagadas.attempted, 3);
 
             let mut conn = pool.get(&host, host.db, None).await.unwrap();
             for chave in chaves {
@@ -764,7 +864,7 @@ mod tests {
             .await
             .unwrap();
 
-            assert_eq!(apagadas, 1);
+            assert_eq!(apagadas.deleted, 1);
 
             let mut conn = pool.get(&host, host.db, None).await.unwrap();
             let existe: bool = redis::cmd("EXISTS")
@@ -799,7 +899,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            assert_eq!(apagadas, 1, "só \"counts_rs_test:a\" existia de verdade");
+            assert_eq!(
+                apagadas.deleted, 1,
+                "só \"counts_rs_test:a\" existia de verdade"
+            );
+            assert_eq!(
+                apagadas.attempted, 2,
+                "as duas foram TENTADAS: a que já tinha sumido também entrou no \
+                 `UNLINK`"
+            );
         })
         .await;
     }
@@ -833,7 +941,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(total, 0, "nada podia ter saído");
+        assert_eq!(total.deleted, 0, "nada podia ter saído");
+        assert_eq!(
+            total.attempted, 0,
+            "nenhuma chave podia ter sido TENTADA — é este zero que apaga a \
+             linha do histórico em vez de deixá-la oferecendo uma volta atrás"
+        );
         assert_eq!(
             lotes.load(Ordering::Relaxed),
             0,
@@ -864,7 +977,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(total, 2, "só o 1º lote devia ter rodado");
+        assert_eq!(total.deleted, 2, "só o 1º lote devia ter rodado");
+        assert_eq!(
+            total.attempted, 2,
+            "o conjunto tentado é o 1º lote inteiro, e é ele que a cópia \
+             precisa descrever"
+        );
         assert_eq!(*lotes_vistos.lock().unwrap(), vec![2]);
     }
 
@@ -889,7 +1007,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(*tamanhos.lock().unwrap(), vec![500, 500, 200]);
-        assert_eq!(total, 1200);
+        assert_eq!(total.deleted, 1200);
+        assert_eq!(total.attempted, 1200);
     }
 
     #[tokio::test]
@@ -924,5 +1043,125 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(erro.deleted, 500);
+        assert_eq!(
+            erro.attempted, 1000,
+            "o lote que falhou FOI tentado: suas chaves podem ter saído com a \
+             resposta perdida, e a cópia precisa continuar descrevendo-as"
+        );
+    }
+
+    /// Falha no PRIMEIRO lote (`indice == 0`) — a fronteira que
+    /// `delete_prefix_com_teto` passou a usar como corte.
+    ///
+    /// Zero apagadas com um lote tentado é diferente de zero apagadas sem
+    /// lote nenhum: o primeiro pode ter deixado chaves no chão com a
+    /// resposta perdida, o segundo não tocou em nada.
+    #[tokio::test]
+    async fn a_failed_first_batch_reports_zero_deleted_and_one_batch_attempted() {
+        let keys: Vec<String> = (0..1000).map(|i| format!("fail0_rs_test:{i:04}")).collect();
+        let cancel = AtomicBool::new(false);
+
+        let erro = unlink_em_lotes(
+            &keys,
+            500,
+            &cancel,
+            |_| {},
+            |_: &[String]| async {
+                Err(ConnError::Protocol(
+                    "a conexão caiu no primeiro lote".to_string(),
+                ))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(erro.deleted, 0, "nada chegou a ser contado");
+        assert_eq!(
+            erro.attempted, 500,
+            "o primeiro lote foi tentado, e isso não é o mesmo que não ter \
+             começado"
+        );
+    }
+
+    /// `deleted` é um LIMITE INFERIOR: `Pool::with_retry` reenvia o mesmo
+    /// `UNLINK` quando a conexão morre, e um reenvio de comando já aplicado
+    /// devolve 0 para chaves que saíram. `attempted` é o número que não
+    /// depende da resposta do servidor.
+    #[tokio::test]
+    async fn attempted_counts_a_batch_the_server_reported_as_zero() {
+        let keys: Vec<String> = (0..600).map(|i| format!("lower_rs_test:{i:04}")).collect();
+        let cancel = AtomicBool::new(false);
+
+        let total = unlink_em_lotes(&keys, 500, &cancel, |_| {}, |_: &[String]| async { Ok(0) })
+            .await
+            .unwrap();
+
+        assert_eq!(total.deleted, 0, "o servidor disse que não apagou nada");
+        assert_eq!(
+            total.attempted, 600,
+            "tentadas foram todas, e é o que a cópia e os caches precisam saber"
+        );
+    }
+
+    /// O `progress` do laço é o único sinal que a pessoa tem durante a
+    /// exclusão, e nenhum teste conferia os VALORES que ele recebe.
+    #[tokio::test]
+    async fn progress_reports_the_running_total_after_each_batch() {
+        let keys: Vec<String> = (0..1200).map(|i| format!("prog_rs_test:{i:04}")).collect();
+        let cancel = AtomicBool::new(false);
+        let vistos = std::sync::Mutex::new(Vec::<u64>::new());
+
+        unlink_em_lotes(
+            &keys,
+            500,
+            &cancel,
+            |quantas| vistos.lock().unwrap().push(quantas),
+            |lote: &[String]| {
+                let n = lote.len() as u64;
+                async move { Ok(n) }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *vistos.lock().unwrap(),
+            vec![500, 1000, 1200],
+            "o andamento é o ACUMULADO, um retrato por lote — nunca o tamanho \
+             do lote sozinho"
+        );
+    }
+
+    /// Desistir durante a enumeração para a varredura em vez de deixá-la
+    /// percorrer o espaço de chaves inteiro.
+    #[tokio::test]
+    async fn a_cancelled_enumeration_stops_and_says_so() {
+        let pool = Pool::new();
+        let host = test_host();
+        let cancel = AtomicBool::new(true);
+
+        let enumeration = enumerate(
+            &pool,
+            alvo(&host),
+            &prefixos(&["cancel_scan_rs_test:"]),
+            &cancel,
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            enumeration.cancelled,
+            "a enumeração precisa DIZER que parou por desistência — a tela não \
+             pode receber uma lista cortada como se fosse o prefixo inteiro"
+        );
+        assert!(
+            enumeration.keys.is_empty(),
+            "nenhuma volta do cursor aconteceu"
+        );
+        assert!(
+            !enumeration.truncated,
+            "parar por desistência não é parar no teto"
+        );
     }
 }
